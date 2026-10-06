@@ -1,0 +1,14 @@
+[package]
+name = "txengine-core"
+description = "Core interfaces shared by txengine transmission modes and hardware backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

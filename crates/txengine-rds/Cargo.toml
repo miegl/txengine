@@ -1,0 +1,14 @@
+[package]
+name = "txengine-rds"
+description = "RDS (EN 50067 / IEC 62106) encoder, modulator and verification decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+txengine-dsp.workspace = true
+
+[lints]
+workspace = true

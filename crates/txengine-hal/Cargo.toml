@@ -1,0 +1,17 @@
+[package]
+name = "txengine-hal"
+description = "Raspberry Pi hardware backends for txengine (BCM2835/6/7, BCM2711, BCM2712 + RP1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+txengine-core.workspace = true
+libc.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

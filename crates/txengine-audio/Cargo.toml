@@ -1,0 +1,19 @@
+[package]
+name = "txengine-audio"
+description = "Audio input (decoding, resampling, buffering) for txengine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+log.workspace = true
+thiserror.workspace = true
+rtrb = "0.4"
+rubato = { version = "5.0", default-features = false }
+audioadapter-buffers = "5"
+symphonia = { version = "0.6", default-features = false, features = ["wav", "pcm", "flac", "mp3", "ogg", "vorbis", "aiff", "caf", "isomp4", "aac", "alac", "adpcm", "mkv"] }
+
+[lints]
+workspace = true

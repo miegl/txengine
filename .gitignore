@@ -1,0 +1,4 @@
+/target
+*.cf32
+# Third-party reference material (datasheets, specifications, PiFmAdv)
+/resources

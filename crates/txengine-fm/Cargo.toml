@@ -1,0 +1,18 @@
+[package]
+name = "txengine-fm"
+description = "Wide-band FM broadcast mode (mono/stereo multiplex with RDS) for txengine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+txengine-core.workspace = true
+txengine-dsp.workspace = true
+txengine-rds.workspace = true
+txengine-audio.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

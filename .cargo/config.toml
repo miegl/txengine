@@ -1,0 +1,16 @@
+# Cross-compilation for Raspberry Pi targets.
+#
+# Static musl binaries run on any distribution (Raspberry Pi OS, NixOS, ...)
+# and need no cross C toolchain: Rust's bundled `rust-lld` links them.
+#
+#   cargo build --release --target aarch64-unknown-linux-musl     # Pi 3/4/5/Zero 2 W, 64-bit OS
+#   cargo build --release --target armv7-unknown-linux-musleabihf # Pi 2/3/4/Zero 2 W, 32-bit OS
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.armv7-unknown-linux-musleabihf]
+linker = "rust-lld"
+# Cortex-A7 baseline (NEON, VFPv4): runs on every Pi with a 32-bit capable core.
+rustflags = ["-C", "target-feature=+crt-static", "-C", "target-cpu=cortex-a7"]

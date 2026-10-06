@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/txengine-core",
+    "crates/txengine-dsp",
+    "crates/txengine-rds",
+    "crates/txengine-fm",
+    "crates/txengine-audio",
+    "crates/txengine-hal",
+    "crates/txengine",
+]
+default-members = ["crates/txengine"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+authors = ["Josef Miegl <josef@miegl.cz>"]
+repository = "https://github.com/Miegl/txengine"
+
+[workspace.dependencies]
+txengine-core = { path = "crates/txengine-core" }
+txengine-dsp = { path = "crates/txengine-dsp" }
+txengine-rds = { path = "crates/txengine-rds" }
+txengine-fm = { path = "crates/txengine-fm" }
+txengine-audio = { path = "crates/txengine-audio" }
+txengine-hal = { path = "crates/txengine-hal" }
+
+libc = "0.2"
+log = { version = "0.4", features = ["std"] }
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "allow"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# Unwinding keeps Drop-based hardware restoration working on panics.
+panic = "unwind"
+strip = "symbols"
+
+[profile.dev]
+# The DSP chain is far too slow unoptimised to run in real time.
+opt-level = 2
