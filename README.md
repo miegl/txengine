@@ -49,7 +49,8 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
 |---|---|---|
 | Raspberry Pi 5 | BCM2712 + RP1 | tested over the air (64-bit build) |
 | Raspberry Pi 2 v1.1 | BCM2836 | tested over the air |
-| Raspberry Pi 2 v1.2, 3, 3+, Zero 2 W | BCM2837 | supported, not yet tested on hardware |
+| Raspberry Pi Zero 2 W | BCM2837 (RP3A0) | tested over the air (64-bit and 32-bit builds) |
+| Raspberry Pi 2 v1.2, 3, 3+ | BCM2837 | supported, not yet tested on hardware |
 | Raspberry Pi 4, 400 | BCM2711 | supported, not yet tested on hardware |
 | Raspberry Pi 1, Zero, Zero W | BCM2835 (ARMv6) | not supported |
 
@@ -133,16 +134,17 @@ txengine analyze mpx.wav                                             # levels, p
 Measured over the air with a USRP B210 (`tools/sdr_capture.py`,
 `tools/fm_analyze.py`, `txengine analyze`):
 
-| | Raspberry Pi 5 | Raspberry Pi 2 |
-|---|---|---|
-| Sample rate | 250 kS/s | 194.9 kS/s (measured DMA capacity, see below) |
-| Pilot | 6.749 kHz (target 6.75) | 6.757 kHz |
-| 38 kHz carrier residual | 0.001 % | 0.004 % |
-| Stereo separation (1 kHz, left only) | > 60 dB | > 50 dB |
-| RDS injection | 2.02 kHz (target 2.0) | 2.05 kHz |
-| RDS block errors | 0 % | 0 % |
-| Timing | no sample slips in 25 s tone tests | no sample slips |
-| Modulation THD (10 kHz) | −71 dB | |
+| | Raspberry Pi 5 | Raspberry Pi 2 | Raspberry Pi Zero 2 W |
+|---|---|---|---|
+| Sample rate | 250 kS/s | 194.9 kS/s (measured DMA capacity, see below) | 195.9 kS/s |
+| Pilot | 6.749 kHz (target 6.75) | 6.74-6.76 kHz | 6.75-6.76 kHz |
+| 38 kHz carrier residual | 0.001 % | 0.005 % | 0.006 % |
+| Stereo separation (1 kHz, left only) | > 50 dB | > 50 dB | > 60 dB |
+| RDS injection | 2.02-2.06 kHz (target 2.0) | 2.03 kHz | 2.04 kHz |
+| RDS block errors | 0 % | 0 % | 0 % (also at the end of a 10 min run) |
+| Timing | no sample slips in 25 s tone tests | no sample slips | no sample slips |
+| Modulation THD (10 kHz) | −71 dB | | |
+| CPU (stereo + RDS, one core) | | 24 % at 600 MHz (throttled) | 11 % at 1 GHz, plus 4 % audio decoding |
 
 Hardware-specific findings that txengine handles:
 

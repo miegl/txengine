@@ -153,8 +153,8 @@ divider register, paced by hardware.
   5 and 25 MHz; after starting, the DMA position must advance or the pacer
   is configured again.
 * The DMA engine's write rate to the PLL registers is limited (≈ 231 k
-  writes/s on the Pi 2), so the sample rate is chosen from a measurement at
-  start-up, and the achieved rate is checked continuously.
+  writes/s on the Pi 2 and the Zero 2 W), so the sample rate is chosen from
+  a measurement at start-up, and the achieved rate is checked continuously.
 * The PLL registers sit behind the slow A2W bus, which the firmware also
   uses to change the ARM clock (PLLB). If a firmware write meets one of the
   DMA engine's, it lands in the modulated PLL's registers instead (PLLB's
