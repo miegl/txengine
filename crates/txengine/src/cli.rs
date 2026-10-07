@@ -179,7 +179,7 @@ pub struct ProgrammeArgs {
     /// programme keeps about the MPX power it has without pre-emphasis.
     #[arg(long, default_value_t = 0.0, allow_hyphen_values = true, value_name = "DB", help_heading = "Modulation")]
     pub gain: f64,
-    /// Disable the peak limiter (overload is then hard clipped).
+    /// Disable the limiters (HF and peak); overload is then hard clipped.
     #[arg(long, help_heading = "Modulation")]
     pub no_limiter: bool,
     /// Do not pre-compensate the output stage's sample-and-hold roll-off.

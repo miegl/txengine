@@ -177,9 +177,10 @@ fn render(a: &cli::RenderArgs) -> anyhow::Result<()> {
     );
     let st = m.take_stats().unwrap_or_default();
     info!(
-        "peak deviation {:.1} kHz, MPX power {:+.2} dBr (last 60 s), limiter {:+.1} dB, clipped {}",
+        "peak deviation {:.1} kHz, MPX power {:+.2} dBr (last 60 s), HF limiter {:+.1} dB, limiter {:+.1} dB, clipped {}",
         st.peak_deviation / 1e3,
         st.mpx_power_dbr,
+        -st.hf_limiter_db,
         20.0 * (st.limiter_gain.max(1e-6) as f64).log10(),
         st.clipped
     );

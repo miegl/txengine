@@ -47,14 +47,16 @@ fn main() {
         pi.process(x(i), &mut out);
         out[0]
     });
-    let mut lim = FrameLimiter::new(5, 50_000.0, 1.0, 0.0015, 0.08);
-    let (mut a, mut b) = ([0f32; 5], [0f32; 5]);
-    run("limiter (per 5-sample frame)", n / 5, |i| {
-        let v = 1.5 * x(i);
-        let a_in = [v; 5];
-        lim.process(v.abs(), &a_in, &a_in, &mut a, &mut b);
-        a[0]
-    });
+    for (name, boost) in [("limiter, idle (per 5-sample frame)", 0.2), ("limiter, HF overload", 2.0)] {
+        let mut lim = PreemphasisLimiter::new(5, 50_000.0, 1.0, 0.0015, 0.05, 0.08);
+        let (mut a, mut b) = ([0f32; 5], [0f32; 5]);
+        run(name, n / 5, |i| {
+            let v = 0.6 * x(i);
+            let (x_in, d_in) = ([v; 5], [boost * x(i + 1); 5]);
+            lim.process(&x_in, &x_in, &d_in, &d_in, &mut a, &mut b);
+            a[0]
+        });
+    }
     let mut pre = Preemphasis::new(50e-6, 50_000.0, 15_000.0);
     run("preemphasis", n, |i| pre.process(0, x(i)));
     let mut acc = PhaseAccumulator::new(19_000.0, 250_000.0);

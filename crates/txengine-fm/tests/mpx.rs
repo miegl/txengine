@@ -1,6 +1,6 @@
 //! Multiplex conformance tests (ITU-R BS.450-4, EN 50067).
 
-use txengine_dsp::{FirDesign, sinc};
+use txengine_dsp::{FirDesign, Preemphasis, sinc};
 use txengine_fm::mpx::{AudioFeed, MpxConfig, MpxGenerator, StereoMode};
 use txengine_rds::decoder::decode_mpx;
 use txengine_rds::encoder::{encode8, encode_rt};
@@ -340,4 +340,68 @@ fn preemphasis_keeps_the_mpx_power_of_pink_noise() {
     for (tau, p) in [(50, emph50), (75, emph75)] {
         assert!(p < flat + 0.1 && p > flat - 0.7, "{tau} µs: {p:.2} dBr vs {flat:.2} dBr without pre-emphasis");
     }
+}
+
+#[test]
+fn pink_noise_at_0_dbr_is_not_limited() {
+    // Mostly mono pink noise, a Gaussian programme with a crest factor of
+    // about 14 dB, at 0 dBr including pilot and RDS: neither limiter acts
+    // (the HF limiter starts at about +2 dBr).
+    let fs = 250_000.0;
+    let flat = MpxConfig { preemphasis: None, limiter: false, ..Default::default() };
+    let p0 = render_feed(flat, fs, &mut Pink::new(0.1, 0.3), 4.0).stats(false).mpx_power_dbr;
+    let pilot_rds = render_feed(MpxConfig::default(), fs, &mut Pink::new(0.0, 0.0), 4.0).stats(false).mpx_power_dbr;
+    // Gain that puts the flat programme at 0 dBr in total.
+    let audio = |dbr: f64| 10.0 * (10f64.powf(dbr / 10.0) - 10f64.powf(pilot_rds / 10.0)).log10();
+    let gain_db = audio(0.0) - audio(p0);
+    let mut mpx = render_feed(MpxConfig { gain_db, ..Default::default() }, fs, &mut Pink::new(0.1, 0.3), 4.0);
+    let st = mpx.stats(false);
+    assert!(st.mpx_power_dbr.abs() < 0.6, "MPX power {:.2} dBr", st.mpx_power_dbr);
+    assert_eq!(st.limiter_gain, 1.0, "peak limiter acted");
+    assert_eq!(st.hf_limiter_db, 0.0, "HF limiter acted");
+    assert_eq!(st.clipped, 0);
+}
+
+#[test]
+fn hf_overload_lowers_only_the_treble() {
+    // 1 kHz at 0.5 plus 10 kHz at 0.4 of full scale: the flat signal fits,
+    // the pre-emphasised 10 kHz (+10.4 dB) does not. Only the treble may be
+    // reduced: the 1 kHz level changes by at most the 0.4 dB the
+    // pre-emphasis adds at 1 kHz, and the peak limiter does not act.
+    let fs = 250_000.0;
+    struct TwoTones {
+        fa: f64,
+        n: u64,
+    }
+    impl AudioFeed for TwoTones {
+        fn read(&mut self, out: &mut [[f32; 2]]) -> usize {
+            for o in out.iter_mut() {
+                let t = self.n as f64 / self.fa;
+                let v = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin() + 0.4 * (2.0 * std::f64::consts::PI * 10_000.0 * t).sin();
+                *o = [v as f32; 2];
+                self.n += 1;
+            }
+            out.len()
+        }
+    }
+    let cfg = MpxConfig { rds_deviation: 0.0, hold_compensation: false, ..Default::default() };
+    let mut mpx = MpxGenerator::new(cfg.clone(), fs, true).unwrap();
+    let mut audio = TwoTones { fa: mpx.audio_rate(), n: 0 };
+    let mut rds = RdsEncoder::new(RdsParams::default()).unwrap();
+    let mut x = vec![0f32; (fs * 2.0) as usize];
+    for chunk in x.chunks_mut(4096) {
+        mpx.render(chunk, &mut audio, &mut rds, 0.0);
+    }
+    let st = mpx.stats(false);
+    assert_eq!(st.limiter_gain, 1.0, "the whole programme was limited");
+    assert!(st.hf_limiter_db > 1.0, "HF limiter inactive ({} dB)", st.hf_limiter_db);
+    let peak = x.iter().fold(0f32, |m, &v| m.max(v.abs()));
+    assert!(peak <= 75_000.0);
+    let (lf, _) = component(&x, fs, 1000.0);
+    let nominal = 0.5 * txengine_dsp::from_db(mpx.drive_db()) * mpx.audio_deviation();
+    let change = 20.0 * (lf / nominal).log10();
+    assert!((-0.05..0.45).contains(&change), "1 kHz level {change:+.2} dB re flat");
+    let (hf, _) = component(&x, fs, 10_000.0);
+    let full = 0.4 * txengine_dsp::from_db(mpx.drive_db()) * mpx.audio_deviation() * Preemphasis::new(50e-6, mpx.audio_rate(), 15_000.0).gain_at(10_000.0, mpx.audio_rate());
+    assert!(hf < 0.9 * full, "10 kHz {hf} Hz, unlimited {full} Hz");
 }

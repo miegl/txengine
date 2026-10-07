@@ -70,6 +70,20 @@ impl Preemphasis {
         crate::from_db(response_db(self.a as f64, self.b as f64, f, fs))
     }
 
+    /// Gain in dB at `f` with only the fraction `k` of the boost applied,
+    /// `1 + k (H - 1)` (as the [`crate::PreemphasisLimiter`] does).
+    pub fn partial_gain_db(&self, k: f64, f: f64, fs: f64) -> f64 {
+        let w = 2.0 * std::f64::consts::PI * f / fs;
+        let (c, s) = (w.cos(), w.sin());
+        let (g, a, b) = (self.g as f64, self.a as f64, self.b as f64);
+        // H = g (1 - b z^-1) / (1 - a z^-1) at z^-1 = c - js.
+        let (nr, ni) = (g * (1.0 - b * c), g * b * s);
+        let (dr, di) = (1.0 - a * c, a * s);
+        let den = dr * dr + di * di;
+        let (hr, hi) = ((nr * dr + ni * di) / den, (ni * dr - nr * di) / den);
+        crate::db((1.0 + k * (hr - 1.0)).hypot(k * hi))
+    }
+
     /// How much the filter raises the power of pink noise band-limited to
     /// `f_lo` – `f_hi` Hz, in dB (the mean of the power response over
     /// log-frequency). Programme material is rarely brighter than pink
@@ -119,6 +133,16 @@ mod tests {
             let got = p.pink_power_gain_db(50_000.0, 20.0, 15_000.0);
             assert!((got - want).abs() < 0.03, "tau {tau}: {got} dB");
         }
+    }
+
+    #[test]
+    fn partial_gain() {
+        let (fs, f) = (50_000.0, 15_000.0);
+        let p = Preemphasis::new(50e-6, fs, 15_000.0);
+        assert!((p.partial_gain_db(1.0, f, fs) - crate::db(p.gain_at(f, fs))).abs() < 1e-4);
+        assert!(p.partial_gain_db(0.0, f, fs).abs() < 1e-12);
+        let half = p.partial_gain_db(0.5, f, fs);
+        assert!(half > 0.0 && half < p.partial_gain_db(1.0, f, fs));
     }
 
     #[test]

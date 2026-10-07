@@ -30,14 +30,18 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
   can be given instead (`--ppm`).
 * **Multiplex** (all derived from one phase accumulator, so pilot, 38 kHz,
   57 kHz and the RDS bit clock are exactly locked): 50/75 µs pre-emphasis,
-  15 kHz programme low-pass, look-ahead peak limiter that bounds the true
+  15 kHz programme low-pass, look-ahead limiter that bounds the true
   (inter-sample) composite peak, 19 kHz pilot, DSB-SC stereo subcarrier,
   RDS, and pre-compensation of the output stage's measured frequency
   response (sample-and-hold and, on the Pi 2 and Zero 2 W, the PLL loop).
 * **Levels**: the drive is lowered by the rise of the multiplex power the
   pre-emphasis causes for pink noise (4.3 dB at 50 µs), so a programme keeps
   about the MPX power (ITU-R BS.412) it has without pre-emphasis; the status
-  line meters it over the last 60 s.
+  line meters it over the last 60 s. The limiter is pre-emphasis-aware: a
+  high-frequency overload only reduces the pre-emphasis boost for a moment
+  (less treble), and the whole programme is only turned down when it is
+  over full scale without pre-emphasis. A programme at 0 dBr is normally
+  transmitted unlimited.
 * **RDS**: PS, RadioText (A/B flag, 0x0D termination), PTY, PTYN, PI, TP/TA,
   MS, DI, alternative frequencies (method A), clock time (placed at the
   minute edge using the actual emission time), ECC/LIC; EBU Latin character

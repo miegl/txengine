@@ -11,7 +11,7 @@ pub mod preemphasis;
 pub mod window;
 
 pub use fir::{Fir, FirDesign, LinearPhaseFir, PolyphaseInterpolator};
-pub use limiter::FrameLimiter;
+pub use limiter::{LookaheadGain, PreemphasisLimiter};
 pub use nco::{PhaseAccumulator, SineTable};
 pub use preemphasis::Preemphasis;
 

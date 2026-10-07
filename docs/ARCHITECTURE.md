@@ -25,7 +25,7 @@ transmission mode or a hardware platform means implementing one side.
 | Crate | Contents |
 |---|---|
 | `txengine-core` | `Modulator` and `RfSink` traits, `SinkInfo`, `RenderContext`. No dependencies. |
-| `txengine-dsp` | Allocation-free DSP blocks: Kaiser FIR design, linear-phase block FIRs, polyphase interpolator, pre-emphasis, frame-based look-ahead limiter, phase accumulator and sine table, small optimiser. |
+| `txengine-dsp` | Allocation-free DSP blocks: Kaiser FIR design, linear-phase block FIRs, polyphase interpolator, pre-emphasis, pre-emphasis-aware look-ahead limiter, phase accumulator and sine table, small optimiser. |
 | `txengine-rds` | EN 50067: group coding and CRC, character set, scheduler/encoder, the physical layer (`RdsModulator`), and an independent decoder used by tests and `analyze`. |
 | `txengine-fm` | The wide-band FM mode: `MpxGenerator` (stereo multiplex) and `WfmModulator` (the `Modulator` implementation, control commands). |
 | `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input. |
@@ -80,26 +80,38 @@ produce it advertise it.
 
 All per-sample work happens in blocks of up to 512 output samples, one stage
 at a time; this keeps the inner loops short, which matters on the in-order
-Cortex-A7/A53 cores. On a Pi 2 throttled to 600 MHz, transmitting stereo +
-RDS at 195 kS/s takes about 24 % of one core for the transmit thread and
-16 % for decoding and resampling the audio.
+Cortex-A7/A53 cores. On a Pi 2 at 900 MHz, transmitting stereo + RDS at
+195 kS/s from a FLAC file takes about 33 % of one core for the transmit
+thread (28 % without the separate interpolation of the pre-emphasis boost
+the limiter needs) and 23 % for decoding and resampling the audio.
 
 1. **Audio rate** `fa = fs / round(fs / 48 kHz)`: gain, mono mix (if not
-   stereo), pre-emphasis (first-order shelf fitted minimax to the analogue
-   curve, ≤ 0.06 dB), 15 kHz low-pass (≥ 80 dB from 18.5 kHz), M/S.
+   stereo), 15 kHz low-pass (≥ 80 dB from 18.5 kHz), pre-emphasis
+   (first-order shelf fitted minimax to the analogue curve, ≤ 0.06 dB), M/S.
+   With the limiter on, the flat programme `x` and the boost the
+   pre-emphasis adds, `d` (pre-emphasised = `x + d`), are kept apart.
    The gain includes a drive correction: minus the rise of the power of
    pink noise (20 Hz – 15 kHz) through the pre-emphasis, 4.3 dB at 50 µs,
    6.8 dB at 75 µs. BS.412 limits the power of the pre-emphasised
    multiplex; with the correction a programme no brighter than pink noise
    (music rarely is) keeps the MPX power it has without pre-emphasis.
 2. **Interpolation** to `fs`: polyphase FIR, ≥ 90 dB image rejection; the
-   branches are evaluated together with independent accumulators.
-3. **Limiter**: peak of `|M| + |S|` per audio-rate frame, measured on the
-   interpolated samples (so it bounds the true peak of `M + S·sin 2φ`, which
-   lies between L and R). Gain = box-average over the look-ahead of the
-   sliding minimum of the required gain, with a slow release; interpolated
-   linearly across each frame. The construction guarantees the threshold
-   for every sample.
+   branches are evaluated together with independent accumulators. With the
+   limiter, `x` and `d` are interpolated separately (four channels in
+   stereo).
+3. **Limiter**, per audio-rate frame on the interpolated samples, so it
+   bounds the true peak of `M + S·sin 2φ`, which lies between L and R
+   (`max(|L|, |R|) = |M| + |S|`). Two gains: the HF gain `h` scales only the
+   boost, the peak gain `g` everything: output `g·(x + h·d)`. `h` is the
+   largest gain with `|x + h·d| ≤ max(T, |x|)` for every sample of L and R:
+   a high-frequency overload is resolved by reducing the pre-emphasis for
+   a moment, which a receiver hears as less treble rather than the whole
+   programme ducking. After that every sample is within `max(T, |x|)`, so
+   `g` follows from the flat peak alone and only acts when the flat
+   programme is over full scale. Each gain = box-average over the
+   look-ahead (1.5 ms) of the sliding minimum of the required gain, with a
+   release (HF 50 ms, peak 80 ms); interpolated linearly across each frame.
+   The construction guarantees the threshold for every sample.
 4. **Composite**: `a·(M + S·sin 2φ) + p·sin φ + r·rds·sin 3φ`, where φ is a
    single 19 kHz phase accumulator (64-bit, 40 fractional bits). sin 2φ and
    sin 3φ are computed from sin φ and cos φ, so all subcarriers are exactly
