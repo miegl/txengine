@@ -85,10 +85,24 @@ pub fn run(a: &AnalyzeArgs) -> anyhow::Result<()> {
     let body = &x[skip.min(x.len())..];
     let peak = body.iter().fold(0f32, |m, &v| m.max(v.abs()));
     let mean = body.iter().map(|&v| v as f64).sum::<f64>() / body.len() as f64;
-    let power = body.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / body.len() as f64;
     println!("Deviation:  peak {:.2} kHz, mean (carrier offset) {:+.1} Hz", peak / 1e3, mean);
-    // ITU-R BS.412: 0 dBr = power of a sine with ±19 kHz peak deviation.
-    println!("MPX power:  {:+.2} dBr (BS.412 limit +0 dBr, measured over 60 s)", 10.0 * (power / (19_000f64.powi(2) / 2.0)).log10());
+    // ITU-R BS.412: the power over any 60 s must not exceed 0 dBr, the
+    // power of a sine with ±19 kHz peak deviation. Report the worst window
+    // (the whole recording if shorter).
+    let window = ((fs * 60.0) as usize).min(body.len());
+    let sq: Vec<f64> = body.iter().map(|&v| (v as f64 - mean).powi(2)).collect();
+    let mut sum: f64 = sq[..window].iter().sum();
+    let mut worst = sum;
+    for i in window..sq.len() {
+        sum += sq[i] - sq[i - window];
+        worst = worst.max(sum);
+    }
+    let dbr = 10.0 * (worst / window as f64 / (19_000f64.powi(2) / 2.0)).log10();
+    if window < sq.len() {
+        println!("MPX power:  {dbr:+.2} dBr in the worst 60 s (BS.412 limit +0 dBr)");
+    } else {
+        println!("MPX power:  {dbr:+.2} dBr over {:.1} s (BS.412 limit +0 dBr over any 60 s)", window as f64 / fs);
+    }
 
     let (pilot, pilot_ph, pilot_f) = find_tone(body, fs, 19_000.0, 20.0);
     let stereo = pilot > 1_000.0;
