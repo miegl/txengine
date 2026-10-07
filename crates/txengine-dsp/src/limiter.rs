@@ -110,11 +110,14 @@ impl FrameLimiter {
         }
         let avg = crate::fmin(self.boxsum / self.look as f32, 1.0);
 
-        // Attack instantly to the averaged gain, release slowly.
+        // Attack instantly to the averaged gain, release slowly. Close to
+        // the target the release step drops below the resolution of f32
+        // and the follower would stall short of it: it then jumps there.
         if avg < self.follower {
             self.follower = avg;
         } else {
-            self.follower += (avg - self.follower) * self.release;
+            let next = self.follower + (avg - self.follower) * self.release;
+            self.follower = if next == self.follower { avg } else { next };
         }
         crate::fmin(self.follower, avg)
     }
@@ -183,6 +186,30 @@ mod tests {
             let worst = out.iter().fold(0f32, |m, &(a, b)| m.max(a.abs().max(b.abs())));
             assert!(worst <= 1.0 + 1e-5, "frame {frame}: peak {worst}");
         }
+    }
+
+    #[test]
+    fn gain_recovers_to_unity() {
+        // An f32 release follower can stall just short of 1: after an
+        // overload the gain must come back to exactly 1.
+        let mut lim = FrameLimiter::new(5, 48_000.0, 1.0, 0.0015, 0.1);
+        let frame = |lim: &mut FrameLimiter, k: usize, level: f32| {
+            let (mut a, mut b) = ([0f32; 5], [0f32; 5]);
+            let v = [level * (k as f32 * 0.05).sin(); 5];
+            lim.process(level, &v, &v, &mut a, &mut b);
+        };
+        for k in 0..2_000 {
+            frame(&mut lim, k, 2.0);
+        }
+        assert!(lim.take_min_gain() < 1.0);
+        for k in 0..100_000 {
+            frame(&mut lim, k, 0.3);
+        }
+        lim.take_min_gain();
+        for k in 0..1_000 {
+            frame(&mut lim, k, 0.3);
+        }
+        assert_eq!(lim.take_min_gain(), 1.0);
     }
 
     #[test]
