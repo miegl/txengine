@@ -173,7 +173,10 @@ pub struct ProgrammeArgs {
     /// Same as --stereo mono.
     #[arg(long, help_heading = "Modulation")]
     pub mono: bool,
-    /// Input gain in dB.
+    /// Input gain in dB. With pre-emphasis, the level is already lowered by
+    /// the rise of the multiplex power (ITU-R BS.412) the pre-emphasis
+    /// causes for pink noise (4.3 dB at 50 µs, 6.8 dB at 75 µs), so a
+    /// programme keeps about the MPX power it has without pre-emphasis.
     #[arg(long, default_value_t = 0.0, allow_hyphen_values = true, value_name = "DB", help_heading = "Modulation")]
     pub gain: f64,
     /// Disable the peak limiter (overload is then hard clipped).

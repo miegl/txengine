@@ -70,6 +70,19 @@ impl Preemphasis {
         crate::from_db(response_db(self.a as f64, self.b as f64, f, fs))
     }
 
+    /// How much the filter raises the power of pink noise band-limited to
+    /// `f_lo` – `f_hi` Hz, in dB (the mean of the power response over
+    /// log-frequency). Programme material is rarely brighter than pink
+    /// noise, so this bounds the rise of its power.
+    pub fn pink_power_gain_db(&self, fs: f64, f_lo: f64, f_hi: f64) -> f64 {
+        const N: usize = 2000;
+        let r = (f_hi / f_lo).ln();
+        let p = |i: usize| crate::from_db(2.0 * response_db(self.a as f64, self.b as f64, f_lo * (r * i as f64 / N as f64).exp(), fs));
+        // Trapezoidal rule on a uniform log-frequency grid.
+        let sum: f64 = (1..N).map(p).sum::<f64>() + 0.5 * (p(0) + p(N));
+        10.0 * (sum / N as f64).log10()
+    }
+
     /// Process one sample of channel `ch` (0 or 1).
     #[inline]
     pub fn process(&mut self, ch: usize, x: f32) -> f32 {
@@ -95,6 +108,16 @@ mod tests {
                 let got = crate::db(p.gain_at(15_000.0, fs));
                 assert!((got - want).abs() < 0.06);
             }
+        }
+    }
+
+    #[test]
+    fn pink_noise_power_gain() {
+        // Analogue curve, 20 Hz - 15 kHz: 4.28 dB (50 us), 6.79 dB (75 us).
+        for (tau, want) in [(50e-6, 4.28), (75e-6, 6.79)] {
+            let p = Preemphasis::new(tau, 50_000.0, 15_000.0);
+            let got = p.pink_power_gain_db(50_000.0, 20.0, 15_000.0);
+            assert!((got - want).abs() < 0.03, "tau {tau}: {got} dB");
         }
     }
 

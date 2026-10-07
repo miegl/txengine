@@ -140,7 +140,7 @@ impl Modulator for WfmModulator {
             self.cfg.rds_deviation / 1e3,
             if self.rds_enabled { "" } else { " (off)" },
             self.cfg.max_deviation / 1e3,
-            self.cfg.preemphasis.map_or("off".to_string(), |t| format!("{:.0} µs", t * 1e6)),
+            self.cfg.preemphasis.map_or("off".to_string(), |t| format!("{:.0} µs (drive {:+.1} dB to keep the MPX power)", t * 1e6, mpx.drive_db())),
             mpx.audio_rate()
         );
         let mut mpx = mpx;

@@ -34,6 +34,10 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
   (inter-sample) composite peak, 19 kHz pilot, DSB-SC stereo subcarrier,
   RDS, and pre-compensation of the output stage's measured frequency
   response (sample-and-hold and, on the Pi 2 and Zero 2 W, the PLL loop).
+* **Levels**: the drive is lowered by the rise of the multiplex power the
+  pre-emphasis causes for pink noise (4.3 dB at 50 µs), so a programme keeps
+  about the MPX power (ITU-R BS.412) it has without pre-emphasis; the status
+  line meters it over the last 60 s.
 * **RDS**: PS, RadioText (A/B flag, 0x0D termination), PTY, PTYN, PI, TP/TA,
   MS, DI, alternative frequencies (method A), clock time (placed at the
   minute edge using the actual emission time), ECC/LIC; EBU Latin character

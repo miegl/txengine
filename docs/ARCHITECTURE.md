@@ -87,6 +87,11 @@ RDS at 195 kS/s takes about 24 % of one core for the transmit thread and
 1. **Audio rate** `fa = fs / round(fs / 48 kHz)`: gain, mono mix (if not
    stereo), pre-emphasis (first-order shelf fitted minimax to the analogue
    curve, ≤ 0.06 dB), 15 kHz low-pass (≥ 80 dB from 18.5 kHz), M/S.
+   The gain includes a drive correction: minus the rise of the power of
+   pink noise (20 Hz – 15 kHz) through the pre-emphasis, 4.3 dB at 50 µs,
+   6.8 dB at 75 µs. BS.412 limits the power of the pre-emphasised
+   multiplex; with the correction a programme no brighter than pink noise
+   (music rarely is) keeps the MPX power it has without pre-emphasis.
 2. **Interpolation** to `fs`: polyphase FIR, ≥ 90 dB image rejection; the
    branches are evaluated together with independent accumulators.
 3. **Limiter**: peak of `|M| + |S|` per audio-rate frame, measured on the

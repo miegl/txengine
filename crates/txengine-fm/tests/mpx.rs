@@ -263,6 +263,57 @@ fn subcarriers_follow_the_actual_sample_rate() {
     assert!(uncorrected < 0.1 * pilot, "{uncorrected}");
 }
 
+/// Pink noise (Paul Kellett's refined filter on a fixed white sequence):
+/// `L = p + w·q`, `R = p - w·q` with independent pink `p`, `q`, scaled by `amp`.
+struct Pink {
+    amp: f32,
+    width: f32,
+    seed: u32,
+    state: [[f32; 7]; 2],
+}
+
+impl Pink {
+    fn new(amp: f32, width: f32) -> Pink {
+        Pink { amp, width, seed: 1, state: [[0.0; 7]; 2] }
+    }
+
+    fn next(&mut self, ch: usize) -> f32 {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let w = (self.seed >> 8) as f32 / (1 << 23) as f32 - 1.0;
+        let b = &mut self.state[ch];
+        b[0] = 0.99886 * b[0] + w * 0.0555179;
+        b[1] = 0.99332 * b[1] + w * 0.0750759;
+        b[2] = 0.96900 * b[2] + w * 0.153_852;
+        b[3] = 0.86650 * b[3] + w * 0.3104856;
+        b[4] = 0.55000 * b[4] + w * 0.5329522;
+        b[5] = -0.7616 * b[5] - w * 0.016_898;
+        let p = b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + w * 0.5362;
+        b[6] = w * 0.115926;
+        0.11 * p
+    }
+}
+
+impl AudioFeed for Pink {
+    fn read(&mut self, out: &mut [[f32; 2]]) -> usize {
+        for o in out.iter_mut() {
+            let (p, q) = (self.next(0), self.next(1));
+            *o = [self.amp * (p + self.width * q), self.amp * (p - self.width * q)];
+        }
+        out.len()
+    }
+}
+
+/// Render `seconds` of `audio` and return the generator (for its meters).
+fn render_feed(cfg: MpxConfig, fs: f64, audio: &mut dyn AudioFeed, seconds: f64) -> MpxGenerator {
+    let mut mpx = MpxGenerator::new(cfg, fs, true).unwrap();
+    let mut rds = RdsEncoder::new(RdsParams::default()).unwrap();
+    let mut out = vec![0f32; 4096];
+    for _ in 0..(fs * seconds) as usize / out.len() {
+        mpx.render(&mut out, audio, &mut rds, 0.0);
+    }
+    mpx
+}
+
 #[test]
 fn mpx_power_meter_bs412() {
     // A sine of ±19 kHz deviation is 0 dBr.
@@ -272,4 +323,21 @@ fn mpx_power_meter_bs412() {
     let (_, mut mpx) = render(cfg, fs, (1000.0, amp), (1000.0, amp), 3.0);
     let p = mpx.stats(false).mpx_power_dbr;
     assert!(p.abs() < 0.05, "MPX power {p} dBr");
+}
+
+#[test]
+fn preemphasis_keeps_the_mpx_power_of_pink_noise() {
+    // The drive correction makes the pre-emphasis power neutral for pink
+    // noise (the test noise also has power below 20 Hz, which the
+    // pre-emphasis does not raise, so it ends up a little lower).
+    let fs = 250_000.0;
+    let base = MpxConfig { rds_deviation: 0.0, stereo: StereoMode::Mono, limiter: false, ..Default::default() };
+    let power = |preemphasis: Option<f64>| {
+        let cfg = MpxConfig { preemphasis, ..base.clone() };
+        render_feed(cfg, fs, &mut Pink::new(0.1, 0.0), 4.0).stats(false).mpx_power_dbr
+    };
+    let (flat, emph50, emph75) = (power(None), power(Some(50e-6)), power(Some(75e-6)));
+    for (tau, p) in [(50, emph50), (75, emph75)] {
+        assert!(p < flat + 0.1 && p > flat - 0.7, "{tau} µs: {p:.2} dBr vs {flat:.2} dBr without pre-emphasis");
+    }
 }

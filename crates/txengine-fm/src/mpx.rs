@@ -7,6 +7,14 @@
 //!   deviation = A·(M + S·sin 2φ) + P·sin φ + R·rds(t)·sin 3φ ─► 1/sinc ─► clip ─► out
 //! ```
 //!
+//! Levels: full scale is the audio deviation, but the pre-emphasis raises
+//! the multiplex power that ITU-R BS.412 limits (to 0 dBr, the power of a
+//! ±19 kHz sine). The gain therefore includes a drive correction: minus the
+//! rise of the power of pink noise, a spectrum programme material rarely
+//! exceeds in brightness (4.3 dB at 50 µs, 6.8 dB at 75 µs). A programme no
+//! brighter than pink noise is then transmitted at about, and not above, the
+//! multiplex power it would have without pre-emphasis.
+//!
 //! The look-ahead limiter measures `|M| + |S|` at the output rate, which is
 //! exactly the peak of the audio part of the composite (`M + S·sin 2φ`
 //! interpolates between `L` and `R`), so audio, pilot and RDS together
@@ -60,7 +68,8 @@ pub struct MpxConfig {
     /// Audio low-pass cut-off (pass-band edge) in Hz.
     pub cutoff: f64,
     pub stereo: StereoMode,
-    /// Input gain in dB applied before processing.
+    /// Input gain in dB, on top of the pre-emphasis drive correction (see
+    /// [`MpxGenerator::drive_db`]).
     pub gain_db: f64,
     /// Look-ahead peak limiter on the pre-emphasised audio.
     pub limiter: bool,
@@ -192,6 +201,8 @@ pub struct MpxGenerator {
     fa: f64,
     stereo: bool,
     gain: f32,
+    /// Drive correction for the pre-emphasis (dB, included in `gain`).
+    drive_db: f64,
     pre: Option<Preemphasis>,
     lpf: LinearPhaseFir,
     limiter: FrameLimiter,
@@ -253,6 +264,8 @@ impl MpxGenerator {
         let rds = RdsModulator::new();
         let rds_peak = cfg.rds_deviation * rds.peak_factor() as f64;
         let pilot = if stereo { cfg.pilot_deviation } else { 0.0 };
+        let pre = cfg.preemphasis.map(|tau| Preemphasis::new(tau, fa, cfg.cutoff));
+        let drive_db = pre.as_ref().map_or(0.0, |p| -p.pink_power_gain_db(fa, 20.0, cfg.cutoff));
         // Leave ~1 % for interpolation overshoot of the audio.
         let a_dev = cfg.audio_deviation.unwrap_or((cfg.max_deviation - pilot - rds_peak) * 0.99);
         if a_dev <= 0.0 {
@@ -285,8 +298,9 @@ impl MpxGenerator {
             factor,
             fa,
             stereo,
-            gain: txengine_dsp::from_db(cfg.gain_db) as f32,
-            pre: cfg.preemphasis.map(|tau| Preemphasis::new(tau, fa, cfg.cutoff)),
+            gain: txengine_dsp::from_db(cfg.gain_db + drive_db) as f32,
+            drive_db,
+            pre,
             lpf: LinearPhaseFir::new(&lp),
             limiter: FrameLimiter::new(factor, fa, 1.0, 0.0015, 0.08),
             interp: [PolyphaseInterpolator::new(factor, &ip), PolyphaseInterpolator::new(factor, &ip)],
@@ -342,10 +356,19 @@ impl MpxGenerator {
         self.a_dev as f64
     }
 
+    /// Drive correction for the pre-emphasis in dB (0 without it): the
+    /// level is lowered by the rise of the multiplex power the pre-emphasis
+    /// causes for pink noise. The gain applies on top of it.
+    pub fn drive_db(&self) -> f64 {
+        self.drive_db
+    }
+
     pub fn set_gain_db(&mut self, db: f64) {
         self.cfg.gain_db = db;
-        self.gain = txengine_dsp::from_db(db) as f32;
+        self.gain = txengine_dsp::from_db(db + self.drive_db) as f32;
     }
+
+
 
     pub fn set_rds_enabled(&mut self, on: bool) {
         self.rds_on = on;
