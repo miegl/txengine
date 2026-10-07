@@ -183,10 +183,11 @@ pub fn run(
             let drift = field("audio_drift_ppm").map(|v| format!(", input drift {v} ppm")).unwrap_or_default();
             let crystal = clock.as_deref().map(|c| format!(", {}", c.summary())).unwrap_or_default();
             info!(
-                "status: {:.1} s, rate {:.1} S/s, peak deviation {:.1} kHz, limiter {:+.1} dB, clipped {}, audio underruns {}, output underruns {}{audio}{drift}{crystal}",
+                "status: {:.1} s, rate {:.1} S/s, peak deviation {:.1} kHz, MPX power {:+.1} dBr, limiter {:+.1} dB, clipped {}, audio underruns {}, output underruns {}{audio}{drift}{crystal}",
                 start.elapsed().as_secs_f64(),
                 (p.consumed - summary.samples) as f64 / dt,
                 st.peak_deviation / 1e3,
+                st.mpx_power_dbr,
                 20.0 * (st.limiter_gain.max(1e-6) as f64).log10(),
                 st.clipped,
                 st.audio_underruns,

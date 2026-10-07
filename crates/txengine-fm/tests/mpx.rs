@@ -262,3 +262,14 @@ fn subcarriers_follow_the_actual_sample_rate() {
     let (uncorrected, _) = component(&x, fs, 19_000.0);
     assert!(uncorrected < 0.1 * pilot, "{uncorrected}");
 }
+
+#[test]
+fn mpx_power_meter_bs412() {
+    // A sine of ±19 kHz deviation is 0 dBr.
+    let fs = 250_000.0;
+    let cfg = MpxConfig { preemphasis: None, rds_deviation: 0.0, stereo: StereoMode::Mono, ..Default::default() };
+    let amp = 19_000.0 / MpxGenerator::new(cfg.clone(), fs, false).unwrap().audio_deviation();
+    let (_, mut mpx) = render(cfg, fs, (1000.0, amp), (1000.0, amp), 3.0);
+    let p = mpx.stats(false).mpx_power_dbr;
+    assert!(p.abs() < 0.05, "MPX power {p} dBr");
+}

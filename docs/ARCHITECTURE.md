@@ -101,7 +101,8 @@ RDS at 195 kS/s takes about 24 % of one core for the transmit thread and
    phase locked; the RDS bit clock is the same accumulator divided by 16.
 5. **Output equaliser**: a linear-phase FIR (9 or 11 taps), least-squares
    fit to `1 / (sinc(f/fs) · measured response)` up to 62 kHz.
-6. **Safety clip** at the maximum deviation and peak metering.
+6. **Safety clip** at the maximum deviation, peak metering, and the MPX
+   power (BS.412) over the last 60 s, in one-second buckets.
 
 RDS: the data are differentially encoded and each bit produces a biphase
 symbol filtered by `H_T(f) = cos(π f td / 4)`, whose impulse response is used

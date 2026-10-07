@@ -30,6 +30,9 @@ use txengine_rds::{RdsEncoder, RdsModulator};
 /// Output samples per processing block.
 const BLOCK: usize = 512;
 
+/// ITU-R BS.412 reference: 0 dBr is the power of a sine of ±19 kHz deviation (Hz²).
+const MPX_POWER_REF: f64 = 19_000.0 * 19_000.0 / 2.0;
+
 /// Stereo coding of the multiplex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StereoMode {
@@ -93,6 +96,9 @@ pub struct MpxStats {
     pub peak_deviation: f64,
     /// Lowest limiter gain since the last reset (1.0 = no limiting).
     pub limiter_gain: f32,
+    /// Multiplex power over the last 60 s (or since the start), in dBr
+    /// (ITU-R BS.412).
+    pub mpx_power_dbr: f64,
     /// Samples clipped by the final deviation limiter since start.
     pub clipped: u64,
     /// Audio frames that had to be substituted with silence since start.
@@ -132,6 +138,50 @@ impl AudioFeed for NoAudio {
     }
 }
 
+/// Multiplex power over the last 60 s (ITU-R BS.412), kept in buckets of
+/// about one second.
+#[derive(Debug, Clone)]
+struct PowerMeter {
+    bucket_len: u64,
+    /// Energy (Hz²·samples) and length of the bucket being filled.
+    energy: f64,
+    n: u64,
+    /// Completed buckets: (energy, samples).
+    ring: Vec<(f64, u64)>,
+    pos: usize,
+}
+
+impl PowerMeter {
+    fn new(fs: f64) -> PowerMeter {
+        PowerMeter { bucket_len: fs.round() as u64, energy: 0.0, n: 0, ring: Vec::with_capacity(60), pos: 0 }
+    }
+
+    fn add(&mut self, block: &[f32]) {
+        self.energy += block.iter().map(|&v| v * v).sum::<f32>() as f64;
+        self.n += block.len() as u64;
+        if self.n >= self.bucket_len {
+            let b = (std::mem::take(&mut self.energy), std::mem::take(&mut self.n));
+            if self.ring.len() < 60 {
+                self.ring.push(b);
+            } else {
+                self.ring[self.pos] = b;
+                self.pos = (self.pos + 1) % 60;
+            }
+        }
+    }
+
+    /// Power over the window in dBr (the bucket being filled replaces the
+    /// oldest one only once the window is full).
+    fn dbr(&self) -> f64 {
+        let (e, n) = self.ring.iter().fold((self.energy, self.n), |a, b| (a.0 + b.0, a.1 + b.1));
+        let (e, n) = if self.ring.len() == 60 { (e - self.ring[self.pos].0, n - self.ring[self.pos].1) } else { (e, n) };
+        if n == 0 {
+            return f64::NEG_INFINITY;
+        }
+        10.0 * (e / n as f64 / MPX_POWER_REF).log10()
+    }
+}
+
 /// The multiplex generator.
 pub struct MpxGenerator {
     cfg: MpxConfig,
@@ -160,6 +210,7 @@ pub struct MpxGenerator {
     frames: Vec<[f32; 2]>,
     left: Vec<f32>,
     right: Vec<f32>,
+    power: PowerMeter,
     /// Limited M and S at the output rate; `have` samples are valid.
     m: Vec<f32>,
     s: Vec<f32>,
@@ -251,13 +302,14 @@ impl MpxGenerator {
             frames: vec![[0.0; 2]; BLOCK.div_ceil(factor)],
             left: vec![0.0; BLOCK.div_ceil(factor)],
             right: vec![0.0; BLOCK.div_ceil(factor)],
+            power: PowerMeter::new(fs),
             m: vec![0.0; BLOCK + factor],
             s: vec![0.0; BLOCK + factor],
             have: 0,
             fm: vec![0.0; factor],
             fsd: vec![0.0; factor],
             rds_bb: vec![0.0; BLOCK],
-            stats: MpxStats { limiter_gain: 1.0, ..Default::default() },
+            stats: MpxStats { limiter_gain: 1.0, mpx_power_dbr: f64::NEG_INFINITY, ..Default::default() },
             cfg,
         })
     }
@@ -311,7 +363,8 @@ impl MpxGenerator {
 
     /// Statistics; `reset_peaks` clears the peak meters.
     pub fn stats(&mut self, reset_peaks: bool) -> MpxStats {
-        let s = self.stats;
+        let mut s = self.stats;
+        s.mpx_power_dbr = self.power.dbr();
         if reset_peaks {
             self.stats.peak_deviation = 0.0;
             self.stats.limiter_gain = 1.0;
@@ -458,6 +511,7 @@ impl MpxGenerator {
                 acc.advance_by(n as u64);
             }
         }
+        self.power.add(out);
         // Keep the samples beyond this block.
         self.m.copy_within(n..self.have, 0);
         self.s.copy_within(n..self.have, 0);
