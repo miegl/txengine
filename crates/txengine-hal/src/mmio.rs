@@ -62,14 +62,14 @@ impl Mmio {
 
     #[inline]
     pub fn read(&self, off: usize) -> u32 {
-        // SAFETY: ptr() validated the offset; device registers require volatile access.
-        unsafe { self.ptr(off).read_volatile() }
+        // SAFETY: ptr() validated the offset; the mapping outlives self.
+        unsafe { load32(self.ptr(off)) }
     }
 
     #[inline]
     pub fn write(&self, off: usize, val: u32) {
-        // SAFETY: ptr() validated the offset; device registers require volatile access.
-        unsafe { self.ptr(off).write_volatile(val) }
+        // SAFETY: ptr() validated the offset; the mapping outlives self.
+        unsafe { store32(self.ptr(off), val) }
     }
 
     /// Read-modify-write: clear `mask`, then set `val & mask`.
@@ -106,6 +106,64 @@ impl Mmio {
     pub fn write64(&self, off: usize, val: u64) {
         self.write(off, val as u32);
         self.write(off + 4, (val >> 32) as u32);
+    }
+}
+
+/// 32-bit load from device memory through a general-purpose register.
+///
+/// A plain volatile read may be compiled into a load straight into a
+/// floating-point register when the value is converted to a float next
+/// (`ldr s0, [x8, #0xc4]`). On the BCM2837 (Cortex-A53; Pi 3, Zero 2 W)
+/// such a load from a peripheral at an address ≡ 4 (mod 8) returns the word
+/// 4 bytes below it: reading the frequency counter's result gave its control
+/// register. Linux' `readl()` uses an explicit `ldr` for the same reason.
+///
+/// # Safety
+/// `p` must be valid for a 4-byte aligned read.
+#[inline(always)]
+pub unsafe fn load32(p: *const u32) -> u32 {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: the caller guarantees `p` is readable.
+    unsafe {
+        let v: u32;
+        core::arch::asm!("ldr {v:w}, [{p}]", p = in(reg) p, v = out(reg) v, options(nostack, preserves_flags));
+        v
+    }
+    #[cfg(target_arch = "arm")]
+    // SAFETY: the caller guarantees `p` is readable.
+    unsafe {
+        let v: u32;
+        core::arch::asm!("ldr {v}, [{p}]", p = in(reg) p, v = out(reg) v, options(nostack, preserves_flags));
+        v
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+    // SAFETY: the caller guarantees `p` is readable.
+    unsafe {
+        p.read_volatile()
+    }
+}
+
+/// 32-bit store to device memory from a general-purpose register (see
+/// [`load32`]; a floating-point store could likewise hit the wrong word).
+///
+/// # Safety
+/// `p` must be valid for a 4-byte aligned write.
+#[inline(always)]
+pub unsafe fn store32(p: *mut u32, v: u32) {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: the caller guarantees `p` is writable.
+    unsafe {
+        core::arch::asm!("str {v:w}, [{p}]", p = in(reg) p, v = in(reg) v, options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "arm")]
+    // SAFETY: the caller guarantees `p` is writable.
+    unsafe {
+        core::arch::asm!("str {v}, [{p}]", p = in(reg) p, v = in(reg) v, options(nostack, preserves_flags));
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+    // SAFETY: the caller guarantees `p` is writable.
+    unsafe {
+        p.write_volatile(v)
     }
 }
 

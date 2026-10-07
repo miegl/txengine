@@ -154,6 +154,12 @@ divider register, paced by hardware.
 * The DMA engine's write rate to the PLL registers is limited (≈ 231 k
   writes/s on the Pi 2), so the sample rate is chosen from a measurement at
   start-up, and the achieved rate is checked continuously.
+* Every register and DMA-memory access is a single 32-bit `ldr`/`str` from
+  a general-purpose register (`mmio::load32`/`store32`). Plain volatile
+  accesses may be compiled to floating-point register loads when the value
+  is converted to a float next, and on the BCM2837 those return the word 4
+  bytes below for addresses ≡ 4 (mod 8); merged copies would make unaligned
+  stores, which fault on AArch64 Device memory.
 * Underruns: the ring ends in an idle loop (two control blocks that keep
   the carrier at the centre frequency). New data re-links the tail; a
   parked engine is redirected into the ring.

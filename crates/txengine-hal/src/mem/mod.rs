@@ -17,6 +17,8 @@ pub mod pinned;
 
 use std::fmt;
 
+use crate::mmio::{load32, store32};
+
 /// A buffer accessible by a DMA engine.
 ///
 /// The buffer is physically contiguous within each aligned chunk of
@@ -46,17 +48,17 @@ pub trait DmaMemory: Send + Sync + fmt::Debug {
 
 /// Typed, bounds-checked helpers on top of [`DmaMemory`].
 pub trait DmaMemoryExt: DmaMemory {
-    /// Write a `u32` at byte `offset` (volatile; no flush).
+    /// Write a `u32` at byte `offset` (one 32-bit store; no flush).
     fn write_u32(&self, offset: usize, v: u32) {
         assert!(offset.is_multiple_of(4) && offset + 4 <= self.len());
         // SAFETY: bounds and alignment checked; the buffer is owned by self.
-        unsafe { self.as_ptr().add(offset).cast::<u32>().write_volatile(v) }
+        unsafe { store32(self.as_ptr().add(offset).cast::<u32>(), v) }
     }
-    /// Read a `u32` at byte `offset` (volatile; no invalidate).
+    /// Read a `u32` at byte `offset` (one 32-bit load; no invalidate).
     fn read_u32(&self, offset: usize) -> u32 {
         assert!(offset.is_multiple_of(4) && offset + 4 <= self.len());
         // SAFETY: bounds and alignment checked; the buffer is owned by self.
-        unsafe { self.as_ptr().add(offset).cast::<u32>().read_volatile() }
+        unsafe { load32(self.as_ptr().add(offset).cast::<u32>()) }
     }
     fn write_u64(&self, offset: usize, v: u64) {
         self.write_u32(offset, v as u32);
@@ -76,7 +78,7 @@ pub trait DmaMemoryExt: DmaMemory {
         let dst = self.as_ptr().wrapping_add(offset).cast::<u32>();
         for (k, &w) in src.iter().enumerate() {
             // SAFETY: bounds and alignment checked above; the buffer is owned by self.
-            unsafe { dst.add(k).write_volatile(w) }
+            unsafe { store32(dst.add(k), w) }
         }
     }
     /// Fill `[offset, offset+len)` with zero bytes (no flush).

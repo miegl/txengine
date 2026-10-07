@@ -152,6 +152,9 @@ Hardware-specific findings that txengine handles:
   rate with 15 % margin (`--sample-rate` above the capacity is refused), and
   it watches the achieved rate while running. The PLL's loop response is
   measured and compensated, which is what brings the separation above 50 dB.
+* **Zero 2 W (Cortex-A53):** a floating-point register load from a
+  peripheral register at an address ≡ 4 (mod 8) returns the register below
+  it. All register accesses are explicit 32-bit integer loads and stores.
 * **Pi 5:** PCIe link power saving (ASPM L1) occasionally delays the DMA
   enough to lose a timer tick, shifting the output timeline by one sample.
   txengine disables ASPM on the RP1 link while transmitting and restores it

@@ -1131,7 +1131,7 @@ impl RfSink for BcmFmTransmitter {
             return Err(SinkError::config("write exceeds the writable space"));
         }
         let first = (self.written % self.n as u64) as usize;
-        // Direct volatile stores (the memory is uncached; no per-sample
+        // Direct 32-bit stores (the memory is uncached; no per-sample
         // virtual calls or bounds checks).
         assert!(samples.len() <= self.n && self.samples_off + 4 * self.n <= self.mem.len());
         // SAFETY: the sample area lies within the buffer (checked above).
@@ -1140,7 +1140,7 @@ impl RfSink for BcmFmTransmitter {
         for &s in samples {
             let w = self.word(s);
             // SAFETY: k < n, within the sample area.
-            unsafe { base.add(k).write_volatile(w) };
+            unsafe { crate::mmio::store32(base.add(k), w) };
             k += 1;
             if k == self.n {
                 k = 0;
