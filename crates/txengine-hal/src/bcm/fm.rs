@@ -279,6 +279,25 @@ const BCM2836_PLLA_RESPONSE_DB: &[(f64, f64)] = &[
     (67e3, 0.685),
 ];
 
+/// The same for PLLA on the BCM2837, measured on a Raspberry Pi Zero 2 W
+/// (RP3A0) at 150 and 196 kS/s, which agree within ±0.03 dB. Slightly less
+/// lift than the BCM2836; uncorrected it limits stereo separation to 35 dB.
+const BCM2837_PLLA_RESPONSE_DB: &[(f64, f64)] = &[
+    (0.0, 0.0),
+    (5e3, 0.01),
+    (10e3, 0.045),
+    (15e3, 0.08),
+    (19e3, 0.13),
+    (23e3, 0.19),
+    (30e3, 0.285),
+    (38e3, 0.38),
+    (45e3, 0.46),
+    (53e3, 0.535),
+    (57e3, 0.57),
+    (61e3, 0.595),
+    (67e3, 0.595),
+];
+
 /// Samples per second the DMA engine can deliver when each sample is a
 /// write of `word` to the register at `target_bus` plus a second control
 /// block (as in the transmit ring). Runs an unpaced chain; `word` should be
@@ -714,8 +733,13 @@ impl BcmFmTransmitter {
             realtime: true,
             zero_order_hold: true,
             response_db: match plan.method {
-                // Only the configuration that was measured.
-                BcmMethod::Pll(PllId::A) if bcm.soc == Soc::Bcm2836 && !plan.power_up => BCM2836_PLLA_RESPONSE_DB.to_vec(),
+                // Only the configurations that were measured: PLLA retuned
+                // while running with the firmware's loop settings.
+                BcmMethod::Pll(PllId::A) if !plan.power_up => match bcm.soc {
+                    Soc::Bcm2836 => BCM2836_PLLA_RESPONSE_DB.to_vec(),
+                    Soc::Bcm2837 => BCM2837_PLLA_RESPONSE_DB.to_vec(),
+                    _ => Vec::new(),
+                },
                 _ => Vec::new(),
             },
         };

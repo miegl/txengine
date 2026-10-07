@@ -44,7 +44,8 @@ sample period. It describes itself once in `SinkInfo`:
   dividers, e.g. 50 MHz / 200 on the Pi 5). Modulators render at this rate.
 * `buffer_len`, `realtime`.
 * `zero_order_hold` and `response_db`: the output stage's frequency response
-  (a hold, plus any measured correction such as the Pi 2's PLL loop).
+  (a hold, plus any measured correction such as the PLL loop of the Pi 2 and
+  Zero 2 W).
   Modulators may equalise it.
 * `max_offset_hz`, `resolution_hz`, `carrier_hz`.
 

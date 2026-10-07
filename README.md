@@ -28,7 +28,7 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
   15 kHz programme low-pass, look-ahead peak limiter that bounds the true
   (inter-sample) composite peak, 19 kHz pilot, DSB-SC stereo subcarrier,
   RDS, and pre-compensation of the output stage's measured frequency
-  response (sample-and-hold and, on the Pi 2, the PLL loop).
+  response (sample-and-hold and, on the Pi 2 and Zero 2 W, the PLL loop).
 * **RDS**: PS, RadioText (A/B flag, 0x0D termination), PTY, PTYN, PI, TP/TA,
   MS, DI, alternative frequencies (method A), clock time (placed at the
   minute edge using the actual emission time), ECC/LIC; EBU Latin character
@@ -146,12 +146,13 @@ Measured over the air with a USRP B210 (`tools/sdr_capture.py`,
 
 Hardware-specific findings that txengine handles:
 
-* **Pi 2 (and probably other BCM283x boards):** a DMA write to a PLL's
-  fractional register takes about 4.3 µs, which caps the sample rate at
-  about 231 kS/s. txengine measures the capacity at start-up and picks a
+* **Pi 2 and Zero 2 W (and probably other BCM283x boards):** a DMA write to
+  a PLL's fractional register takes about 4.3 µs, which caps the sample rate
+  at about 231 kS/s. txengine measures the capacity at start-up and picks a
   rate with 15 % margin (`--sample-rate` above the capacity is refused), and
   it watches the achieved rate while running. The PLL's loop response is
-  measured and compensated, which is what brings the separation above 50 dB.
+  measured and compensated, which is what brings the separation above 50 dB
+  (35 dB without it on the Zero 2 W).
 * **BCM283x/BCM2711, CPU clock changes:** the firmware changes the ARM clock
   over the same slow PLL register bus that the DMA engine keeps busy. When
   the two collide, the firmware's write lands in the modulated PLL instead:
