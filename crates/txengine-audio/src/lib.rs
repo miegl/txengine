@@ -49,6 +49,10 @@ pub struct AudioOptions {
     /// full. `None` enables it automatically for stdin.
     pub drift_compensation: Option<bool>,
     pub max_drift_ppm: f64,
+    /// The transmitter will correct the playback rate while running
+    /// ([`AudioInput::set_rate_correction_ppm`]), so always resample, even
+    /// when the source already has the requested rate.
+    pub adjustable_rate: bool,
     /// Buffer between the decoder and the transmitter, in seconds.
     pub buffer: Duration,
 }
@@ -59,6 +63,7 @@ impl Default for AudioOptions {
             end: EndOfInput::Repeat,
             drift_compensation: None,
             max_drift_ppm: 500.0,
+            adjustable_rate: false,
             buffer: Duration::from_millis(500),
         }
     }
@@ -73,6 +78,8 @@ struct Shared {
     frames_decoded: AtomicU64,
     /// Current drift correction in parts per billion.
     drift_ppb: AtomicI64,
+    /// Playback rate correction requested by the transmitter (ppm, as f64 bits).
+    rate_ppm: AtomicU64,
     loops: AtomicU64,
 }
 
@@ -126,7 +133,7 @@ impl AudioInput {
         let capacity = ((opts.buffer.as_secs_f64() * rate) as usize).max(4096);
         let (tx, rx) = rtrb::RingBuffer::new(capacity);
         let shared = Arc::new(Shared::default());
-        let worker = decode::Worker::new(src, rate, opts.end, drift, opts.max_drift_ppm, tx, capacity, shared.clone())?;
+        let worker = decode::Worker::new(src, rate, opts, drift, tx, capacity, shared.clone())?;
         let thread = std::thread::Builder::new()
             .name("txengine-audio".into())
             .spawn(move || worker.run())
@@ -169,6 +176,16 @@ impl AudioInput {
             chunk.commit_all();
         }
         n
+    }
+
+    /// The transmitter's audio clock runs `ppm` fast relative to true time
+    /// (its crystal error): produce that many more frames per second of
+    /// programme, so that the programme plays at its true speed. Live
+    /// sources with drift compensation follow their own clock instead; this
+    /// then only spares the drift loop the work. Needs
+    /// [`AudioOptions::adjustable_rate`] unless the input is resampled anyway.
+    pub fn set_rate_correction_ppm(&self, ppm: f64) {
+        self.shared.rate_ppm.store(ppm.to_bits(), Ordering::Relaxed);
     }
 
     /// Frames currently buffered.
@@ -220,4 +237,39 @@ pub fn read_file(path: &std::path::Path) -> Result<(u32, usize, Vec<f32>), Audio
     let mut out = Vec::new();
     while src.read(&mut out)? {}
     Ok((info.rate, info.channels, out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Amplitude of the left channel's component at `f` Hz.
+    fn amplitude(x: &[[f32; 2]], rate: f64, f: f64) -> f64 {
+        let (mut s, mut c) = (0.0, 0.0);
+        for (i, v) in x.iter().enumerate() {
+            let ph = 2.0 * std::f64::consts::PI * f * i as f64 / rate;
+            s += v[0] as f64 * ph.sin();
+            c += v[0] as f64 * ph.cos();
+        }
+        2.0 * (s * s + c * c).sqrt() / x.len() as f64
+    }
+
+    #[test]
+    fn rate_correction_sets_the_playback_speed() {
+        let opts = AudioOptions { adjustable_rate: true, ..Default::default() };
+        let tone = InputSpec::Tone { freq: 1000.0, amplitude: 0.5, stereo: false };
+        let rate = 50_000.0;
+        let mut a = AudioInput::open(&tone, rate, &opts).unwrap();
+        a.set_blocking(true);
+        // The transmitter's clock runs 0.5 % fast: it must get 0.5 % more
+        // frames per second of programme.
+        a.set_rate_correction_ppm(5000.0);
+        let mut x = vec![[0f32; 2]; rate as usize];
+        // What was queued before the correction.
+        assert_eq!(a.read(&mut x), x.len());
+        assert_eq!(a.read(&mut x), x.len());
+        let corrected = amplitude(&x, rate, 1000.0 / 1.005);
+        assert!((corrected - 0.5).abs() < 0.01, "{corrected}");
+        assert!(amplitude(&x, rate, 1000.0) < 0.05);
+    }
 }

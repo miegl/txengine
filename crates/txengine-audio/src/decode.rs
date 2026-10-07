@@ -12,7 +12,7 @@ use rubato::{
 };
 
 use crate::source::Source;
-use crate::{AudioError, EndOfInput, Shared};
+use crate::{AudioError, AudioOptions, EndOfInput, Shared};
 
 const CHUNK: usize = 1024;
 
@@ -26,6 +26,8 @@ pub(crate) struct Worker {
     tx: rtrb::Producer<[f32; 2]>,
     capacity: usize,
     shared: Arc<Shared>,
+    /// Rate correction (ppm) the resampler was last set to without drift steering.
+    rate_ppm: f64,
     // Scratch buffers.
     decoded: Vec<f32>,
     staging: Vec<f32>,
@@ -36,21 +38,19 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         src: Box<dyn Source>,
         rate: f64,
-        end: EndOfInput,
+        opts: &AudioOptions,
         drift: bool,
-        max_drift_ppm: f64,
         tx: rtrb::Producer<[f32; 2]>,
         capacity: usize,
         shared: Arc<Shared>,
     ) -> Result<Worker, AudioError> {
         let info = src.info();
         let ratio = rate / info.rate as f64;
-        // Resample unless the rates match exactly and no drift steering is needed.
-        let resampler = if (ratio - 1.0).abs() > 1e-12 || drift {
+        // Resample unless the rates match exactly and the rate is never steered.
+        let resampler = if (ratio - 1.0).abs() > 1e-12 || drift || opts.adjustable_rate {
             // 64-tap Blackman-Harris sinc: the transmit chain low-passes at
             // 15 kHz anyway, so a moderate filter length is transparent while
             // keeping the CPU cost low on the smaller boards.
@@ -69,12 +69,13 @@ impl Worker {
             src,
             channels: info.channels,
             resampler,
-            end,
+            end: opts.end,
             drift,
-            max_drift_ppm,
+            max_drift_ppm: opts.max_drift_ppm,
             tx,
             capacity,
             shared,
+            rate_ppm: 0.0,
             decoded: Vec::with_capacity(16384),
             staging: Vec::with_capacity(2 * CHUNK),
             out: vec![0.0; 2 * out_max],
@@ -144,12 +145,15 @@ impl Worker {
             self.staging.clear();
             return self.emit(&frames);
         };
+        // The transmitter's correction for its crystal error.
+        let rate_ppm = f64::from_bits(self.shared.rate_ppm.load(Ordering::Relaxed));
+        let rate = 1.0 + rate_ppm * 1e-6;
         if self.drift && self.since_blocked < 16 {
             // The source delivers faster than real time (a file piped into
             // stdin): the ring is full because of back pressure, not clock
-            // drift. Play at the nominal rate.
+            // drift. Play at the programme's true speed.
             self.integral = 0.0;
-            let _ = r.set_resample_ratio_relative(1.0, true);
+            let _ = r.set_resample_ratio_relative(rate, true);
             self.shared.drift_ppb.store(0, Ordering::Relaxed);
         } else if self.drift {
             // Keep the ring half full: too full → produce fewer frames.
@@ -157,8 +161,11 @@ impl Worker {
             let err = used - 0.5;
             self.integral = (self.integral + err * 0.02).clamp(-1.0, 1.0);
             let ppm = (err * 400.0 + self.integral * 200.0).clamp(-self.max_drift_ppm, self.max_drift_ppm);
-            let _ = r.set_resample_ratio_relative(1.0 - ppm * 1e-6, true);
+            let _ = r.set_resample_ratio_relative(rate * (1.0 - ppm * 1e-6), true);
             self.shared.drift_ppb.store((-ppm * 1000.0) as i64, Ordering::Relaxed);
+        } else if rate_ppm != self.rate_ppm {
+            self.rate_ppm = rate_ppm;
+            let _ = r.set_resample_ratio_relative(rate, true);
         }
         self.staging.resize(2 * CHUNK, 0.0);
         let input = InterleavedSlice::new(&self.staging[..], 2, CHUNK).expect("input adapter");
