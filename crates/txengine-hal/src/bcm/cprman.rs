@@ -77,8 +77,24 @@ impl Cprman {
     }
 
     /// Measure a clock with the frequency counter (`tcnt_mux` as in the
-    /// Linux driver). Counts over `seconds` of the crystal; returns Hz.
+    /// Linux driver) over `seconds` of the crystal; returns Hz, or 0 if the
+    /// clock is not running.
+    ///
+    /// The count register sits in the measured clock's domain: when that
+    /// clock is stopped, KILL cannot clear it and the previous result reads
+    /// back (seen on a Zero 2 W: a disabled GPCLK "measured" 87.6 MHz). Two
+    /// gate times expose a stale count, as it does not grow with the gate.
     pub fn measure(&self, tcnt_mux: u32, osc_hz: f64, seconds: f64) -> Result<f64> {
+        let short = self.count(tcnt_mux, osc_hz, seconds / 2.0)?;
+        let long = self.count(tcnt_mux, osc_hz, seconds)?;
+        if (long as f64) < 1.5 * short as f64 || long == 0 {
+            debug!("frequency counter: {short} then {long} counts; the clock is not running");
+            return Ok(0.0);
+        }
+        Ok(long as f64 / seconds)
+    }
+
+    fn count(&self, tcnt_mux: u32, osc_hz: f64, seconds: f64) -> Result<u32> {
         self.write(TCNTCTL, KILL);
         self.write(TCNTCTL, (tcnt_mux & SRC_MASK) | ((tcnt_mux >> 4) << TCNT_SRC1_SHIFT));
         let count = (osc_hz * seconds) as u32;
@@ -88,7 +104,7 @@ impl Cprman {
         wait_until(TIMEOUT, "frequency counter idle", || self.read(TCNTCTL) & BUSY == 0)?;
         let n = self.read(TCNTCNT);
         self.write(TCNTCTL, 0);
-        Ok(n as f64 / seconds)
+        Ok(n)
     }
 }
 

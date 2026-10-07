@@ -160,6 +160,9 @@ divider register, paced by hardware.
   is converted to a float next, and on the BCM2837 those return the word 4
   bytes below for addresses ≡ 4 (mod 8); merged copies would make unaligned
   stores, which fault on AArch64 Device memory.
+* The frequency counter that verifies the carrier is read with two gate
+  times: its count register cannot be cleared while the measured clock is
+  stopped, so a dead clock would otherwise read back the previous result.
 * Underruns: the ring ends in an idle loop (two control blocks that keep
   the carrier at the centre frequency). New data re-links the tail; a
   parked engine is redirected into the ring.
