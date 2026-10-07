@@ -66,11 +66,17 @@ pub trait DmaMemoryExt: DmaMemory {
         self.read_u32(offset) as u64 | (self.read_u32(offset + 4) as u64) << 32
     }
     /// Copy `src` into the buffer at byte `offset` (as `u32` words, no flush).
+    ///
+    /// One 32-bit store per word: a plain copy lets the compiler merge
+    /// neighbouring words into wider stores at 4-byte aligned addresses, and
+    /// unaligned stores fault on the Device memory type that AArch64 uses
+    /// for uncached `/dev/mem` mappings (SIGBUS).
     fn write_words(&self, offset: usize, src: &[u32]) {
         assert!(offset.is_multiple_of(4) && offset + src.len() * 4 <= self.len());
-        // SAFETY: bounds checked; regions cannot overlap (src is not in DMA memory).
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), self.as_ptr().add(offset).cast::<u32>(), src.len());
+        let dst = self.as_ptr().wrapping_add(offset).cast::<u32>();
+        for (k, &w) in src.iter().enumerate() {
+            // SAFETY: bounds and alignment checked above; the buffer is owned by self.
+            unsafe { dst.add(k).write_volatile(w) }
         }
     }
     /// Fill `[offset, offset+len)` with zero bytes (no flush).
