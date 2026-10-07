@@ -40,6 +40,33 @@ pub enum Command {
     Tone(ToneArgs),
 }
 
+/// How the crystal error is corrected.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Ppm {
+    /// Measured while transmitting.
+    Auto,
+    /// Given (ppm, positive when the crystal runs fast); still measured,
+    /// for information.
+    Fixed(f64),
+    /// Neither corrected nor measured.
+    Off,
+}
+
+pub(crate) fn parse_ppm(s: &str) -> Result<Ppm, String> {
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(Ppm::Auto);
+    }
+    if s.eq_ignore_ascii_case("off") {
+        return Ok(Ppm::Off);
+    }
+    let v: f64 = s.parse().map_err(|_| format!("expected a number of ppm, 'auto' or 'off', got '{s}'"))?;
+    let max = txengine_hal::MAX_CLOCK_ERROR_PPM;
+    if !(-max..=max).contains(&v) {
+        return Err(format!("the crystal error must be within ±{max} ppm"));
+    }
+    Ok(Ppm::Fixed(v))
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum OnEnd {
     /// Start the file again from the beginning.
@@ -172,9 +199,14 @@ pub struct HardwareArgs {
     /// Output drive strength 0-7 (2-16 mA; the Pi 5 has 4 steps up to 12 mA).
     #[arg(long, default_value_t = 7, value_name = "0-7", help_heading = "Hardware")]
     pub power: u8,
-    /// Crystal frequency error in ppm (positive when the crystal runs fast).
-    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true, help_heading = "Hardware")]
-    pub ppm: f64,
+    /// Crystal frequency error to correct: "auto" measures it continuously
+    /// against the system clock, which must be synchronised (NTP, or GPS
+    /// through chrony); a number gives it in ppm (positive when the crystal
+    /// runs fast); "off" neither measures nor corrects. The correction
+    /// applies to the carrier frequency, the subcarriers and the playback
+    /// speed.
+    #[arg(long, default_value = "auto", value_parser = parse_ppm, allow_hyphen_values = true, value_name = "auto|PPM|off", help_heading = "Hardware")]
+    pub ppm: Ppm,
     /// DMA channel to use [default: a free one].
     #[arg(long, help_heading = "Hardware")]
     pub dma_channel: Option<usize>,

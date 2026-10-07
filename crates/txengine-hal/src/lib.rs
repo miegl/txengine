@@ -11,3 +11,8 @@ pub mod rp1;
 pub mod sys;
 
 pub use error::{HalError, Result};
+
+/// Largest crystal error (± ppm) the frequency plans leave room to correct
+/// at run time (`RfSink::set_clock_error_ppm`). Raspberry Pi crystals are
+/// specified to a few tens of ppm.
+pub const MAX_CLOCK_ERROR_PPM: f64 = 200.0;

@@ -31,6 +31,7 @@ use super::cprman::{Cprman, Pll, PllConfig, PllId, PllState};
 use super::dma::{ControlBlock, DmaChannel};
 use super::regs::{self, cm, dma as dmar, pads, pcm, pwm};
 use super::{Bcm, gpclk_for_pin};
+use crate::MAX_CLOCK_ERROR_PPM;
 use crate::cpufreq::CpuClockPin;
 use crate::error::{HalError, Result};
 use crate::guardian::Guardian;
@@ -67,8 +68,6 @@ pub struct BcmFmConfig {
     pub sample_rate: Option<f64>,
     pub buffer: Duration,
     pub max_offset_hz: f64,
-    /// Crystal error in ppm (positive if fast).
-    pub ppm: f64,
     pub dma_channel: Option<usize>,
     /// Largest relative VCO change accepted for a PLL with other users.
     pub max_vco_change: f64,
@@ -85,7 +84,6 @@ impl Default for BcmFmConfig {
             sample_rate: None,
             buffer: Duration::from_millis(60),
             max_offset_hz: 100_000.0,
-            ppm: 0.0,
             dma_channel: None,
             max_vco_change: 0.03,
         }
@@ -111,6 +109,8 @@ pub struct BcmPlan {
     pub vco_old: f64,
     pub vco_new: f64,
     pub carrier_hz: f64,
+    /// Largest offset the register can represent under any crystal error
+    /// correction up to ±[`MAX_CLOCK_ERROR_PPM`].
     pub max_offset_hz: f64,
     pub per_users: Vec<String>,
     pub other_users: Vec<String>,
@@ -118,7 +118,24 @@ pub struct BcmPlan {
     pub step_hz: f64,
 }
 
-/// Plan PLL modulation for `pll`.
+impl BcmPlan {
+    /// PLL method: FRAC at the carrier centre and FRAC units per Hz of
+    /// offset when the crystal runs `ppm` fast. The whole feedback divider
+    /// (NDIV.FRAC) shrinks by `1 + ppm · 10⁻⁶`, so that the VCO keeps its
+    /// nominal frequency.
+    pub fn corrected_frac(&self, ppm: f64) -> (f64, f64) {
+        let k = 1.0 / (1.0 + ppm * 1e-6);
+        (self.center * k - self.ndiv as f64 * (1u64 << cm::A2W_FRAC_BITS) as f64, self.units_per_hz * k)
+    }
+
+    /// Clock-divider method: the frequency of the divided clock (PLLD_PER)
+    /// in units of 2^-12 Hz when the crystal runs `ppm` fast.
+    pub fn corrected_divider_source(&self, ppm: f64) -> f64 {
+        self.carrier_hz * self.center * (1.0 + ppm * 1e-6)
+    }
+}
+
+/// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
 pub fn plan_pll(
     pll: &Pll,
     gpclk: usize,
@@ -140,6 +157,8 @@ pub fn plan_pll(
         (Some(d), false) => vec![d],
         _ => (1..=8).collect(),
     };
+    // Room for correcting the crystal error at run time.
+    let reserve_hz = carrier * MAX_CLOCK_ERROR_PPM * 1e-6;
     let mut best: Option<(f64, BcmPlan)> = None;
     for &per in &per_choices {
         for gp in 1..=4095u32 {
@@ -168,7 +187,7 @@ pub fn plan_pll(
             let units = vco / unit_hz;
             let ndiv = (units / (1u64 << cm::A2W_FRAC_BITS) as f64).floor();
             let frac = units / (1u64 << cm::A2W_FRAC_BITS) as f64 - ndiv;
-            let dev = max_offset * n as f64 / unit_hz / (1u64 << cm::A2W_FRAC_BITS) as f64;
+            let dev = (max_offset + reserve_hz) * n as f64 / unit_hz / (1u64 << cm::A2W_FRAC_BITS) as f64;
             let margin = (frac - dev).min(1.0 - frac - dev);
             if margin < 0.005 || !(1.0..=1023.0).contains(&ndiv) {
                 continue;
@@ -196,7 +215,8 @@ pub fn plan_pll(
                         vco_old,
                         vco_new: center * unit_hz,
                         carrier_hz: center * unit_hz / n as f64,
-                        max_offset_hz: ((frac.min(1.0 - frac)) * (1u64 << cm::A2W_FRAC_BITS) as f64) / units_per_hz,
+                        max_offset_hz: ((frac.min(1.0 - frac)) * (1u64 << cm::A2W_FRAC_BITS) as f64) / units_per_hz
+                            - reserve_hz,
                         per_users: per_users.clone(),
                         other_users: other_users.clone(),
                         step_hz: 1.0 / units_per_hz,
@@ -491,9 +511,13 @@ pub struct BcmFmTransmitter {
     running: bool,
     stopped: bool,
     dither: f64,
-    /// PLL method: FRAC register value for 0 Hz and FRAC units per Hz.
+    /// PLL method: FRAC register value for 0 Hz and FRAC units per Hz,
+    /// corrected for the crystal error.
     frac_base: f32,
     frac_scale: f32,
+    /// Clock-divider method: the divided clock in units of 2^-12 Hz,
+    /// corrected for the crystal error.
+    div_source: f64,
     last_health: Instant,
     /// Last time the DMA position moved (stall watchdog).
     last_progress: Instant,
@@ -529,7 +553,7 @@ impl BcmFmTransmitter {
         if cfg.drive > 7 {
             return Err(HalError::Config("drive strength must be 0-7".into()));
         }
-        let osc = bcm.osc_hz * (1.0 + cfg.ppm * 1e-6);
+        let osc = bcm.osc_hz;
         let cpr = Cprman::new(bcm.cm.clone());
         let gp_ctl = cm::gp(gpclk);
         let pll_of = |id| Pll::new(&cpr, id, osc, bcm.bcm2711);
@@ -728,6 +752,7 @@ impl BcmFmTransmitter {
             carrier_hz: plan.carrier_hz,
             max_offset_hz: plan.max_offset_hz,
             resolution_hz: plan.step_hz,
+            max_clock_error_ppm: MAX_CLOCK_ERROR_PPM,
             buffer_len: n - 128,
             format: SampleFormat::FrequencyOffset,
             realtime: true,
@@ -780,8 +805,9 @@ impl BcmFmTransmitter {
             running: false,
             stopped: false,
             dither: 0.0,
-            frac_base: (plan.center - plan.ndiv as f64 * (1u64 << cm::A2W_FRAC_BITS) as f64) as f32,
-            frac_scale: plan.units_per_hz as f32,
+            frac_base: plan.corrected_frac(0.0).0 as f32,
+            frac_scale: plan.corrected_frac(0.0).1 as f32,
+            div_source: plan.corrected_divider_source(0.0),
             last_health: Instant::now(),
             last_progress: Instant::now(),
             rate_window: (Instant::now(), 0, 0),
@@ -829,8 +855,7 @@ impl BcmFmTransmitter {
             BcmMethod::ClkDiv => {
                 // Exact divider for the requested frequency, with first order
                 // error feedback so the coarse 12-bit steps average out.
-                let src = self.plan.carrier_hz * self.plan.center;
-                let v = src / (self.plan.carrier_hz + offset_hz as f64) + self.dither;
+                let v = self.div_source / (self.plan.carrier_hz + offset_hz as f64) + self.dither;
                 let q = v.round().clamp((2u32 << 12) as f64, (4095u32 << 12 | 0xfff) as f64);
                 self.dither = v - q;
                 cm::PASSWORD | q as u32
@@ -838,9 +863,16 @@ impl BcmFmTransmitter {
         }
     }
 
+    /// Word for the carrier centre, without dither (the idle loop's).
+    fn center_word(&mut self) -> u32 {
+        let dither = std::mem::replace(&mut self.dither, 0.0);
+        let w = self.word(0.0);
+        self.dither = dither;
+        w
+    }
+
     fn init_ring(&mut self) {
-        let center = self.word(0.0);
-        self.dither = 0.0;
+        let center = self.center_word();
         let a_ti = dmar::TI_NO_WIDE_BURSTS | dmar::TI_WAIT_RESP;
         let b_ti = dmar::TI_NO_WIDE_BURSTS | dmar::TI_WAIT_RESP | dmar::TI_DEST_DREQ | (self.permap << dmar::TI_PERMAP_SHIFT);
         for k in 0..self.n {
@@ -1240,6 +1272,19 @@ impl RfSink for BcmFmTransmitter {
         self.shutdown();
         Ok(())
     }
+
+    fn set_clock_error_ppm(&mut self, ppm: f64) -> Result<(), SinkError> {
+        if !(-MAX_CLOCK_ERROR_PPM..=MAX_CLOCK_ERROR_PPM).contains(&ppm) {
+            return Err(SinkError::config(format!("crystal error {ppm} ppm is outside ±{MAX_CLOCK_ERROR_PPM} ppm")));
+        }
+        let (base, scale) = self.plan.corrected_frac(ppm);
+        (self.frac_base, self.frac_scale) = (base as f32, scale as f32);
+        self.div_source = self.plan.corrected_divider_source(ppm);
+        // The idle loop holds the carrier centre.
+        let w = self.center_word();
+        self.mem.write_u32(self.idle_word_off, w);
+        Ok(())
+    }
 }
 
 impl Drop for BcmFmTransmitter {
@@ -1262,6 +1307,53 @@ mod tests {
         assert!((5e6..=25e6).contains(&clk), "clock {clk}");
         assert_eq!(div * rng, 2000);
         assert_eq!(div, 20, "fastest exact clock is 25 MHz");
+    }
+
+    fn plan(method: BcmMethod, center: f64, units_per_hz: f64, ndiv: u32, carrier_hz: f64) -> BcmPlan {
+        BcmPlan {
+            method,
+            gpclk: 0,
+            gpclk_src: 0,
+            power_up: false,
+            set_per: false,
+            ndiv,
+            center,
+            units_per_hz,
+            per_div: 2,
+            gp_div: 8,
+            vco_old: 0.0,
+            vco_new: 0.0,
+            carrier_hz,
+            max_offset_hz: 100e3,
+            per_users: Vec::new(),
+            other_users: Vec::new(),
+            step_hz: 1.0 / units_per_hz.abs(),
+        }
+    }
+
+    #[test]
+    fn crystal_correction_keeps_the_carrier() {
+        // PLLA from 19.2 MHz: VCO 1401.6 MHz = 87.6 MHz x 16.
+        let osc = 19.2e6;
+        let unit_hz = osc / (1u64 << cm::A2W_FRAC_BITS) as f64;
+        let center = (87.6e6 * 16.0 / unit_hz).round();
+        let p = plan(BcmMethod::Pll(PllId::A), center, 16.0 / unit_hz, (center / (1u64 << cm::A2W_FRAC_BITS) as f64) as u32, center * unit_hz / 16.0);
+        for ppm in [-MAX_CLOCK_ERROR_PPM, -7.0, 0.0, 6.44, MAX_CLOCK_ERROR_PPM] {
+            let (frac, per_hz) = p.corrected_frac(ppm);
+            for offset in [-75e3, 0.0, 75e3] {
+                let units = p.ndiv as f64 * (1u64 << cm::A2W_FRAC_BITS) as f64 + frac + offset * per_hz;
+                let out = units * unit_hz * (1.0 + ppm * 1e-6) / 16.0;
+                assert!((out - p.carrier_hz - offset).abs() < 1e-3, "{ppm} ppm, {offset} Hz: {out}");
+            }
+        }
+        // The clock divider from PLLD_PER (500 MHz): the divided source
+        // runs `ppm` fast, and the divider for the carrier grows with it.
+        let center = (500e6_f64 / 87.6e6 * 4096.0).round();
+        let p = plan(BcmMethod::ClkDiv, center, -500e6 * 4096.0 / (87.6e6 * 87.6e6), 0, 500e6 * 4096.0 / center);
+        for ppm in [-30.0, 0.0, 30.0] {
+            let divider = p.corrected_divider_source(ppm) / p.carrier_hz;
+            assert!((500e6 * (1.0 + ppm * 1e-6) * 4096.0 / divider - p.carrier_hz).abs() < 1e-3);
+        }
     }
 
     #[test]

@@ -40,29 +40,36 @@ A sink accepts a stream of `f32` samples, each the instantaneous carrier
 frequency offset in Hz (`SampleFormat::FrequencyOffset`), held for one
 sample period. It describes itself once in `SinkInfo`:
 
-* `sample_rate`: the exact rate the hardware runs at (derived from its
-  dividers, e.g. 50 MHz / 200 on the Pi 5). Modulators render at this rate.
+* `sample_rate`: the exact nominal rate the hardware runs at (derived from
+  its dividers and the nominal crystal frequency, e.g. 50 MHz / 200 on the
+  Pi 5).
 * `buffer_len`, `realtime`.
 * `zero_order_hold` and `response_db`: the output stage's frequency response
   (a hold, plus any measured correction such as the PLL loop of the Pi 2 and
   Zero 2 W).
   Modulators may equalise it.
 * `max_offset_hz`, `resolution_hz`, `carrier_hz`.
+* `max_clock_error_ppm`: how large a crystal error the sink can correct.
 
 `poll()` reports how many samples can be written, how many the hardware has
 consumed (`consumed`, an absolute sample index) and the underrun count;
-`write()` appends; `start()`/`stop()`. `set_carrier_correction_ppm()` is the
-hook for disciplining the carrier (see SFN below).
+`write()` appends; `start()`/`stop()`. `set_clock_error_ppm()` tells the
+sink how far its crystal is off, and the sink retunes the carrier for it
+(see "Crystal error" below).
 
 ### `Modulator`
 
 `configure(&SinkInfo)` adapts to the sink, `render(&RenderContext, &mut
 [f32])` produces samples, `command()` handles control lines. The
-`RenderContext` carries the absolute index of the first sample and, for
-real-time sinks, the wall-clock time at which it will leave the antenna
-(`emit_time_unix`). Everything time-related builds on that mapping: the RDS
-clock-time group is scheduled so that it *ends* at the minute edge of the
-emission time, not the render time.
+`RenderContext` carries the absolute index of the first sample, the rate at
+which the samples actually leave the transmitter (`sample_rate`: the sink's
+nominal rate corrected for its crystal error, so it can change slowly while
+transmitting) and, for real-time sinks, the wall-clock time at which the
+first sample will leave the antenna (`emit_time_unix`). Everything
+time-related builds on that mapping: the RDS clock-time group is scheduled
+so that it *ends* at the minute edge of the emission time, not the render
+time, and the WFM modulator keeps its subcarriers and the programme's
+playback speed true to the actual rate.
 
 A new transmission mode (e.g. narrow-band FM, AM via pad drive strength, a
 digital mode) implements `Modulator`. A mode that needs a different kind of
@@ -189,7 +196,93 @@ build a paced ring, implement `poll`/`write`, fill `SinkInfo` with the exact
 rate and the measured response), add detection in `platform.rs` and a
 branch in `txengine/src/hw.rs`. Measure the modulation response with
 `txengine tone` and an SDR, and record it in `SinkInfo::response_db` if it
-deviates from a pure sample-and-hold.
+deviates from a pure sample-and-hold. Plan the clocks from the nominal
+crystal frequency, leave room for a correction of ±`MAX_CLOCK_ERROR_PPM`,
+and implement `set_clock_error_ppm`.
+
+## Crystal error (`txengine/src/clock.rs`)
+
+On every supported board the carrier synthesiser and the timer that paces
+the samples derive from one crystal, so a crystal that runs `e` fast has
+two effects with the same `e`: the carrier is too high, and the samples
+leave too fast, which raises the pilot, the subcarriers and the playback
+speed. One measured error therefore drives both corrections, which is why
+there is a single `--ppm` (and not one for the carrier and one for the
+sample rate):
+
+* **Carrier**: `RfSink::set_clock_error_ppm(e)`. The backends plan from the
+  nominal crystal frequency and scale the whole feedback divider (integer
+  and fraction) of the modulated PLL by `1 / (1 + e)`, or the clock
+  divider's source frequency by `1 + e`; the frequency word of each sample
+  is computed with the correction from then on.
+* **Timeline**: the engine passes `RenderContext::sample_rate = fs · (1 +
+  e)` to the modulator. The WFM modulator retunes its 19 kHz phase
+  accumulator (phase continuously; the subcarriers and the RDS bit clock
+  follow) and asks the audio input to resample by `1 + e` more, so the
+  programme plays at its true speed.
+
+The hardware sample clock is never changed: the output buffer is refilled
+from the hardware position as before, and a live input's buffer is held
+half full by its drift loop, which absorbs whatever difference remains
+between the source's clock and true time. (Changing the hardware rate
+instead, as PiFmAdv's `--ppm` does, makes a live input over- or underrun
+unless the input follows.)
+
+The error is measured by `ClockDiscipline`, which wraps `RfSink::poll`:
+each poll reads the hardware position bracketed by two readings of
+`CLOCK_MONOTONIC_RAW`. A `TimeReference` turns the readings into
+observations "sample n was emitted at time t"; the `RateEstimator` keeps
+the most precise observation of every second and fits the time error
+`n / fs - t` with a least-squares line weighted by `exp(-age / 120 s)`
+(window 12 minutes); its slope is `e`. A fit is used once it spans 20 s
+with a standard error below 0.2 ppm, which takes about 25 s. Underruns
+interrupt the timeline, so the fit starts again after each one (the
+correction in effect is kept until the new fit qualifies); single outliers
+are dropped. Because the corrections do not act on the measured clock, this
+is an open-loop estimate and cannot oscillate. A crystal drifting at a
+constant rate is followed with a lag of about 3.5 minutes (1.78 time
+constants), e.g. 0.5 ppm behind at 0.15 ppm per minute.
+
+The `SystemClock` reference is the raw monotonic clock (the CPU's timer)
+running at the frequency the NTP daemon has given the system clock (adjtimex
+`freq` and `tick`, read once a second), with the bracket's middle as the
+time and readings that took over 0.5 ms dropped. It does not use
+`CLOCK_MONOTONIC`: systemd-timesyncd and ntpd leave the removal of time
+offsets to the kernel's PLL, which slews the clock by up to tens of ppm for
+many minutes after each NTP poll (a 15 ms offset removed over 512 s starts
+at 29 ppm); measured against it, a Pi 5's estimate moved by 20 ppm within
+half an hour. chrony slews through the frequency, which this follows; its
+slews are small. On the BCM boards the CPU timer and the DMA pacing share
+the crystal, so the estimate is exactly the NTP daemon's frequency
+correction (negated), smoothed; on the Pi 5 the RP1 has its own crystal and
+the estimate combines both. The accuracy is therefore that of the NTP
+daemon's frequency estimate. Measured on air with a USRP B210, all boards
+with chrony polling a LAN server (16-64 s); the receiver's own error
+(3.5 ppm) is taken from the Pi 2 and the Zero 2 W, whose corrected carriers
+agree within 3 Hz:
+
+| Board | Crystal error on air | Estimate | Error left (carrier; 1 kHz tone) |
+|---|---|---|---|
+| Pi 2 | +7.28 ppm | +7.18…7.37 ppm | (reference); +0.1 ppm |
+| Zero 2 W | +4.67 ppm | +4.64…4.66 ppm | (reference) |
+| Pi 5 | −53.9…−54.4 ppm | −53.70…−53.93 ppm | −0.44 ppm; −0.3 ppm |
+
+The Pi 5's RP1 has its own 50 MHz crystal, which on our board runs 54 ppm
+slow; that is a static offset of that crystal (it moved by less than 0.5 ppm
+over 18 °C of CPU and 5 °C of RP1 warming). It does drift by about −0.5 ppm
+in the first minute of a transmission, as the RP1 warms up, which the
+estimate follows with its lag. The pilot follows the tone: 18998.966 Hz
+uncorrected on the Pi 5, 18999.994 Hz corrected. With systemd-timesyncd
+instead of chrony the Pi 5's estimate was 2.7 ppm off (−57.31 ppm), the
+error of timesyncd's frequency.
+
+Observations are only used while the reference is synchronised: for the
+system clock, while the kernel's NTP state says so, or the kernel's maximum
+error is below 0.5 s (chrony keeps the kernel's unsynchronised flag set
+unless `rtcsync` is configured, but every NTP daemon updates the error
+bounds). With `--ppm <value>` the estimate still runs and is reported, but
+the given value is applied; `--ppm off` neither measures nor corrects. The
+`PPM` control command switches between the three at run time.
 
 ## Single frequency networks (design)
 
@@ -217,18 +310,26 @@ The planned extension:
    cover jitter.
 2. **Client time base**: a GPS receiver's PPS signal on a GPIO pin is
    timestamped (the kernel's `pps-gpio` driver, or a GPIO edge captured by
-   DMA/PIO on the Pi 5). This gives the offset and frequency error of the
-   local crystal.
+   DMA/PIO on the Pi 5). The simplest form already works today: chrony
+   disciplines the system clock to the PPS, and the `SystemClock` reference
+   measures the crystal against it. For the timeline alignment below, a
+   `PpsReference` implements `TimeReference` directly: it interpolates the
+   sample index emitted at each PPS edge between the position readings
+   around it, which gives observations on the GPS time scale with the
+   interrupt latency as the only noise.
 3. **Start alignment**: the client chooses the PPS edge at which sample `n0`
    must be emitted and starts the DMA there (pre-filled buffer, tick
    started from the PPS-timestamped moment), then verifies the alignment by
    sampling the DMA position at subsequent PPS edges.
-4. **Rate discipline**: the measured crystal error is applied in two places:
-   the carrier (`RfSink::set_carrier_correction_ppm`, which adjusts the PLL
-   fraction; resolution < 0.1 Hz on the Pi 5) and the sample timeline (the
-   modulator renders with a resampling ratio slightly different from 1, or
-   single samples are inserted/dropped in the pre-rendered multiplex, so the
-   emitted sample index tracks GPS time).
+4. **Rate discipline**: the measured crystal error is applied as it is now,
+   to the carrier (`RfSink::set_clock_error_ppm`; resolution < 0.1 Hz on
+   the Pi 5) and to the sample timeline (`RenderContext::sample_rate`). An
+   SFN additionally steers the timeline's phase: the estimator's line also
+   gives the time offset of the sample clock, and a small extra term in the
+   rate given to the modulator (or single samples inserted/dropped in a
+   pre-rendered multiplex) pulls the emitted sample index onto GPS time.
+   Carrier and timeline then get different corrections: the carrier the
+   crystal error alone, the timeline the error plus the phase term.
 5. **Monitoring**: each client reports its sample-index-at-PPS and carrier
    offset; the server checks the network is coherent.
 

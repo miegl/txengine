@@ -21,9 +21,6 @@ fn check_common(hw: &HardwareArgs) -> anyhow::Result<()> {
     if hw.power > 7 {
         bail!("--power must be 0-7");
     }
-    if !(-1000.0..=1000.0).contains(&hw.ppm) {
-        bail!("--ppm must be within ±1000");
-    }
     Ok(())
 }
 
@@ -42,7 +39,6 @@ fn rp1_config(hw: &HardwareArgs) -> anyhow::Result<rp1::fm::Rp1FmConfig> {
         sample_rate: hw.sample_rate.unwrap_or(250_000.0),
         buffer: Duration::from_millis(hw.buffer_ms),
         max_offset_hz: 100_000.0,
-        ppm: hw.ppm,
         dma_channel: hw.dma_channel,
         tick: 0,
     })
@@ -101,7 +97,6 @@ fn bcm_config(hw: &HardwareArgs) -> anyhow::Result<bcm::fm::BcmFmConfig> {
         sample_rate: hw.sample_rate,
         buffer: Duration::from_millis(hw.buffer_ms),
         max_offset_hz: 100_000.0,
-        ppm: hw.ppm,
         dma_channel: hw.dma_channel,
         max_vco_change: 0.03,
     })
@@ -124,6 +119,14 @@ pub fn probe(hw: &HardwareArgs) -> anyhow::Result<()> {
         let problems = p.problems();
         println!("Power:    {}", if problems.is_empty() { "ok".to_string() } else { format!("{} ({:#x})", problems.join(", "), p.0) });
     }
+    match crate::rt::kernel_clock() {
+        Some(k) if k.synchronised => println!(
+            "Time:     system clock synchronised (NTP frequency correction {:+.3} ppm); --ppm auto measures the crystal",
+            k.frequency * 1e6
+        ),
+        Some(_) => println!("Time:     system clock not synchronised; --ppm auto cannot measure the crystal error"),
+        None => {}
+    }
     match plat.soc {
         Soc::Bcm2712 => {
             let cfg = rp1_config(hw)?;
@@ -135,7 +138,7 @@ pub fn probe(hw: &HardwareArgs) -> anyhow::Result<()> {
                 .map(|&g| rp1::gpio::gpclk_for_pin(g).map(|(n, _)| n))
                 .collect::<Option<Vec<_>>>()
                 .context("unsupported output GPIO")?;
-            let xosc = plat.osc_hz * (1.0 + cfg.ppm * 1e-6);
+            let xosc = plat.osc_hz;
             let plan = rp1::fm::plan_clocks(cfg.pll, gpclk[0], cfg.carrier_hz, xosc, cfg.max_offset_hz)?;
             println!(
                 "Carrier:  {:.6} MHz on GPIO{:?} via clk_gp{} from {}",
@@ -176,7 +179,7 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<()> {
     let cfg = bcm_config(hw)?;
     let b = Bcm::open(plat)?;
     let cm = Cprman::new(b.cm.clone());
-    let osc = plat.osc_hz * (1.0 + cfg.ppm * 1e-6);
+    let osc = plat.osc_hz;
     let (gpclk, _) = bcm::gpclk_for_pin(cfg.gpios[0]).context("unsupported output GPIO")?;
     let gp_ctl = bcm::regs::cm::gp(gpclk);
     println!("Output:   GPIO{:?} via GPCLK{gpclk}", cfg.gpios);

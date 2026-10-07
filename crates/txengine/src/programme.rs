@@ -130,8 +130,9 @@ fn end_policy(p: &ProgrammeArgs, stdin: bool) -> EndOfInput {
     if stdin { EndOfInput::Wait } else { EndOfInput::Repeat }
 }
 
-/// Open the programme input at the modulator's audio rate.
-pub fn open_programme(p: &ProgrammeArgs, audio_rate: f64) -> anyhow::Result<Programme> {
+/// Open the programme input at the modulator's audio rate. `realtime`:
+/// for a transmitter, whose crystal error is corrected while running.
+pub fn open_programme(p: &ProgrammeArgs, audio_rate: f64, realtime: bool) -> anyhow::Result<Programme> {
     let (spec, stdin) = match (&p.audio, p.tone) {
         (_, Some(f)) => (InputSpec::Tone { freq: f, amplitude: 0.5, stereo: false }, false),
         (None, None) => return Ok(Programme::None),
@@ -142,16 +143,17 @@ pub fn open_programme(p: &ProgrammeArgs, audio_rate: f64) -> anyhow::Result<Prog
         (Some(a), None) => (InputSpec::File(PathBuf::from(a)), false),
     };
     let end = end_policy(p, stdin);
-    let opts = AudioOptions { end, buffer: Duration::from_millis(500), ..Default::default() };
+    let opts = AudioOptions { end, buffer: Duration::from_millis(500), adjustable_rate: realtime, ..Default::default() };
     let input = AudioInput::open(&spec, audio_rate, &opts)?;
     Ok(Programme::Audio(input, end))
 }
 
-/// Create the modulator for an output running at `sample_rate`.
-pub fn build_modulator(p: &ProgrammeArgs, sample_rate: f64) -> anyhow::Result<WfmModulator> {
+/// Create the modulator for an output running at `sample_rate` (in real
+/// time for a transmitter).
+pub fn build_modulator(p: &ProgrammeArgs, sample_rate: f64, realtime: bool) -> anyhow::Result<WfmModulator> {
     let cfg = mpx_config(p)?;
     let rds = rds_params(p)?;
-    let programme = open_programme(p, WfmModulator::audio_rate_for(sample_rate))?;
+    let programme = open_programme(p, WfmModulator::audio_rate_for(sample_rate), realtime)?;
     let mut m = WfmModulator::new(cfg, programme, rds, p.rds != 0).map_err(anyhow::Error::msg)?;
     m.set_local_offset_fn(Box::new(crate::rt::local_offset));
     Ok(m)

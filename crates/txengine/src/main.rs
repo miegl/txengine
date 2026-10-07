@@ -2,6 +2,7 @@
 
 mod analyze;
 mod cli;
+mod clock;
 mod control;
 mod engine;
 mod hw;
@@ -50,8 +51,9 @@ fn transmit(a: &cli::TxArgs) -> anyhow::Result<()> {
     // The hardware is opened while still single threaded: it forks the
     // shutdown guardian.
     let mut sink = hw::open_transmitter(&a.hw)?;
-    let mut m = programme::build_modulator(&a.prog, sink.info().sample_rate)?;
+    let mut m = programme::build_modulator(&a.prog, sink.info().sample_rate, true)?;
     m.configure(sink.info()).map_err(anyhow::Error::msg)?;
+    let mut clock = clock::ClockDiscipline::new(a.hw.ppm, Box::new(clock::SystemClock::default()));
 
     let control = if a.ctl.is_some() || a.ctl_socket.is_some() {
         let (tx, rx) = control::channel_pair();
@@ -72,7 +74,7 @@ fn transmit(a: &cli::TxArgs) -> anyhow::Result<()> {
         status_interval: (a.status_interval > 0.0).then(|| Duration::from_secs_f64(a.status_interval)),
         start_time: None,
     };
-    let summary = engine::run(sink.as_mut(), &mut m, control, &opts);
+    let summary = engine::run(sink.as_mut(), &mut m, Some(&mut clock), control, &opts);
     // Always release the hardware, even after an error.
     sink.stop().ok();
     let summary = summary?;
@@ -95,6 +97,9 @@ fn tone(a: &cli::ToneArgs) -> anyhow::Result<()> {
         anyhow::bail!("tones must be below half the sample rate ({:.0} Hz)", fs / 2.0);
     }
     info!("tones {:?} Hz at ±{:.0} Hz each, sample rate {:.3} kS/s", a.tones, a.deviation, fs / 1e3);
+    // Only the carrier is corrected: the tones are raw test signals.
+    let mut clock = clock::ClockDiscipline::new(a.hw.ppm, Box::new(clock::SystemClock::default()));
+    clock.attach(sink.as_mut())?;
     rt::make_realtime(30);
     let table = txengine_dsp::SineTable::new();
     let mut osc: Vec<_> = a.tones.iter().map(|&f| txengine_dsp::PhaseAccumulator::new(f, fs)).collect();
@@ -117,7 +122,7 @@ fn tone(a: &cli::ToneArgs) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     let result = (|| -> anyhow::Result<u64> {
         while !rt::stop_requested() && start.elapsed().as_secs_f64() < a.duration {
-            let p = sink.poll()?;
+            let p = clock.poll(sink.as_mut())?;
             if p.writable >= 1024 {
                 let k = p.writable.min(buf.len());
                 fill(&mut buf[..k]);
@@ -129,7 +134,7 @@ fn tone(a: &cli::ToneArgs) -> anyhow::Result<()> {
         Ok(sink.poll()?.underruns)
     })();
     sink.stop().ok();
-    info!("stopped after {:.1} s, {} underruns", start.elapsed().as_secs_f64(), result?);
+    info!("stopped after {:.1} s, {} underruns; {}", start.elapsed().as_secs_f64(), result?, clock.describe());
     Ok(())
 }
 
@@ -151,7 +156,7 @@ fn render(a: &cli::RenderArgs) -> anyhow::Result<()> {
         // A rendered file should end with the input.
         prog.on_end = Some(cli::OnEnd::Stop);
     }
-    let mut m = programme::build_modulator(&prog, fs)?;
+    let mut m = programme::build_modulator(&prog, fs, false)?;
     m.configure(sink.info()).map_err(anyhow::Error::msg)?;
     let start = a.start_time.unwrap_or_else(rt::unix_now);
     let opts = engine::EngineOptions { duration: None, status_interval: None, start_time: Some(start) };
@@ -163,7 +168,7 @@ fn render(a: &cli::RenderArgs) -> anyhow::Result<()> {
     }
     let mut limited = Limited { inner: sink.as_mut(), left: total };
     let t = std::time::Instant::now();
-    let s = engine::run(&mut limited, &mut m, None, &opts)?;
+    let s = engine::run(&mut limited, &mut m, None, None, &opts)?;
     info!(
         "rendered {:.2} s of signal in {:.2} s ({:.1}x real time)",
         s.samples as f64 / fs,

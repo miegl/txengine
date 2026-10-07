@@ -26,6 +26,9 @@ pub struct SinkInfo {
     pub max_offset_hz: f64,
     /// Smallest frequency step the sink can produce at the carrier, in Hz.
     pub resolution_hz: f64,
+    /// Largest error of the sink's reference oscillator (± ppm) that
+    /// [`RfSink::set_clock_error_ppm`] can correct; 0 if it cannot.
+    pub max_clock_error_ppm: f64,
     /// Total buffer capacity in samples (the transmit latency when full).
     pub buffer_len: usize,
     /// Sample format the sink consumes.
@@ -134,10 +137,20 @@ pub trait RfSink: Send {
     /// Stop emitting and release the hardware. Idempotent.
     fn stop(&mut self) -> Result<(), SinkError>;
 
-    /// Apply a frequency correction in parts per million to the carrier.
-    /// Used for oscillator calibration and, in the future, for disciplining
-    /// the carrier to an external reference. Returns false if unsupported.
-    fn set_carrier_correction_ppm(&mut self, _ppm: f64) -> Result<bool, SinkError> {
-        Ok(false)
+    /// Tell the sink that its reference oscillator (the crystal its clocks
+    /// derive from) runs `ppm` parts per million fast (negative: slow). The
+    /// sink retunes the carrier so that it, and the frequency offsets of the
+    /// samples, are right in true frequency, starting with the next samples
+    /// written. The sample clock is not changed: samples are emitted at
+    /// [`SinkInfo::sample_rate`]` · (1 + ppm · 10⁻⁶)`, which modulators learn
+    /// from [`RenderContext::sample_rate`](crate::RenderContext::sample_rate). May be
+    /// called at any time, also before [`RfSink::start`]; fails beyond
+    /// ±[`SinkInfo::max_clock_error_ppm`].
+    fn set_clock_error_ppm(&mut self, ppm: f64) -> Result<(), SinkError> {
+        if ppm == 0.0 {
+            Ok(())
+        } else {
+            Err(SinkError::config("this output cannot correct a clock error"))
+        }
     }
 }

@@ -32,6 +32,7 @@ use super::gpio::{Drive, Gpio, PinRegs, gpclk_for_pin};
 use super::regs::{self, dmac::*, lli};
 use super::ticks::DmaTick;
 use super::Rp1;
+use crate::MAX_CLOCK_ERROR_PPM;
 use crate::error::{HalError, Result};
 use crate::guardian::Guardian;
 use crate::mem::pinned::PinnedMemory;
@@ -72,8 +73,6 @@ pub struct Rp1FmConfig {
     pub buffer: Duration,
     /// Largest frequency offset the plan must accommodate (Hz).
     pub max_offset_hz: f64,
-    /// Crystal error correction in ppm (positive if the crystal runs fast).
-    pub ppm: f64,
     /// Force a DMA channel (0-7) instead of picking a free one.
     pub dma_channel: Option<usize>,
     /// DMA tick generator to pace with (0 or 1).
@@ -90,7 +89,6 @@ impl Default for Rp1FmConfig {
             sample_rate: 250_000.0,
             buffer: Duration::from_millis(60),
             max_offset_hz: 100_000.0,
-            ppm: 0.0,
             dma_channel: None,
             tick: 0,
         }
@@ -120,13 +118,25 @@ pub struct ClockPlan {
     pub frac_per_hz: f64,
     /// Achieved carrier frequency (after rounding of the fraction).
     pub carrier_hz: f64,
-    /// Largest offset that keeps the fraction inside [0, 2^24).
+    /// Largest offset that keeps the fraction inside [0, 2^24) under any
+    /// crystal error correction up to ±[`MAX_CLOCK_ERROR_PPM`].
     pub max_offset_hz: f64,
+}
+
+impl ClockPlan {
+    /// Feedback fraction at the carrier centre and fraction units per Hz
+    /// when the crystal runs `ppm` fast: the whole feedback divider shrinks
+    /// by `1 + ppm · 10⁻⁶`, so that the VCO keeps its nominal frequency.
+    pub fn corrected(&self, ppm: f64) -> (f64, f64) {
+        let k = 1.0 / (1.0 + ppm * 1e-6);
+        let int = self.fbdiv_int as f64 * FRAC_ONE;
+        ((int + self.frac_center) * k - int, self.frac_per_hz * k)
+    }
 }
 
 const FRAC_ONE: f64 = (1u64 << regs::clk::PLL_FRAC_BITS) as f64;
 
-/// Choose dividers for `carrier_hz`.
+/// Choose dividers for `carrier_hz`, from a reference of nominally `ref_hz`.
 pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_offset_hz: f64) -> Result<ClockPlan> {
     let (auxsrc, phase_div) = match (pll, gpclk) {
         (Rp1Pll::Audio, 0) => (7, 1), // pll_audio
@@ -141,6 +151,8 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
             return Err(HalError::Config("the video PLL only reaches GPCLK2 (GPIO6)".into()));
         }
     };
+    // Room for correcting the crystal error at run time.
+    let reserve_hz = carrier_hz * MAX_CLOCK_ERROR_PPM * 1e-6;
     // The kernel runs pll_audio_core at 1536 MHz; stay in that region.
     const PREFERRED_VCO: f64 = 1536e6;
     let windows = [(1000e6, 1600e6), (800e6, 2400e6)];
@@ -160,7 +172,7 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
                     if !(16.0..=320.0).contains(&int) {
                         continue;
                     }
-                    let dev = max_offset_hz * n as f64 / ref_hz;
+                    let dev = (max_offset_hz + reserve_hz) * n as f64 / ref_hz;
                     let margin = (frac - dev).min(1.0 - (frac + dev));
                     if margin < 0.01 {
                         continue;
@@ -173,7 +185,7 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
                         let frac_center = (frac * FRAC_ONE).round();
                         let frac_per_hz = n as f64 / ref_hz * FRAC_ONE;
                         let achieved = (int + frac_center / FRAC_ONE) * ref_hz / n as f64;
-                        let max_off = (frac_center.min(FRAC_ONE - 1.0 - frac_center)) / frac_per_hz;
+                        let max_off = (frac_center.min(FRAC_ONE - 1.0 - frac_center)) / frac_per_hz - reserve_hz;
                         best = Some((
                             score,
                             ClockPlan {
@@ -252,6 +264,10 @@ impl Restorer {
 pub struct Rp1FmTransmitter {
     info: SinkInfo,
     plan: ClockPlan,
+    /// Fraction at the carrier centre and per Hz of offset, corrected for
+    /// the crystal error.
+    frac_center: f64,
+    frac_per_hz: f64,
     rp1: Rp1,
     dmac: Dmac,
     ch: DmaChannel,
@@ -322,7 +338,7 @@ impl Rp1FmTransmitter {
         }
         let gpclk = gpclk.expect("at least one pin");
 
-        let xosc = xosc_hz * (1.0 + cfg.ppm * 1e-6);
+        let xosc = xosc_hz;
         let rp1 = Rp1::open()?;
         let clocks = rp1.clocks();
         let clocks_set = rp1.block_set(regs::CLOCKS_MAIN);
@@ -416,6 +432,7 @@ impl Rp1FmTransmitter {
             carrier_hz: plan.carrier_hz,
             max_offset_hz: plan.max_offset_hz,
             resolution_hz: 1.0 / plan.frac_per_hz,
+            max_clock_error_ppm: MAX_CLOCK_ERROR_PPM,
             buffer_len: (blocks - 1) * block_len,
             format: SampleFormat::FrequencyOffset,
             realtime: true,
@@ -425,6 +442,8 @@ impl Rp1FmTransmitter {
 
         let mut tx = Rp1FmTransmitter {
             info,
+            frac_center: plan.frac_center,
+            frac_per_hz: plan.frac_per_hz,
             plan,
             rp1,
             dmac,
@@ -475,7 +494,7 @@ impl Rp1FmTransmitter {
     }
 
     fn frac_word(&self, offset_hz: f32) -> u32 {
-        let f = self.plan.frac_center + offset_hz as f64 * self.plan.frac_per_hz;
+        let f = self.frac_center + offset_hz as f64 * self.frac_per_hz;
         f.round().clamp(0.0, FRAC_ONE - 1.0) as u32
     }
 
@@ -771,13 +790,43 @@ impl RfSink for Rp1FmTransmitter {
         Ok(())
     }
 
-    fn set_carrier_correction_ppm(&mut self, _ppm: f64) -> Result<bool, SinkError> {
-        Ok(false)
+    fn set_clock_error_ppm(&mut self, ppm: f64) -> Result<(), SinkError> {
+        if !(-MAX_CLOCK_ERROR_PPM..=MAX_CLOCK_ERROR_PPM).contains(&ppm) {
+            return Err(SinkError::config(format!("crystal error {ppm} ppm is outside ±{MAX_CLOCK_ERROR_PPM} ppm")));
+        }
+        (self.frac_center, self.frac_per_hz) = self.plan.corrected(ppm);
+        Ok(())
     }
 }
 
 impl Drop for Rp1FmTransmitter {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plans_leave_room_to_correct_the_crystal() {
+        for (pll, gpclk) in [(Rp1Pll::Audio, 0), (Rp1Pll::Audio, 1), (Rp1Pll::Video, 2)] {
+            for mhz in [65.8, 76.0, 87.6, 88.1, 98.5, 107.9] {
+                let plan = plan_clocks(pll, gpclk, mhz * 1e6, 50e6, 100e3).unwrap();
+                assert!(plan.max_offset_hz >= 100e3, "{mhz} MHz: {plan:?}");
+                for ppm in [-MAX_CLOCK_ERROR_PPM, -12.5, 0.0, 30.0, MAX_CLOCK_ERROR_PPM] {
+                    let (center, per_hz) = plan.corrected(ppm);
+                    for offset in [-100e3, 0.0, 100e3] {
+                        let frac = center + offset * per_hz;
+                        assert!((0.0..FRAC_ONE).contains(&frac), "{mhz} MHz, {ppm} ppm, {offset} Hz");
+                        // With the reference `ppm` off, the output is where
+                        // it would be with a perfect reference.
+                        let out = 50e6 * (1.0 + ppm * 1e-6) * (plan.fbdiv_int as f64 + frac / FRAC_ONE) / plan.n as f64;
+                        assert!((out - plan.carrier_hz - offset).abs() < 1e-3, "{mhz} MHz, {ppm} ppm: {out}");
+                    }
+                }
+            }
+        }
     }
 }

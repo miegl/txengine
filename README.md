@@ -23,6 +23,11 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
     other parts of the system are only retuned within ±3 %.
   * Pi 5 (RP1): fractional-N modulation of the RP1 audio or video PLL
     (24-bit fraction, < 0.1 Hz steps).
+* **Crystal error correction**: the board's crystal error is measured
+  continuously against the system clock (NTP, or GPS through chrony) and
+  corrected in the carrier frequency, the subcarriers and the playback
+  speed; no calibration, and it follows temperature drift. A known error
+  can be given instead (`--ppm`).
 * **Multiplex** (all derived from one phase accumulator, so pilot, 38 kHz,
   57 kHz and the RDS bit clock are exactly locked): 50/75 µs pre-emphasis,
   15 kHz programme low-pass, look-ahead peak limiter that bounds the true
@@ -116,8 +121,48 @@ answers with `OK ...` or `ERR ...`):
 | `AF 87.6,99.5 \| OFF` | alternative frequencies |
 | `RDS 0\|1`, `RDSLEVEL hz` | RDS on/off, injection level |
 | `GAIN db` | programme gain |
+| `PPM`, `PPM auto\|ppm\|off` | report the crystal error correction; measure, fix or turn it off |
 | `STATUS` | current settings and counters |
 | `QUIT` | stop transmitting |
+
+### Frequency accuracy
+
+Every clock of the transmitter comes from the board's crystal, which is a
+few ppm to a few tens of ppm off and drifts with temperature (10 ppm is
+876 Hz at 87.6 MHz). That one error shifts the carrier, and it makes the
+hardware emit the samples slightly too fast or too slow, which shifts the
+pilot and the subcarriers and changes the playback speed. With the default
+`--ppm auto`, txengine times the hardware's sample counter against the
+system clock while transmitting, fits the crystal error (exponentially
+weighted over about two minutes, so it follows a warming board) and
+corrects both: the carrier synthesiser is retuned, and the multiplex is
+rendered for the actual sample rate (pilot, subcarriers, RDS bit rate and
+the programme's playback speed). The hardware sample clock itself is never
+changed, so the correction cannot fill or drain any buffer; a live input
+keeps following its own clock through its drift compensation.
+
+The system clock has to be synchronised by an NTP daemon (chrony,
+systemd-timesyncd, ...); until it is, txengine transmits uncorrected and
+says so (`txengine probe` shows the state). The reference is the frequency
+the daemon has measured for the system clock, so the result is as good as
+that. With chrony (polling a LAN server every 16-64 s) the carrier, pilot
+and playback speed of our three boards came within 0.3 ppm (26 Hz at
+87.6 MHz); with systemd-timesyncd, which polls only every 34 minutes, the
+Pi 5 was 2.7 ppm off. Use chrony. The first measurement is used after about 25 s. The
+status line shows the correction in effect, and `PPM` on the control
+interface reports the measurement in detail:
+
+```
+crystal error +6.73 ppm (measured against the system clock): correcting the carrier by -590 Hz and the sample rate
+```
+
+Without network time, give the error (`--ppm 6.44`, positive when the
+crystal runs fast; `txengine tx` and `txengine tone` print the measured value
+on a board that has NTP); txengine keeps measuring and reports it, but
+applies the given value. `--ppm off` turns the correction off (no
+measurement either). For GPS accuracy, let chrony discipline the system
+clock from a GPS receiver's PPS signal (gpsd + chrony's `refclock`); txengine
+then measures against GPS time.
 
 ### Testing without hardware
 
@@ -142,6 +187,7 @@ Measured over the air with a USRP B210 (`tools/sdr_capture.py`,
 | Stereo separation (1 kHz, left only) | > 50 dB | > 50 dB | > 60 dB |
 | RDS injection | 2.02-2.06 kHz (target 2.0) | 2.03 kHz | 2.04 kHz |
 | RDS block errors | 0 % | 0 % | 0 % (also at the end of a 10 min run) |
+| Crystal error (carrier, pilot, playback speed) | −54 ppm; −0.3 ppm with `--ppm auto` | +7.3 ppm; +0.1 ppm with `--ppm auto` | +4.7 ppm; < 0.1 ppm with `--ppm auto` |
 | Timing | no sample slips in 25 s tone tests | no sample slips | no sample slips |
 | Modulation THD (10 kHz) | −71 dB | | |
 | CPU (stereo + RDS, one core) | | 24 % at 600 MHz (throttled) | 11 % at 1 GHz, plus 4 % audio decoding |
