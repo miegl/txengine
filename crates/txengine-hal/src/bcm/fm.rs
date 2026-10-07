@@ -31,12 +31,13 @@ use super::cprman::{Cprman, Pll, PllId, PllState};
 use super::dma::{ControlBlock, DmaChannel};
 use super::regs::{self, cm, dma as dmar, pads, pcm, pwm};
 use super::{Bcm, gpclk_for_pin};
-use crate::platform::Soc;
+use crate::cpufreq::CpuClockPin;
 use crate::error::{HalError, Result};
 use crate::guardian::Guardian;
 use crate::mem::mailbox::VcMemory;
 use crate::mem::{DmaMemory, DmaMemoryExt};
 use crate::mmio::Mmio;
+use crate::platform::Soc;
 
 /// How the carrier is frequency modulated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +366,7 @@ struct Restorer {
     pcm_saved: [u32; 4],
     pins: Vec<PinState>,
     pll: Option<(Pll, PllState)>,
+    cpu: CpuClockPin,
 }
 
 impl Restorer {
@@ -402,6 +404,19 @@ impl Restorer {
             && let Err(e) = pll.restore(s) {
                 warn!("{}: {e}", pll.id.name());
             }
+        self.cpu.restore();
+    }
+}
+
+/// Restores the CPU clock if construction fails before the [`Restorer`]
+/// has taken it over.
+struct CpuPinGuard(Option<CpuClockPin>);
+
+impl Drop for CpuPinGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            p.restore();
+        }
     }
 }
 
@@ -530,6 +545,9 @@ impl BcmFmTransmitter {
             BcmMethod::Pll(id) => Some(pll_of(id)),
             BcmMethod::ClkDiv => None,
         };
+        // From here on the DMA engine writes the PLL over the A2W bus, which
+        // must not meet the firmware's CPU clock changes (see `cpufreq`).
+        let mut cpu = CpuPinGuard(pll.is_some().then(CpuClockPin::pin));
 
         // Pacer clock: PLLD_PER unless we modulate PLLD, else the crystal.
         let plld = pll_of(PllId::D);
@@ -640,6 +658,7 @@ impl BcmFmTransmitter {
             pcm_saved: [bcm.pcm.read(pcm::CS), bcm.pcm.read(pcm::MODE), bcm.pcm.read(pcm::TXC), bcm.pcm.read(pcm::DREQ_A)],
             pins: pins_state,
             pll: pll.as_ref().map(|p| (p.clone(), p.snapshot())),
+            cpu: cpu.0.take().unwrap_or_default(),
         };
 
         let users: Vec<String> = plan.per_users.iter().chain(&plan.other_users).cloned().collect();

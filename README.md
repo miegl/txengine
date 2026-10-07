@@ -152,6 +152,13 @@ Hardware-specific findings that txengine handles:
   rate with 15 % margin (`--sample-rate` above the capacity is refused), and
   it watches the achieved rate while running. The PLL's loop response is
   measured and compensated, which is what brings the separation above 50 dB.
+* **BCM283x/BCM2711, CPU clock changes:** the firmware changes the ARM clock
+  over the same slow PLL register bus that the DMA engine keeps busy. When
+  the two collide, the firmware's write lands in the modulated PLL instead:
+  on the Zero 2 W the carrier vanished a few seconds into a transmission.
+  txengine holds the CPU clock at its maximum (cpufreq governor
+  `performance`) while it modulates a PLL and restores the previous governor
+  afterwards, even after `kill -9`.
 * **Zero 2 W (Cortex-A53):** a floating-point register load from a
   peripheral register at an address ≡ 4 (mod 8) returns the register below
   it. All register accesses are explicit 32-bit integer loads and stores.

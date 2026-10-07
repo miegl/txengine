@@ -154,6 +154,13 @@ divider register, paced by hardware.
 * The DMA engine's write rate to the PLL registers is limited (≈ 231 k
   writes/s on the Pi 2), so the sample rate is chosen from a measurement at
   start-up, and the achieved rate is checked continuously.
+* The PLL registers sit behind the slow A2W bus, which the firmware also
+  uses to change the ARM clock (PLLB). If a firmware write meets one of the
+  DMA engine's, it lands in the modulated PLL's registers instead (PLLB's
+  registers are PLLA's plus 0xe0; on a Zero 2 W, PLLA's control register
+  read 0 and its channel dividers were overwritten). While a PLL is
+  modulated, the cpufreq governor is therefore set to `performance` (and
+  restored afterwards, also by the guardian).
 * Every register and DMA-memory access is a single 32-bit `ldr`/`str` from
   a general-purpose register (`mmio::load32`/`store32`). Plain volatile
   accesses may be compiled to floating-point register loads when the value
