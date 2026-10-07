@@ -204,3 +204,24 @@ fn silence_after_the_end_is_not_an_underrun() {
         }
     }
 }
+
+#[test]
+fn measured_output_response_is_equalised() {
+    // An output stage that lifts high modulation frequencies (like the
+    // BCM283x PLL loop), on top of the sample-and-hold: after the generator's
+    // pre-compensation the on-air levels must be the nominal ones.
+    let table = [(0.0, 0.0), (10e3, 0.03), (19e3, 0.10), (38e3, 0.34), (57e3, 0.50), (67e3, 0.545)];
+    let fs = 195_925.0;
+    let response = |f: f64| sinc(f / fs) * 10f64.powf(txengine_core::interpolate_db(&table, f) / 20.0);
+    let cfg = MpxConfig { preemphasis: None, rds_deviation: 0.0, output_response_db: table.to_vec(), ..Default::default() };
+    let (x, mpx) = render(cfg, fs, (1000.0, 0.5), (1000.0, 0.0), 2.0);
+    let (p, _) = component(&x, fs, 19_000.0);
+    assert!((p * response(19_000.0) - 6_750.0).abs() < 7.0, "pilot {:.1}", p * response(19_000.0));
+    // Left only: M = S = A/2 on air, S as two sidebands of S/2 each.
+    let m = component(&x, fs, 1000.0).0 * response(1000.0);
+    let lo = component(&x, fs, 37_000.0).0 * response(37_000.0);
+    let hi = component(&x, fs, 39_000.0).0 * response(39_000.0);
+    let half = 0.25 * mpx.audio_deviation();
+    assert!((m - half).abs() < 0.002 * half, "M {m:.1}, expected {half:.1}");
+    assert!((lo + hi - m).abs() < 0.002 * m, "S sidebands {lo:.1} + {hi:.1}, M {m:.1}");
+}
