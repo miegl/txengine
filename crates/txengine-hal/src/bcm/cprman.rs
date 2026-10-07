@@ -177,16 +177,25 @@ impl PllId {
     }
 
     /// All channels of this PLL other than PER: (name, A2W register,
-    /// VPU-mux source number if a CM clock can select it).
-    fn other_channels(self) -> &'static [(&'static str, usize, Option<u32>)] {
+    /// VPU-mux source number if a CM clock can select it, LOAD bit in the
+    /// CM_PLLx register).
+    fn other_channels(self) -> &'static [(&'static str, usize, Option<u32>, u32)] {
         match self {
-            PllId::A => &[("PLLA_CORE", A2W_PLLA_CORE, Some(4)), ("PLLA_DSI0", A2W_PLLA_DSI0, None), ("PLLA_CCP2", A2W_PLLA_CCP2, None)],
-            PllId::C => &[
-                ("PLLC_CORE0", A2W_PLLC_CORE0, Some(5)),
-                ("PLLC_CORE1", A2W_PLLC_CORE1, Some(8)),
-                ("PLLC_CORE2", A2W_PLLC_CORE2, Some(9)),
+            PllId::A => &[
+                ("PLLA_CORE", A2W_PLLA_CORE, Some(4), 1 << 4),
+                ("PLLA_DSI0", A2W_PLLA_DSI0, None, 1 << 0),
+                ("PLLA_CCP2", A2W_PLLA_CCP2, None, 1 << 2),
             ],
-            PllId::D => &[("PLLD_CORE", A2W_PLLD_CORE, Some(6)), ("PLLD_DSI0", A2W_PLLD_DSI0, None), ("PLLD_DSI1", A2W_PLLD_DSI1, None)],
+            PllId::C => &[
+                ("PLLC_CORE0", A2W_PLLC_CORE0, Some(5), 1 << 0),
+                ("PLLC_CORE1", A2W_PLLC_CORE1, Some(8), 1 << 2),
+                ("PLLC_CORE2", A2W_PLLC_CORE2, Some(9), 1 << 4),
+            ],
+            PllId::D => &[
+                ("PLLD_CORE", A2W_PLLD_CORE, Some(6), 1 << 4),
+                ("PLLD_DSI0", A2W_PLLD_DSI0, None, 1 << 0),
+                ("PLLD_DSI1", A2W_PLLD_DSI1, None, 1 << 2),
+            ],
         }
     }
 }
@@ -199,7 +208,21 @@ pub struct PllState {
     pub frac: u32,
     pub ana: [u32; 4],
     pub per: u32,
+    /// The other channels' dividers, as listed by `other_channels`.
+    pub channels: [u32; 3],
     pub xosc: u32,
+}
+
+/// PLL settings that determine its PER output, apart from the fraction
+/// (see [`Pll::config`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PllConfig {
+    pub cm: u32,
+    pub ctrl: u32,
+    pub ana: [u32; 4],
+    pub per: u32,
+    /// The other channels' dividers (not compared by [`Pll::matches`]).
+    pub channels: [u32; 3],
 }
 
 /// Peripheral-mux clocks (sources 4/5/6 are PLLA/C/D PER).
@@ -251,6 +274,7 @@ impl Pll {
             frac: self.cm.read(r.frac),
             ana: [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i)),
             per: self.cm.read(r.per),
+            channels: self.channel_dividers(),
             xosc: self.cm.read(A2W_XOSC_CTRL),
         }
     }
@@ -306,7 +330,7 @@ impl Pll {
                 per_users.push(name.to_string());
             }
         }
-        for &(cname, reg, vpu_src) in self.id.other_channels() {
+        for &(cname, reg, vpu_src, _) in self.id.other_channels() {
             if self.cm.read(reg) & A2W_CHANNEL_DISABLE != 0 {
                 continue;
             }
@@ -394,6 +418,86 @@ impl Pll {
         self.id.regs().frac
     }
 
+    /// The configuration that keeps the PER output running, except the
+    /// fraction (which the DMA engine rewrites continuously).
+    pub fn config(&self) -> PllConfig {
+        let r = self.id.regs();
+        PllConfig {
+            cm: self.cm.read(r.cm),
+            ctrl: self.cm.read(r.ctrl),
+            ana: [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i)),
+            per: self.cm.read(r.per),
+            channels: self.channel_dividers(),
+        }
+    }
+
+    fn channel_dividers(&self) -> [u32; 3] {
+        [0, 1, 2].map(|i| self.cm.read(self.id.other_channels()[i].1))
+    }
+
+    /// Put the other channels' dividers back where they differ from
+    /// `saved` (a bus collision can overwrite them, see `crate::cpufreq`).
+    fn restore_channels(&self, saved: &[u32; 3]) {
+        let cm = self.id.regs().cm;
+        for (&(name, reg, _, load), &want) in self.id.other_channels().iter().zip(saved) {
+            if self.cm.read(reg) != want {
+                warn!("{name} was changed while transmitting; restoring it");
+                self.cm.write(reg, want);
+                let c = self.cm.read(cm);
+                self.cm.write(cm, c | load);
+                self.cm.write(cm, c & !load);
+            }
+        }
+    }
+
+    /// Whether the PLL still runs as configured in `good` (and is locked).
+    /// Only the fields that determine the PER output are compared, so
+    /// changes the firmware makes to other channels are left alone.
+    pub fn matches(&self, good: &PllConfig) -> bool {
+        let now = self.config();
+        let ctrl_mask = A2W_CTRL_NDIV_MASK | A2W_CTRL_PDIV_MASK | A2W_CTRL_PWRDN;
+        let per_mask = A2W_CHANNEL_DIV_MASK | A2W_CHANNEL_DISABLE;
+        let cm_mask = PLL_ANARST | PLL_HOLDPER;
+        self.is_locked()
+            && now.ctrl & ctrl_mask == good.ctrl & ctrl_mask
+            && now.per & per_mask == good.per & per_mask
+            && now.cm & cm_mask == good.cm & cm_mask
+            && now.ana == good.ana
+    }
+
+    /// Bring the PLL back to `good` after someone else changed it (the
+    /// fraction is left to the DMA engine): analogue settings, control
+    /// (reset and relock if it does not lock by itself), then the PER divider.
+    pub fn repair(&self, good: &PllConfig) -> Result<()> {
+        let r = self.id.regs();
+        if self.config().ana != good.ana {
+            for i in (0..4).rev() {
+                self.cm.write(r.ana0 + 4 * i, good.ana[i]);
+            }
+        }
+        self.cm.write(r.ctrl, good.ctrl);
+        self.cm.write(r.cm, good.cm & !(PLL_ANARST | PLL_LOADPER));
+        if wait_until(Duration::from_millis(5), "PLL relock", || self.is_locked()).is_err() {
+            // As Linux bcm2835_pll_on: reset, release, lock, then stop the
+            // post-divider from being reset again.
+            debug!("{} does not relock; resetting it", self.id.name());
+            self.cm.write(r.cm, self.cm.read(r.cm) | PLL_ANARST);
+            self.cm.write(r.ctrl, good.ctrl & !A2W_CTRL_PRST_DISABLE);
+            self.cm.write(r.cm, self.cm.read(r.cm) & !PLL_ANARST);
+            self.wait_lock()?;
+            self.cm.write(r.ctrl, good.ctrl);
+        }
+        self.cm.write(r.per, good.per);
+        let c = self.cm.read(r.cm);
+        self.cm.write(r.cm, c | PLL_LOADPER);
+        self.cm.write(r.cm, c & !PLL_LOADPER);
+        self.restore_channels(&good.channels);
+        if !self.matches(good) {
+            return Err(HalError::Hardware(format!("{}: could not restore its configuration", self.id.name())));
+        }
+        Ok(())
+    }
+
     /// Restore a snapshot.
     pub fn restore(&self, s: &PllState) -> Result<()> {
         let r = self.id.regs();
@@ -410,6 +514,7 @@ impl Pll {
         if s.ctrl & A2W_CTRL_PWRDN == 0 && s.cm & PLL_ANARST == 0 {
             self.wait_lock()?;
         }
+        self.restore_channels(&s.channels);
         self.cm.write(A2W_XOSC_CTRL, s.xosc);
         Ok(())
     }

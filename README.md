@@ -158,7 +158,9 @@ Hardware-specific findings that txengine handles:
   on the Zero 2 W the carrier vanished a few seconds into a transmission.
   txengine holds the CPU clock at its maximum (cpufreq governor
   `performance`) while it modulates a PLL and restores the previous governor
-  afterwards, even after `kill -9`.
+  afterwards, even after `kill -9`. Should the PLL still be changed (e.g. by
+  a thermal throttle), it is repaired, typically within 20 ms (a 12-16 ms
+  dropout in tests that forced collisions).
 * **Zero 2 W (Cortex-A53):** a floating-point register load from a
   peripheral register at an address ≡ 4 (mod 8) returns the register below
   it. All register accesses are explicit 32-bit integer loads and stores.

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
-use super::cprman::{Cprman, Pll, PllId, PllState};
+use super::cprman::{Cprman, Pll, PllConfig, PllId, PllState};
 use super::dma::{ControlBlock, DmaChannel};
 use super::regs::{self, cm, dma as dmar, pads, pcm, pwm};
 use super::{Bcm, gpclk_for_pin};
@@ -447,6 +447,10 @@ pub struct BcmFmTransmitter {
     mem: VcMemory,
     guardian: Option<Guardian>,
     pll: Option<Pll>,
+    /// The PLL as configured for transmission (checked for interference).
+    pll_good: Option<PllConfig>,
+    /// Last full comparison of the PLL's configuration with `pll_good`.
+    last_pll_check: Instant,
     // Layout (byte offsets in `mem`).
     n: usize,
     cb_base: u32,
@@ -732,6 +736,8 @@ impl BcmFmTransmitter {
             mem,
             guardian: None,
             pll,
+            pll_good: None,
+            last_pll_check: Instant::now(),
             n,
             samples_off,
             idle_off,
@@ -870,6 +876,7 @@ impl BcmFmTransmitter {
                 if p.set_per {
                     pll.set_per(p.per_div)?;
                 }
+                self.pll_good = Some(pll.config());
                 self.cm.clock_start(gp_ctl, p.gpclk_src, p.gp_div, 0, 0)?;
             }
             BcmMethod::ClkDiv => {
@@ -1019,10 +1026,28 @@ impl BcmFmTransmitter {
         if self.cm.read(cm::gp(self.plan.gpclk)) & cm::ENAB == 0 {
             return Err(HalError::Hardware(format!("GPCLK{} was disabled externally", self.plan.gpclk)));
         }
-        if let Some(p) = &self.pll
-            && !p.is_locked() {
-                warn!("{} lost lock", p.id.name());
-            }
+        // The lock bit is in the clock manager and cheap to watch. The PLL's
+        // own registers are on the A2W bus, and reading them disturbs the
+        // DMA engine's writes there (on a Pi 2, reading them every 20 ms cost
+        // 0.07 dB of pilot level and 0.08 dB of S/M balance), so the full
+        // comparison runs once a second.
+        let full = self.last_pll_check.elapsed() >= Duration::from_secs(1);
+        if full {
+            self.last_pll_check = Instant::now();
+        }
+        if let (Some(p), Some(good)) = (&self.pll, &self.pll_good)
+            && (!p.is_locked() || (full && !p.matches(good)))
+        {
+            let now = p.config();
+            warn!(
+                "{} was changed behind txengine's back (CTRL {:#x}, PER {:#x}, {}); restoring it",
+                p.id.name(),
+                now.ctrl,
+                now.per,
+                if p.is_locked() { "locked" } else { "not locked" }
+            );
+            p.repair(good)?;
+        }
         Ok(())
     }
 
@@ -1088,7 +1113,9 @@ impl RfSink for BcmFmTransmitter {
 
     fn poll(&mut self) -> Result<SinkPoll, SinkError> {
         if self.running {
-            if self.last_health.elapsed() > Duration::from_millis(100) {
+            // Frequent enough that interference with the PLL is repaired
+            // within a few tens of milliseconds.
+            if self.last_health.elapsed() > Duration::from_millis(20) {
                 self.last_health = Instant::now();
                 self.check_health()?;
             }

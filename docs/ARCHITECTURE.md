@@ -160,7 +160,12 @@ divider register, paced by hardware.
   registers are PLLA's plus 0xe0; on a Zero 2 W, PLLA's control register
   read 0 and its channel dividers were overwritten). While a PLL is
   modulated, the cpufreq governor is therefore set to `performance` (and
-  restored afterwards, also by the guardian).
+  restored afterwards, also by the guardian). If the PLL is changed anyway
+  (e.g. by a firmware thermal throttle) it is repaired, including the
+  channels other clocks use: its lock bit is checked every 20 ms, its full
+  configuration once a second. Reading the A2W registers themselves
+  disturbs the DMA engine's writes (on a Pi 2, reading them every 20 ms
+  cost 0.08 dB of stereo balance), so they are not polled more often.
 * Every register and DMA-memory access is a single 32-bit `ldr`/`str` from
   a general-purpose register (`mmio::load32`/`store32`). Plain volatile
   accesses may be compiled to floating-point register loads when the value
