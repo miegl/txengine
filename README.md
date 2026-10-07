@@ -75,6 +75,13 @@ says so and stops). All other boards work with either build.
 The binary is `target/<target>/release/txengine`. Copy it to the Pi; it needs
 root to reach the hardware (`/dev/mem`, the VideoCore mailbox, or the RP1 PCIe resources).
 
+On the Pi 2, 3, 4 and Zero 2 W, txengine programs the clock manager, DMA and
+PWM registers directly. Kernels built with `CONFIG_IO_STRICT_DEVMEM` (NixOS,
+for example; not Raspberry Pi OS) deny `/dev/mem` access to registers that a
+kernel driver owns, even to root. On those kernels add `iomem=relaxed` to the
+kernel command line (on NixOS: `boot.kernelParams = [ "iomem=relaxed" ];`).
+`txengine probe` reports when it is missing.
+
 ## Usage
 
 ```sh

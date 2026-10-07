@@ -27,10 +27,20 @@ pub struct Bcm {
 fn map(plat: &Platform, offset: usize, len: usize, what: &str) -> Result<Mmio> {
     let phys = plat.periph_phys_base + offset as u64;
     let m = Mapping::map_physical(phys, len, true, what).map_err(|e| {
-        HalError::Unsupported(format!(
-            "cannot map {what} registers ({e}). Run as root; kernels built with \
-             CONFIG_IO_STRICT_DEVMEM need the `iomem=relaxed` boot parameter"
-        ))
+        // SAFETY: geteuid has no preconditions.
+        let root = unsafe { libc::geteuid() } == 0;
+        let denied = matches!(&e, HalError::Io { source, .. } if source.raw_os_error() == Some(libc::EPERM));
+        let hint = if !root {
+            "txengine must run as root"
+        } else if denied {
+            // The register block belongs to a kernel driver and the kernel
+            // was built with CONFIG_IO_STRICT_DEVMEM.
+            "this kernel blocks /dev/mem access to registers that a driver owns; \
+             add `iomem=relaxed` to the kernel command line and reboot"
+        } else {
+            "kernels built with CONFIG_IO_STRICT_DEVMEM need the `iomem=relaxed` boot parameter"
+        };
+        HalError::Unsupported(format!("cannot map the {what} registers ({e}): {hint}"))
     })?;
     Ok(Mmio::new(m, regs::BUS_PERIPH_BASE as u64 + offset as u64))
 }
