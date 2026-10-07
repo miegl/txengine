@@ -135,6 +135,7 @@ impl AudioFeed for NoAudio {
 /// The multiplex generator.
 pub struct MpxGenerator {
     cfg: MpxConfig,
+    /// Actual output rate (see [`MpxGenerator::set_output_rate`]).
     fs: f64,
     /// Interpolation factor fs / fa.
     factor: usize,
@@ -272,6 +273,17 @@ impl MpxGenerator {
     /// Internal audio processing rate.
     pub fn audio_rate(&self) -> f64 {
         self.fa
+    }
+
+    /// The rate at which the output is actually emitted, in Hz of true
+    /// time: the nominal rate corrected for the error of the hardware's
+    /// crystal. The pilot, the subcarriers and the RDS bit rate follow it
+    /// (phase continuously), so they stay at their true frequencies; the
+    /// filters keep their design for the nominal rate, which a few ppm
+    /// cannot change measurably.
+    pub fn set_output_rate(&mut self, fs: f64) {
+        self.fs = fs;
+        self.pilot.set_frequency(19_000.0, fs);
     }
 
     pub fn audio_deviation(&self) -> f64 {

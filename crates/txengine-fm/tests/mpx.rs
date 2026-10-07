@@ -225,3 +225,39 @@ fn measured_output_response_is_equalised() {
     assert!((m - half).abs() < 0.002 * half, "M {m:.1}, expected {half:.1}");
     assert!((lo + hi - m).abs() < 0.002 * m, "S sidebands {lo:.1} + {hi:.1}, M {m:.1}");
 }
+
+#[test]
+fn subcarriers_follow_the_actual_sample_rate() {
+    use txengine_core::{Modulator, RenderContext, SampleFormat, SinkInfo};
+    use txengine_fm::{Programme, WfmModulator};
+    let fs = 250_000.0;
+    let sink = SinkInfo {
+        description: "test".into(),
+        sample_rate: fs,
+        carrier_hz: 87.6e6,
+        max_offset_hz: 100e3,
+        resolution_hz: 1.0,
+        buffer_len: 4096,
+        format: SampleFormat::FrequencyOffset,
+        realtime: true,
+        zero_order_hold: false,
+        response_db: Vec::new(),
+    };
+    let cfg = MpxConfig { stereo: StereoMode::Stereo, ..Default::default() };
+    let mut m = WfmModulator::new(cfg, Programme::None, RdsParams::default(), false).unwrap();
+    m.configure(&sink).unwrap();
+    // The crystal runs 150 ppm fast, so the samples leave 150 ppm faster
+    // than nominal.
+    let actual = fs * (1.0 + 150e-6);
+    let mut x = vec![0f32; (fs * 3.0) as usize];
+    let mut first_sample = 0;
+    for chunk in x.chunks_mut(4096) {
+        m.render(&RenderContext { first_sample, sample_rate: actual, emit_time_unix: None }, chunk);
+        first_sample += chunk.len() as u64;
+    }
+    // The pilot is at 19 kHz in true time, 2.85 Hz lower in nominal samples.
+    let (pilot, _) = component(&x, fs, 19_000.0 * fs / actual);
+    assert!((pilot - 6_750.0).abs() < 10.0, "pilot {pilot}");
+    let (uncorrected, _) = component(&x, fs, 19_000.0);
+    assert!(uncorrected < 0.1 * pilot, "{uncorrected}");
+}

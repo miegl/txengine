@@ -22,6 +22,10 @@ pub struct WfmModulator {
     programme: Programme,
     rds: RdsEncoder,
     mpx: Option<MpxGenerator>,
+    /// The sink's nominal sample rate, and the actual one being rendered
+    /// for (from [`RenderContext::sample_rate`]).
+    fs_nominal: f64,
+    fs_actual: f64,
     rds_enabled: bool,
     /// The end of the audio input has been reported.
     input_end_logged: bool,
@@ -48,7 +52,16 @@ fn invalid(e: impl std::fmt::Display) -> CommandError {
 impl WfmModulator {
     pub fn new(cfg: MpxConfig, programme: Programme, rds: RdsParams, rds_enabled: bool) -> Result<WfmModulator, String> {
         let rds = RdsEncoder::new(rds).map_err(|e| e.to_string())?;
-        Ok(WfmModulator { cfg, programme, rds, mpx: None, rds_enabled, input_end_logged: false })
+        Ok(WfmModulator {
+            cfg,
+            programme,
+            rds,
+            mpx: None,
+            fs_nominal: 0.0,
+            fs_actual: 0.0,
+            rds_enabled,
+            input_end_logged: false,
+        })
     }
 
     /// Install the local time offset provider used for RDS clock time.
@@ -133,6 +146,8 @@ impl Modulator for WfmModulator {
         let mut mpx = mpx;
         mpx.set_rds_enabled(self.rds_enabled);
         self.mpx = Some(mpx);
+        self.fs_nominal = sink.sample_rate;
+        self.fs_actual = sink.sample_rate;
         Ok(())
     }
 
@@ -141,6 +156,15 @@ impl Modulator for WfmModulator {
             out.fill(0.0);
             return;
         };
+        if ctx.sample_rate != self.fs_actual {
+            // The sink's crystal error changed: keep the subcarriers and the
+            // programme's playback speed true.
+            self.fs_actual = ctx.sample_rate;
+            mpx.set_output_rate(ctx.sample_rate);
+            if let Programme::Audio(a, _) = &self.programme {
+                a.set_rate_correction_ppm((ctx.sample_rate / self.fs_nominal - 1.0) * 1e6);
+            }
+        }
         let t0 = ctx.emit_time_unix.unwrap_or(f64::NAN);
         // Without a real-time mapping, use the system clock for CT.
         let t0 = if t0.is_nan() {

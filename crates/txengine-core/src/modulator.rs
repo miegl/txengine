@@ -6,7 +6,12 @@ pub struct RenderContext {
     /// Absolute index of the first sample to render (0 = first sample ever
     /// emitted by the sink).
     pub first_sample: u64,
-    /// Exact sample rate in Hz.
+    /// Rate at which the samples are emitted, in Hz of true time. It is
+    /// [`SinkInfo::sample_rate`] corrected for the measured (or configured)
+    /// error of the sink's crystal, so it can differ from it by a few ppm
+    /// and change slowly while transmitting. Modulators derive absolute
+    /// frequencies (subcarriers) and the playback speed of the programme
+    /// from it; filters may keep using the nominal rate.
     pub sample_rate: f64,
     /// Estimated wall-clock (UTC, seconds since the Unix epoch) at which the
     /// first sample will leave the transmitter, or `None` when the output is
