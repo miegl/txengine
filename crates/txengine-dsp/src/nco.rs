@@ -23,8 +23,16 @@ impl PhaseAccumulator {
 
     /// Oscillator at `freq` Hz for sample rate `fs`.
     pub fn new(freq: f64, fs: f64) -> PhaseAccumulator {
-        let inc = (freq / fs * (1u64 << FRAC_BITS) as f64).round() as u64;
-        PhaseAccumulator { phase: 0, inc }
+        PhaseAccumulator { phase: 0, inc: Self::increment(freq, fs) }
+    }
+
+    fn increment(freq: f64, fs: f64) -> u64 {
+        (freq / fs * (1u64 << FRAC_BITS) as f64).round() as u64
+    }
+
+    /// Change the frequency, continuing from the current phase.
+    pub fn set_frequency(&mut self, freq: f64, fs: f64) {
+        self.inc = Self::increment(freq, fs);
     }
 
     /// Actual frequency after quantisation of the increment.
@@ -150,6 +158,17 @@ mod tests {
         let s3 = t.sin(p.harmonic_frac(3)) as f64;
         assert!((s3 - (3.0 * s - 4.0 * s.powi(3))).abs() < 1e-5);
         assert!((p.frequency(250_000.0) - 19_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn frequency_change_keeps_the_phase() {
+        let mut p = PhaseAccumulator::new(19_000.0, 250_000.0);
+        p.advance_by(1000);
+        let before = p.raw();
+        // The sample clock runs 20 ppm fast: a lower increment per sample.
+        p.set_frequency(19_000.0, 250_000.0 * (1.0 + 20e-6));
+        assert_eq!(p.raw(), before);
+        assert!((p.frequency(250_000.0) / 19_000.0 - 1.0 + 20e-6).abs() < 1e-9);
     }
 
     #[test]
