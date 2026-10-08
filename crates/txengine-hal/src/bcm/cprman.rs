@@ -95,16 +95,34 @@ impl Cprman {
     }
 
     fn count(&self, tcnt_mux: u32, osc_hz: f64, seconds: f64) -> Result<u32> {
+        self.count_start(tcnt_mux, (osc_hz * seconds) as u32);
+        std::thread::sleep(Duration::from_secs_f64(seconds));
+        let mut n = None;
+        wait_until(TIMEOUT, "frequency counter", || {
+            n = self.count_result();
+            n.is_some()
+        })?;
+        Ok(n.expect("count finished"))
+    }
+
+    /// Start counting a clock's cycles over `osc_cycles` cycles of the
+    /// crystal, without waiting ([`Cprman::count_result`] collects it).
+    /// The count can be stale when the clock is stopped (see
+    /// [`Cprman::measure`]).
+    pub fn count_start(&self, tcnt_mux: u32, osc_cycles: u32) {
         self.write(TCNTCTL, KILL);
         self.write(TCNTCTL, (tcnt_mux & SRC_MASK) | ((tcnt_mux >> 4) << TCNT_SRC1_SHIFT));
-        let count = (osc_hz * seconds) as u32;
-        self.write(OSCCOUNT, count);
-        std::thread::sleep(Duration::from_secs_f64(seconds));
-        wait_until(TIMEOUT, "frequency counter", || self.read(OSCCOUNT) == 0)?;
-        wait_until(TIMEOUT, "frequency counter idle", || self.read(TCNTCTL) & BUSY == 0)?;
+        self.write(OSCCOUNT, osc_cycles);
+    }
+
+    /// The count started by [`Cprman::count_start`], or None while it runs.
+    pub fn count_result(&self) -> Option<u32> {
+        if self.read(OSCCOUNT) != 0 || self.read(TCNTCTL) & BUSY != 0 {
+            return None;
+        }
         let n = self.read(TCNTCNT);
         self.write(TCNTCTL, 0);
-        Ok(n)
+        Some(n)
     }
 }
 
