@@ -534,8 +534,8 @@ pub struct BcmFmTransmitter {
     pll: Option<Pll>,
     /// The PLL as configured for transmission (checked for interference).
     pll_good: Option<PllConfig>,
-    /// Last full comparison of the PLL's configuration with `pll_good`.
-    last_pll_check: Instant,
+    /// Gate (crystal cycles) of the carrier frequency count in progress.
+    carrier_count: Option<u32>,
     // Layout (byte offsets in `mem`).
     n: usize,
     cb_base: u32,
@@ -834,7 +834,7 @@ impl BcmFmTransmitter {
             guardian: None,
             pll,
             pll_good: None,
-            last_pll_check: Instant::now(),
+            carrier_count: None,
             n,
             samples_off,
             idle_off,
@@ -1133,29 +1133,59 @@ impl BcmFmTransmitter {
         if self.cm.read(cm::gp(self.plan.gpclk)) & cm::ENAB == 0 {
             return Err(HalError::Hardware(format!("GPCLK{} was disabled externally", self.plan.gpclk)));
         }
-        // The lock bit is in the clock manager and cheap to watch. The PLL's
-        // own registers are on the A2W bus, and reading them disturbs the
-        // DMA engine's writes there (on a Pi 2, reading them every 20 ms cost
-        // 0.07 dB of pilot level and 0.08 dB of S/M balance), so the full
-        // comparison runs once a second.
-        let full = self.last_pll_check.elapsed() >= Duration::from_secs(1);
-        if full {
-            self.last_pll_check = Instant::now();
-        }
-        if let (Some(p), Some(good)) = (&self.pll, &self.pll_good)
-            && (!p.is_locked() || (full && !p.matches(good)))
-        {
-            let now = p.config();
-            warn!(
-                "{} was changed behind txengine's back (CTRL {:#x}, PER {:#x}, {}); restoring it",
-                p.id.name(),
-                now.ctrl,
-                now.per,
-                if p.is_locked() { "locked" } else { "not locked" }
-            );
-            p.repair(good)?;
+        // The PLL is watched through the clock manager only: its lock bit,
+        // and the carrier frequency. Its own registers sit on the A2W bus,
+        // which the DMA engine keeps busy writing the fraction; every read
+        // of one delays the next write by about 3 µs, and the samples after
+        // it catch up through the pacer's FIFO. That timing error is a click
+        // (on a Pi 2 about 450 Hz of deviation per register read, with the
+        // stereo pilot alone), so the registers are only read once the
+        // frequency is wrong: another user of the counter can cause that too.
+        if self.pll_good.is_some() {
+            let wrong_hz = self.count_carrier();
+            if let (Some(p), Some(good)) = (&self.pll, &self.pll_good)
+                && (!p.is_locked() || (wrong_hz.is_some() && !p.matches(good)))
+            {
+                let now = p.config();
+                warn!(
+                    "{} was changed behind txengine's back (CTRL {:#x}, PER {:#x}, {}{}); restoring it",
+                    p.id.name(),
+                    now.ctrl,
+                    now.per,
+                    if p.is_locked() { "locked" } else { "not locked" },
+                    wrong_hz.map(|hz| format!(", carrier {:.3} MHz", hz / 1e6)).unwrap_or_default()
+                );
+                p.repair(good)?;
+            } else if let Some(hz) = wrong_hz {
+                debug!("carrier counted at {:.3} MHz, but the PLL is as configured", hz / 1e6);
+            }
         }
         Ok(())
+    }
+
+    /// Count the carrier with the frequency counter in the background, one
+    /// gate per health check. Returns the frequency of a finished count if
+    /// it is off by more than the modulation and the crystal correction can
+    /// move the average (0.5 %; a feedback divider step is at least 0.8 %).
+    /// The gate alternates between 5 and 10 ms: a stopped clock leaves the
+    /// previous count in the register, which then does not fit the gate.
+    fn count_carrier(&mut self) -> Option<f64> {
+        let short = (self.osc_hz * 0.005) as u32;
+        let mut wrong = None;
+        let gate = match self.carrier_count {
+            Some(gate) => {
+                let n = self.cm.count_result()?;
+                let hz = n as f64 * self.osc_hz / gate as f64;
+                if (hz - self.plan.carrier_hz).abs() > 0.005 * self.plan.carrier_hz {
+                    wrong = Some(hz);
+                }
+                if gate == short { 2 * short } else { short }
+            }
+            None => short,
+        };
+        self.cm.count_start(cm::TCNT_GP0 + self.plan.gpclk as u32, gate);
+        self.carrier_count = Some(gate);
+        wrong
     }
 
     fn shutdown(&mut self) {

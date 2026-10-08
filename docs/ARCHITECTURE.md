@@ -225,10 +225,21 @@ divider register, paced by hardware.
   modulated, the cpufreq governor is therefore set to `performance` (and
   restored afterwards, also by the guardian). If the PLL is changed anyway
   (e.g. by a firmware thermal throttle) it is repaired, including the
-  channels other clocks use: its lock bit is checked every 20 ms, its full
-  configuration once a second. Reading the A2W registers themselves
-  disturbs the DMA engine's writes (on a Pi 2, reading them every 20 ms
-  cost 0.08 dB of stereo balance), so they are not polled more often.
+  channels other clocks use. It is watched through the clock manager
+  only, every 20 ms: its lock bit, and the carrier, which the frequency
+  counter measures in the background (gates of 5 and 10 ms alternate, so
+  that a stopped clock's stale count does not fit). A count more than
+  0.5 % off (one feedback divider step is at least 0.8 %) is checked
+  against the PLL's registers before anything is repaired, since another
+  user of the counter could also cause it. The A2W registers are not
+  polled: each CPU read of one delays the DMA engine's next fraction write
+  by about 3 µs, and the samples after it catch up through the pacer's
+  FIFO. On a Pi 2 the stereo pilot alone turned one read into a click of
+  about 450 Hz of deviation; reading the PLL's nine registers once a
+  second (as txengine did before) delayed the sample timeline by 27 µs
+  each time, an audible click every second. Forced changes of NDIV or of
+  the PER divider, which leave the PLL locked, were repaired after
+  19-36 ms.
 * Every register and DMA-memory access is a single 32-bit `ldr`/`str` from
   a general-purpose register (`mmio::load32`/`store32`). Plain volatile
   accesses may be compiled to floating-point register loads when the value
