@@ -122,6 +122,14 @@ pub mod cm {
     pub const A2W_CHANNEL_DIV_MASK: u32 = 0xff;
     /// ANA1 bit 14: feedback pre-divider (BCM2835/6/7 only).
     pub const ANA1_FB_PREDIV: u32 = 1 << 14;
+    /// Loop filter gains (field names as in Linux): KI and KP in ANA1, KA
+    /// in ANA3. Linux and the firmware use KI 2, KP 8, KA 2.
+    pub const ANA1_KI_SHIFT: u32 = 19;
+    pub const ANA1_KI_MASK: u32 = 0x7 << 19;
+    pub const ANA1_KP_SHIFT: u32 = 15;
+    pub const ANA1_KP_MASK: u32 = 0xf << 15;
+    pub const ANA3_KA_SHIFT: u32 = 7;
+    pub const ANA3_KA_MASK: u32 = 0x7 << 7;
 }
 
 /// Pad control (drive strength) of the GPIO banks.

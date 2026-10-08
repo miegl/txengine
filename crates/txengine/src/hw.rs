@@ -201,13 +201,14 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<()> {
         }
         match bcm::fm::plan_pll(&p, gpclk, cfg.carrier_hz, osc, cfg.max_offset_hz, cfg.max_vco_change) {
             Ok(plan) => println!(
-                "          plan: VCO {:.3} MHz{}, PER /{}, GPCLK /{}, carrier {:.6} MHz, step {:.2} Hz",
+                "          plan: VCO {:.3} MHz{}, PER /{}, GPCLK /{}, carrier {:.6} MHz, step {:.2} Hz{}",
                 plan.vco_new / 1e6,
                 if plan.vco_old > 0.0 { format!(" ({:+.2} %)", (plan.vco_new / plan.vco_old - 1.0) * 100.0) } else { String::new() },
                 plan.per_div,
                 plan.gp_div,
                 plan.carrier_hz / 1e6,
-                plan.step_hz
+                plan.step_hz,
+                plan.loop_ki.map_or(String::new(), |k| format!(", loop KI {} -> {k}", p.loop_ki()))
             ),
             Err(e) => println!("          plan: {e}"),
         }

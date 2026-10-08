@@ -355,11 +355,11 @@ impl Pll {
         self.cm.write(A2W_XOSC_CTRL, self.cm.read(A2W_XOSC_CTRL) | r.xosc_enable);
         // Loop filter defaults (KI=2, KP=8, KA=2), pre-divider off.
         let mut ana = [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i));
-        ana[1] = (ana[1] & !((0x7 << 19) | (0xf << 15))) | (2 << 19) | (8 << 15);
+        ana[1] = (ana[1] & !(ANA1_KI_MASK | ANA1_KP_MASK)) | (2 << ANA1_KI_SHIFT) | (8 << ANA1_KP_SHIFT);
         if self.has_prediv {
             ana[1] &= !ANA1_FB_PREDIV;
         }
-        ana[3] = (ana[3] & !(0x7 << 7)) | (2 << 7);
+        ana[3] = (ana[3] & !ANA3_KA_MASK) | (2 << ANA3_KA_SHIFT);
         for i in (0..4).rev() {
             self.cm.write(r.ana0 + 4 * i, ana[i]);
         }
@@ -395,6 +395,38 @@ impl Pll {
 
     pub fn wait_lock(&self) -> Result<()> {
         wait_until(TIMEOUT, &format!("{} lock", self.id.name()), || self.is_locked()).map(|_| ())
+    }
+
+    /// Integral gain of the loop filter (ANA1 KI, 0-7).
+    pub fn loop_ki(&self) -> u32 {
+        (self.cm.read(self.id.regs().ana0 + 4) & ANA1_KI_MASK) >> ANA1_KI_SHIFT
+    }
+
+    /// Set the integral gain of the loop filter of a running PLL and wait
+    /// for lock. The four ANA registers take effect together when ANA0 is
+    /// written (reading one before that returns the old value), so all of
+    /// them are written, ANA3 first, as Linux does.
+    pub fn set_loop_ki(&self, ki: u32) -> Result<()> {
+        if ki > 7 {
+            return Err(HalError::Config(format!("{}: loop gain KI {ki} out of range 0-7", self.id.name())));
+        }
+        let r = self.id.regs();
+        let mut ana = [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i));
+        ana[1] = (ana[1] & !ANA1_KI_MASK) | (ki << ANA1_KI_SHIFT);
+        for i in (0..4).rev() {
+            self.cm.write(r.ana0 + 4 * i, ana[i]);
+        }
+        self.wait_lock()?;
+        if self.loop_ki() != ki {
+            return Err(HalError::Hardware(format!("{}: loop gain KI read back {} instead of {ki}", self.id.name(), self.loop_ki())));
+        }
+        debug!("{}: loop gain KI {ki}, locked", self.id.name());
+        Ok(())
+    }
+
+    /// BCM2711 (Raspberry Pi 4) rather than BCM2835/6/7.
+    pub fn is_bcm2711(&self) -> bool {
+        !self.has_prediv
     }
 
     /// Program and enable the PER channel divider (Linux `bcm2835_pll_divider_*`).

@@ -116,6 +116,9 @@ pub struct BcmPlan {
     pub other_users: Vec<String>,
     /// Hz per register unit at the carrier.
     pub step_hz: f64,
+    /// Loop filter integral gain to set on the PLL (see [`modulation_ki`]);
+    /// `None` keeps the PLL's current one.
+    pub loop_ki: Option<u32>,
 }
 
 impl BcmPlan {
@@ -133,6 +136,29 @@ impl BcmPlan {
     pub fn corrected_divider_source(&self, ppm: f64) -> f64 {
         self.carrier_hz * self.center * (1.0 + ppm * 1e-6)
     }
+}
+
+/// Loop filter integral gain (ANA1 KI) txengine sets on PLLA of the
+/// BCM2836/7 while modulating it, instead of the firmware's KI 2.
+///
+/// The gain sets the loop bandwidth: about 125 kHz at KI 2, 600 kHz at KI 5
+/// (measured from the modulation response, each step ×1.5–1.9). At KI 2
+/// the loop leaves the VCO's phase noise around 10–30 kHz offset, where it
+/// lands in the audio and stereo bands, poorly suppressed: on a Pi 2 the
+/// noise at 10 kHz drops from −91 to −101 dBc/Hz at KI 5, the stereo SNR
+/// rises by 11 dB, and the modulation response becomes flat (see the
+/// tables). The price is the noise peak of the wider loop, which moves out
+/// to 300–600 kHz offset: +1 dB in the 200 kHz channels at ±400 kHz. KI 6
+/// gains 1 dB more SNR but adds 3–5 dB there; KI 7 also raises the noise
+/// close to the carrier. On the Zero 2 W, whose noise has another source
+/// (its supply), the gain changes neither the noise nor anything else.
+pub const PLLA_MODULATION_KI: u32 = 5;
+
+/// The loop filter integral gain for modulating `pll`, if it differs from
+/// the PLL's current setting: PLLA of the BCM2836/7. (PLLC and PLLD also
+/// clock the VPU and the peripherals; the BCM2711 has not been measured.)
+pub fn modulation_ki(pll: &Pll) -> Option<u32> {
+    (pll.id == PllId::A && !pll.is_bcm2711()).then_some(PLLA_MODULATION_KI)
 }
 
 /// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
@@ -220,6 +246,7 @@ pub fn plan_pll(
                         per_users: per_users.clone(),
                         other_users: other_users.clone(),
                         step_hz: 1.0 / units_per_hz,
+                        loop_ki: modulation_ki(pll),
                     },
                 ));
             }
@@ -273,49 +300,46 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
         per_users: Vec::new(),
         other_users: Vec::new(),
         step_hz: 1.0 / units_per_hz.abs(),
+        loop_ki: None,
     })
 }
 
 /// Modulation response of PLLA on the BCM2836 (Raspberry Pi 2 v1.1) beyond
-/// the zero-order hold, when the PLL is retuned while running with the
-/// firmware's loop settings: `(Hz, dB)`. The fractional-N loop slightly
-/// overshoots, lifting high modulation frequencies. Measured over the air
-/// (`txengine tone`, 13 probe tones, USRP B210) at 150 and 195 kS/s, which
-/// agree within ±0.05 dB, so it is a property of the PLL and not of the
-/// sample rate.
+/// the zero-order hold, `(Hz, dB)`: PLLA retuned while running (feedback
+/// pre-divider on), with txengine's loop gain [`PLLA_MODULATION_KI`].
+/// Measured over the air (`txengine tone`, 13 probe tones of 2.5 and 5 kHz,
+/// USRP B210; three runs agree within ±0.01 dB). The loop lifts high
+/// modulation frequencies slightly, and delays them by at most 0.25° at
+/// 67 kHz. (With the firmware's KI 2 the lift was 0.40 dB at 38 kHz and
+/// 0.57 dB at 67 kHz, with 6° of phase lag.)
 const BCM2836_PLLA_RESPONSE_DB: &[(f64, f64)] = &[
     (0.0, 0.0),
-    (5e3, 0.01),
-    (10e3, 0.05),
-    (15e3, 0.10),
-    (19e3, 0.16),
-    (23e3, 0.215),
-    (30e3, 0.325),
-    (38e3, 0.445),
-    (45e3, 0.555),
-    (53e3, 0.605),
-    (57e3, 0.65),
-    (61e3, 0.665),
-    (67e3, 0.685),
+    (10e3, 0.005),
+    (15e3, 0.005),
+    (19e3, 0.01),
+    (23e3, 0.02),
+    (30e3, 0.025),
+    (38e3, 0.04),
+    (45e3, 0.055),
+    (53e3, 0.075),
+    (57e3, 0.085),
+    (61e3, 0.10),
+    (67e3, 0.12),
 ];
 
 /// The same for PLLA on the BCM2837, measured on a Raspberry Pi Zero 2 W
-/// (RP3A0) at 150 and 196 kS/s, which agree within ±0.03 dB. Slightly less
-/// lift than the BCM2836; uncorrected it limits stereo separation to 35 dB.
+/// (RP3A0; two runs agree within ±0.04 dB). (KI 2: 0.33 dB at 38 kHz,
+/// 0.48 dB and 5° at 67 kHz.)
 const BCM2837_PLLA_RESPONSE_DB: &[(f64, f64)] = &[
     (0.0, 0.0),
-    (5e3, 0.01),
-    (10e3, 0.045),
-    (15e3, 0.08),
-    (19e3, 0.13),
-    (23e3, 0.19),
-    (30e3, 0.285),
-    (38e3, 0.38),
-    (45e3, 0.46),
-    (53e3, 0.535),
-    (57e3, 0.57),
-    (61e3, 0.595),
-    (67e3, 0.595),
+    (19e3, 0.0),
+    (30e3, 0.01),
+    (38e3, 0.015),
+    (45e3, 0.035),
+    (53e3, 0.045),
+    (57e3, 0.045),
+    (61e3, 0.06),
+    (67e3, 0.075),
 ];
 
 /// Samples per second the DMA engine can deliver when each sample is a
@@ -716,7 +740,8 @@ impl BcmFmTransmitter {
                 } else {
                     format!(", VCO {:.3} MHz (was idle)", plan.vco_new / 1e6)
                 };
-                format!("{}_PER /{} -> GPCLK{gpclk} /{}{change}", id.name(), plan.per_div, plan.gp_div)
+                let ki = plan.loop_ki.map_or(String::new(), |k| format!(", loop KI {} -> {k}", pll.as_ref().map_or(0, |p| p.loop_ki())));
+                format!("{}_PER /{} -> GPCLK{gpclk} /{}{change}{ki}", id.name(), plan.per_div, plan.gp_div)
             }
             BcmMethod::ClkDiv => format!(
                 "GPCLK{gpclk} fractional divider (MASH 1) from PLLD_PER {:.1} MHz",
@@ -759,8 +784,8 @@ impl BcmFmTransmitter {
             zero_order_hold: true,
             response_db: match plan.method {
                 // Only the configurations that were measured: PLLA retuned
-                // while running with the firmware's loop settings.
-                BcmMethod::Pll(PllId::A) if !plan.power_up => match bcm.soc {
+                // while running, with txengine's loop gain.
+                BcmMethod::Pll(PllId::A) if !plan.power_up && plan.loop_ki == Some(PLLA_MODULATION_KI) => match bcm.soc {
                     Soc::Bcm2836 => BCM2836_PLLA_RESPONSE_DB.to_vec(),
                     Soc::Bcm2837 => BCM2837_PLLA_RESPONSE_DB.to_vec(),
                     _ => Vec::new(),
@@ -931,6 +956,9 @@ impl BcmFmTransmitter {
                 }
                 if p.set_per {
                     pll.set_per(p.per_div)?;
+                }
+                if let Some(ki) = p.loop_ki {
+                    pll.set_loop_ki(ki)?;
                 }
                 self.pll_good = Some(pll.config());
                 self.cm.clock_start(gp_ctl, p.gpclk_src, p.gp_div, 0, 0)?;
@@ -1328,6 +1356,7 @@ mod tests {
             per_users: Vec::new(),
             other_users: Vec::new(),
             step_hz: 1.0 / units_per_hz.abs(),
+            loop_ki: None,
         }
     }
 

@@ -20,7 +20,9 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
   * Pi 1-4 (BCM2835/6/7, BCM2711): fractional-N modulation of PLLA, PLLC or
     PLLD (20-bit fraction, 1-3 Hz steps), or a dithered fractional clock
     divider (`--pll clkdiv`). The PLL is chosen automatically; PLLs used by
-    other parts of the system are only retuned within ±3 %.
+    other parts of the system are only retuned within ±3 %. PLLA runs with
+    a wider loop than the firmware gives it (loop gain KI 5 instead of 2),
+    which removes most of its phase noise from the multiplex band.
   * Pi 5 (RP1): fractional-N modulation of the RP1 audio or video PLL
     (24-bit fraction, < 0.1 Hz steps).
 * **Crystal error correction**: the board's crystal error is measured
@@ -192,7 +194,7 @@ Measured over the air with a USRP B210 (`tools/sdr_capture.py`,
 | Sample rate | 250 kS/s | 194.9 kS/s (measured DMA capacity, see below) | 195.9 kS/s |
 | Pilot | 6.749 kHz (target 6.75) | 6.74-6.76 kHz | 6.75-6.76 kHz |
 | 38 kHz carrier residual | 0.001 % | 0.005 % | 0.006 % |
-| Stereo separation (1 kHz, left only) | > 50 dB | > 50 dB | > 60 dB |
+| Stereo separation (left only) | > 50 dB (1 kHz) | 55–58 dB (100 Hz – 14 kHz) | 51–56 dB (1–14 kHz) |
 | RDS injection | 2.02-2.06 kHz (target 2.0) | 2.03 kHz | 2.04 kHz |
 | RDS block errors | 0 % | 0 % | 0 % (also at the end of a 10 min run) |
 | Crystal error (carrier, pilot, playback speed) | −54 ppm; −0.3 ppm with `--ppm auto` | +7.3 ppm; +0.1 ppm with `--ppm auto` | +4.7 ppm; < 0.1 ppm with `--ppm auto` |
@@ -206,9 +208,21 @@ Hardware-specific findings that txengine handles:
   a PLL's fractional register takes about 4.3 µs, which caps the sample rate
   at about 231 kS/s. txengine measures the capacity at start-up and picks a
   rate with 15 % margin (`--sample-rate` above the capacity is refused), and
-  it watches the achieved rate while running. The PLL's loop response is
-  measured and compensated, which is what brings the separation above 50 dB
-  (35 dB without it on the Zero 2 W).
+  it watches the achieved rate while running.
+* **Pi 2 and Zero 2 W, PLLA's loop:** with the firmware's loop gain
+  (KI 2) PLLA's loop bandwidth is about 125 kHz. That leaves the VCO's
+  phase noise around 10–30 kHz offset, in the audio and stereo bands,
+  poorly suppressed (Pi 2: 44 dB stereo SNR), and makes the modulation
+  response rise by 0.57 dB with 6° of lag at 67 kHz (35 dB separation
+  uncompensated). txengine raises the gain to KI 5 while modulating
+  (about 600 kHz bandwidth): on the Pi 2 the stereo SNR rises to 54 dB,
+  the response is flat within 0.12 dB (the rest is measured and
+  compensated) and the separation is 55 dB from 100 Hz to 14 kHz (Zero 2 W:
+  51–53 dB at 5–14 kHz instead of 37–44 dB; its noise does not change). Costs:
+  the wider loop's noise peak at 300–600 kHz offset (+1 dB in the
+  neighbouring 200 kHz channels), and the 3rd harmonic of a full-scale
+  1 kHz tone at −80 instead of −86 dB. The firmware's gain is restored
+  afterwards.
 * **BCM283x/BCM2711, CPU clock changes:** the firmware changes the ARM clock
   over the same slow PLL register bus that the DMA engine keeps busy. When
   the two collide, the firmware's write lands in the modulated PLL instead:

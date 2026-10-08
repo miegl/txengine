@@ -175,6 +175,24 @@ divider register, paced by hardware.
   generator to find out who else uses each PLL and refuses changes of more
   than 3 % (or any change of a PER divider that others use); idle PLLs are
   preferred and powered up with the kernel's loop settings.
+* PLLA's loop gain: the firmware and Linux run every PLL with the loop
+  filter gains KI 2, KP 8, KA 2 (`A2W_PLLx_ANA1/3`), which give PLLA a
+  loop bandwidth of about 125 kHz (natural frequency fitted to the
+  measured modulation response, damping 1.6). Inside the multiplex band
+  that loop neither suppresses the VCO's phase noise well (a hump at
+  10–30 kHz offset; on a Pi 2 −91 dBc/Hz at 10 kHz, which limited the
+  stereo SNR to 44 dB) nor follows the modulation flatly (+0.4 dB at
+  38 kHz, +0.57 dB and 6° of lag at 67 kHz). While modulating PLLA of the
+  BCM2836/7, txengine raises the integral gain to KI 5 (`fm::
+  PLLA_MODULATION_KI`): about 600 kHz of bandwidth, −101 dBc/Hz at 10 kHz,
+  and a response within 0.12 dB and 0.25° up to 67 kHz. The wider loop
+  moves its noise peak out to 300–600 kHz offset (+1 dB in the 200 kHz
+  channels at ±400 kHz); KI 6 gains 1 dB of SNR for 3–5 dB more there,
+  and KI 7 also raises the noise close to the carrier. The lock behaviour
+  (400 retunes of ±150 MHz, 400 deviation-sized steps) is the same for
+  KI 2–7. The firmware's gain is restored with the rest of the PLL. On
+  the Zero 2 W the noise has another source (it does not change with any
+  loop gain), but the flatter response is the same.
 * Pacing: the PWM (or PCM) FIFO's DMA request. Each sample is two control
   blocks: write the frequency word, then write a dummy word to the FIFO.
   Writes to the PWM registers must pass a slow clock-domain synchroniser,
