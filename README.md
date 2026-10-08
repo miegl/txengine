@@ -53,7 +53,8 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
   set (e.g. Czech diacritics); data-channel shaping exactly as specified.
 * **Audio input**: WAV, FLAC, MP3, OGG/Vorbis, AAC/MP4 (symphonia), raw PCM on
   standard input, or a test tone; resampled with rubato; clock-drift
-  compensation for live input.
+  compensation for live input. A WAV stream on standard input plays until
+  it ends, whatever length its header declares.
 * **Run-time control** through a FIFO or a Unix socket (PS, RT, PTY, TA, AF,
   gain, ...), status reporting, clean shutdown and a guardian process that
   restores every touched register even after `kill -9`.

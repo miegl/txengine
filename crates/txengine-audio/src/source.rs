@@ -64,7 +64,9 @@ pub(crate) fn open(spec: &InputSpec) -> Result<Box<dyn Source>, AudioError> {
             Box::new(Decoded::new(mss, hint, path.display().to_string(), false)?)
         }
         InputSpec::Stdin => {
-            let src = ReadOnlySource::new(std::io::stdin());
+            let mut stdin = std::io::stdin();
+            let head = unbounded_wav_header(&mut stdin).map_err(|e| AudioError::Io("standard input".into(), e))?;
+            let src = ReadOnlySource::new(std::io::Cursor::new(head).chain(stdin));
             let mss = MediaSourceStream::new(Box::new(src), Default::default());
             Box::new(Decoded::new(mss, Hint::new(), "standard input".into(), true)?)
         }
@@ -79,6 +81,43 @@ pub(crate) fn open(spec: &InputSpec) -> Result<Box<dyn Source>, AudioError> {
             Box::new(Generated { kind: Gen::Tone(*freq, *amplitude, *stereo), rate: 48_000, n: 0 })
         }
     })
+}
+
+/// Read the header of a WAV stream from `r` and mark its RIFF and data
+/// lengths as unknown (0xFFFFFFFF, what ffmpeg writes to a pipe), so that
+/// the data is read until the stream ends. A live stream has no length:
+/// servers declare some large number (or 0), and the reader would stop
+/// there and leave the transmitter silent, hours into a broadcast. Returns
+/// the bytes read, to be read again before the rest of `r`; anything that
+/// is not WAV is returned unchanged.
+fn unbounded_wav_header(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
+    // Up to `n` more bytes from `r` onto `buf`; false at the end of `r`.
+    fn take(r: &mut impl Read, n: u64, buf: &mut Vec<u8>) -> std::io::Result<bool> {
+        let start = buf.len();
+        r.take(n).read_to_end(buf)?;
+        Ok((buf.len() - start) as u64 == n)
+    }
+    let mut head = Vec::new();
+    if !take(r, 12, &mut head)? || &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
+        return Ok(head);
+    }
+    head[4..8].fill(0xff);
+    // Chunks up to the data chunk (format, metadata).
+    loop {
+        let at = head.len();
+        if !take(r, 8, &mut head)? {
+            return Ok(head);
+        }
+        if &head[at..at + 4] == b"data" {
+            head[at + 4..at + 8].fill(0xff);
+            return Ok(head);
+        }
+        let len = u32::from_le_bytes(head[at + 4..at + 8].try_into().unwrap()) as u64;
+        // A chunk this large is no header: leave it to the reader.
+        if len > 1 << 20 || !take(r, len + (len & 1), &mut head)? {
+            return Ok(head);
+        }
+    }
 }
 
 /// Container formats and codecs via symphonia.
@@ -241,5 +280,66 @@ impl Source for Generated {
         }
         self.n += N as u64;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 16-bit mono WAV stream with `frames` frames whose header declares
+    /// `declared` of them, with an odd-sized chunk (padded) before the data.
+    fn wav_stream(declared: u32, frames: u32) -> Vec<u8> {
+        let mut w = b"RIFF".to_vec();
+        w.extend((46 + 2 * declared).to_le_bytes());
+        w.extend(b"WAVEfmt ");
+        w.extend(16u32.to_le_bytes());
+        for v in [1u16, 1] {
+            w.extend(v.to_le_bytes()); // PCM, mono
+        }
+        w.extend(48_000u32.to_le_bytes());
+        w.extend(96_000u32.to_le_bytes());
+        for v in [2u16, 16] {
+            w.extend(v.to_le_bytes()); // block align, bits
+        }
+        w.extend(b"junk");
+        w.extend(1u32.to_le_bytes());
+        w.extend([0, 0]);
+        w.extend(b"data");
+        w.extend((2 * declared).to_le_bytes());
+        for i in 0..frames {
+            w.extend((i as i16).to_le_bytes());
+        }
+        w
+    }
+
+    /// Frames decoded from `stream` read as standard input is.
+    fn decode_stream(stream: Vec<u8>) -> usize {
+        let mut r = std::io::Cursor::new(stream);
+        let head = unbounded_wav_header(&mut r).unwrap();
+        let src = ReadOnlySource::new(std::io::Cursor::new(head).chain(r));
+        let mss = MediaSourceStream::new(Box::new(src), Default::default());
+        let mut d = Decoded::new(mss, Hint::new(), "stream".into(), true).unwrap();
+        let mut out = Vec::new();
+        while d.read(&mut out).unwrap() {}
+        assert!(out.iter().enumerate().all(|(i, &x)| x == i as f32 / 32768.0));
+        out.len()
+    }
+
+    #[test]
+    fn a_wav_stream_is_read_past_its_declared_length() {
+        assert_eq!(decode_stream(wav_stream(100, 10_000)), 10_000);
+        // Some servers declare no data at all.
+        assert_eq!(decode_stream(wav_stream(0, 10_000)), 10_000);
+    }
+
+    #[test]
+    fn other_streams_pass_unchanged() {
+        for s in [&b"fLaC\0\0\0\x22rest of the stream"[..], b"RIFF\x10\0\0\0AVI LIST", b"RIF", b""] {
+            let mut r = std::io::Cursor::new(s);
+            let mut out = unbounded_wav_header(&mut r).unwrap();
+            r.read_to_end(&mut out).unwrap();
+            assert_eq!(out, s);
+        }
     }
 }
