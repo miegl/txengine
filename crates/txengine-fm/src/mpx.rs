@@ -297,9 +297,13 @@ impl MpxGenerator {
         let stop = (cfg.cutoff + 3_500.0).min(fa / 2.0);
         let lp = FirDesign::lowpass(fa, cfg.cutoff, stop, 80.0);
         // Interpolation filter: images of the fa-rate signal start at
-        // fa - cutoff; suppress them by ≥ 90 dB (they would land on the
-        // stereo subband and the RDS channel).
-        let ip = FirDesign::lowpass(fs, cfg.cutoff + 500.0, fa - cfg.cutoff - 500.0, 90.0);
+        // fa - cutoff, on the stereo subband and the RDS channel. A stereo
+        // receiver demodulates the image of a tone at f, at fa - f, to
+        // |fa - 38 kHz - f| (e.g. 13 kHz -> 1 kHz at fa = 50 kHz), where the
+        // de-emphasis does not take back the up to 13.7 dB the
+        // pre-emphasis gave the tone: suppress them by ≥ 120 dB, so that
+        // these products stay ~105 dB or more below the programme.
+        let ip = FirDesign::lowpass(fs, cfg.cutoff + 500.0, fa - cfg.cutoff - 500.0, 120.0);
         // Inverse of the output response (hold, plus the measured hardware
         // response if known) up to the top of the RDS band.
         let comp = cfg.hold_compensation.then(|| {

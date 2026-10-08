@@ -95,8 +95,13 @@ the limiter needs) and 23 % for decoding and resampling the audio.
    6.8 dB at 75 µs. BS.412 limits the power of the pre-emphasised
    multiplex; with the correction a programme no brighter than pink noise
    (music rarely is) keeps the MPX power it has without pre-emphasis.
-2. **Interpolation** to `fs`: polyphase FIR, ≥ 90 dB image rejection; the
-   branches are evaluated together with independent accumulators. With the
+2. **Interpolation** to `fs`: polyphase FIR, ≥ 120 dB image rejection. The
+   first images (`fa ± f`) lie on the stereo subband, and a stereo
+   receiver demodulates them into the audio band at `|fa − 38 kHz ± f|`
+   (13 kHz → 1 kHz at `fa` = 50 kHz), where the de-emphasis does not take
+   back the up to 13.7 dB the pre-emphasis gave the original tone; with
+   90 dB these products reached −80 dB. The branches are evaluated
+   together with independent accumulators. With the
    limiter, `x` and `d` are interpolated separately (four channels in
    stereo).
 3. **Limiter**, per audio-rate frame on the interpolated samples, so it
