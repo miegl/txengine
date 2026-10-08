@@ -30,7 +30,7 @@ transmission mode or a hardware platform means implementing one side.
 | `txengine-fm` | The wide-band FM mode: `MpxGenerator` (stereo multiplex) and `WfmModulator` (the `Modulator` implementation, control commands). |
 | `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input. |
 | `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backend, the RP1 (Pi 5) backend, the shutdown guardian. |
-| `txengine` | The command-line program: engine loop, control FIFO/socket, programme set-up, file sinks, `analyze`, `probe`, `tone`. |
+| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, and per mode its options, set-up and tools (WFM: programme set-up, `analyze`). |
 
 ## The two interfaces
 
@@ -60,7 +60,8 @@ sink how far its crystal is off, and the sink retunes the carrier for it
 ### `Modulator`
 
 `configure(&SinkInfo)` adapts to the sink, `render(&RenderContext, &mut
-[f32])` produces samples, `command()` handles control lines. The
+[f32])` produces samples, `command()` handles control lines, and
+`take_meters()` reports levels and limiting for the status line. The
 `RenderContext` carries the absolute index of the first sample, the rate at
 which the samples actually leave the transmitter (`sample_rate`: the sink's
 nominal rate corrected for its crystal error, so it can change slowly while
@@ -75,6 +76,15 @@ A new transmission mode (e.g. narrow-band FM, AM via pad drive strength, a
 digital mode) implements `Modulator`. A mode that needs a different kind of
 sample (amplitude, I/Q) adds a `SampleFormat` variant, and sinks that can
 produce it advertise it.
+
+On the command line every mode is a command with its own subcommands
+(`txengine wfm tx | render | analyze`); `probe` and `tone` need no mode. A
+mode's options are a clap `Args` struct that implements `Mode`
+(`txengine/src/mode.rs`): the frequency range it needs from the transmitter,
+a check of the options, and building its modulator. The generic `Tx<M>` and
+`Render<M>` (`txengine/src/cli.rs`) add the options every mode shares
+(hardware, control, file output), and `mode::transmit` and `mode::render`
+run any mode. The WFM mode lives in `txengine/src/wfm/`.
 
 ## Signal processing (wide-band FM)
 

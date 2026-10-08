@@ -69,6 +69,13 @@ pub trait Modulator: Send {
         ModulatorStatus::default()
     }
 
+    /// The mode's meters (levels, limiting, input health) since the
+    /// previous call, as human-readable text for the periodic status line;
+    /// the peak meters start over. Empty if the mode has none.
+    fn take_meters(&mut self) -> String {
+        String::new()
+    }
+
     /// Whether the programme input has ended (e.g. end of file without looping).
     /// The engine stops transmitting once this returns true.
     fn finished(&self) -> bool {

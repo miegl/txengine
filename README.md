@@ -73,8 +73,8 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
 | Raspberry Pi 4, 400 | BCM2711 | supported, not yet tested on hardware |
 | Raspberry Pi 1, Zero, Zero W | BCM2835 (ARMv6) | not supported |
 
-The default output is GPIO4 (pin 7). `txengine probe` shows what will be used
-on a given board without transmitting.
+The default output is GPIO4 (pin 7). `txengine probe -f 87.6` shows what will
+be used on a given board without transmitting.
 
 ## Building
 
@@ -104,19 +104,24 @@ kernel command line (on NixOS: `boot.kernelParams = [ "iomem=relaxed" ];`).
 
 ## Usage
 
+Commands are grouped by transmission mode: `txengine wfm tx` transmits wide-band
+FM, `txengine wfm render` renders it to a file and `txengine wfm analyze`
+measures a multiplex recording. `txengine probe` and `txengine tone` need no
+mode. Every command lists its options with `--help`.
+
 ```sh
 # Stereo file with RDS on 87.6 MHz
-sudo txengine tx -f 87.6 -a music.flac --ps "MY RADIO" --rt "Now playing ..."
+sudo txengine wfm tx -f 87.6 -a music.flac --ps "MY RADIO" --rt "Now playing ..."
 
 # From another program (WAV on stdin, or raw PCM with --raw-rate/--raw-channels)
-ffmpeg -i stream.m3u8 -f wav - | sudo txengine tx -f 87.6 -a -
-arecord -f S16_LE -r 48000 -c 2 -t raw | sudo txengine tx -f 87.6 -a - --raw-rate 48000 --raw-channels 2
+ffmpeg -i stream.m3u8 -f wav - | sudo txengine wfm tx -f 87.6 -a -
+arecord -f S16_LE -r 48000 -c 2 -t raw | sudo txengine wfm tx -f 87.6 -a - --raw-rate 48000 --raw-channels 2
 
 # Carrier + RDS only, with clock time and alternative frequencies
-sudo txengine tx -f 87.6 --ps STATION --af 87.6 --af 99.5 --pty "Pop music"
+sudo txengine wfm tx -f 87.6 --ps STATION --af 87.6 --af 99.5 --pty "Pop music"
 
 # Change RDS while transmitting
-sudo txengine tx -f 87.6 -a music.mp3 --ctl /tmp/rds &
+sudo txengine wfm tx -f 87.6 -a music.mp3 --ctl /tmp/rds &
 echo "RT Live from the studio" > /tmp/rds
 echo "PS ONAIR" > /tmp/rds
 ```
@@ -171,7 +176,7 @@ crystal error +6.73 ppm (measured against the system clock): correcting the carr
 ```
 
 Without network time, give the error (`--ppm 6.44`, positive when the
-crystal runs fast; `txengine tx` and `txengine tone` print the measured value
+crystal runs fast; `txengine wfm tx` and `txengine tone` print the measured value
 on a board that has NTP); txengine keeps measuring and reports it, but
 applies the given value. `--ppm off` turns the correction off (no
 measurement either). For GPS accuracy, let chrony discipline the system
@@ -181,8 +186,8 @@ then measures against GPS time.
 ### Testing without hardware
 
 ```sh
-txengine render -a music.flac --duration 10 --format mpx -o mpx.wav   # the multiplex as WAV
-txengine analyze mpx.wav                                             # levels, pilot phase, RDS
+txengine wfm render -a music.flac --duration 10 -o mpx.wav   # the multiplex as WAV
+txengine wfm analyze mpx.wav                                 # levels, pilot phase, RDS
 ```
 
 `analyze` accepts any multiplex recording (for example from an SDR; see
@@ -191,7 +196,7 @@ txengine analyze mpx.wav                                             # levels, p
 ## Signal quality
 
 Measured over the air with a USRP B210 (`tools/sdr_capture.py`,
-`tools/fm_analyze.py`, `txengine analyze`):
+`tools/fm_analyze.py`, `txengine wfm analyze`):
 
 | | Raspberry Pi 5 | Raspberry Pi 2 | Raspberry Pi Zero 2 W |
 |---|---|---|---|
@@ -236,7 +241,7 @@ carriers, AM and PM noise separated):
   gain of 20 dB the receiver contributes about half of it, so the table
   gives lower bounds.
 
-The multiplex as computed (`txengine render`) has a noise floor of
+The multiplex as computed (`txengine wfm render`) has a noise floor of
 −128 dBFS (21 bits); quantising it to the frequency steps of the hardware
 gives −123 dBFS on the Pi 5 (0.17 Hz steps) and −106 dBFS on the BCM
 boards (1.41 Hz steps). Both are far below the RF noise.

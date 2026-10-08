@@ -364,6 +364,27 @@ impl Modulator for WfmModulator {
         ModulatorStatus { fields: f }
     }
 
+    fn take_meters(&mut self) -> String {
+        let st = self.take_stats().unwrap_or_default();
+        let mut s = format!(
+            "peak deviation {:.1} kHz, MPX power {:+.1} dBr, HF limiter {:+.1} dB, limiter {:+.1} dB, clipped {}, audio underruns {}",
+            st.peak_deviation / 1e3,
+            st.mpx_power_dbr,
+            -st.hf_limiter_db,
+            20.0 * (st.limiter_gain.max(1e-6) as f64).log10(),
+            st.clipped,
+            st.audio_underruns,
+        );
+        if let Programme::Audio(a, _) = &self.programme {
+            let a = a.stats();
+            s.push_str(&format!(", audio buffer {}/{}", a.buffered, a.capacity));
+            if a.drift_ppm != 0.0 {
+                s.push_str(&format!(", input drift {:.1} ppm", a.drift_ppm));
+            }
+        }
+        s
+    }
+
     fn finished(&self) -> bool {
         match &self.programme {
             Programme::Audio(a, EndOfInput::Stop) => a.finished(),

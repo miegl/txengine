@@ -5,11 +5,14 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use txengine_audio::{AudioInput, AudioOptions, EndOfInput, InputSpec};
+use txengine_core::Modulator;
 use txengine_fm::{MpxConfig, Programme, StereoMode, WfmModulator};
 use txengine_rds::encoder::{af_code, encode8, encode_rt};
 use txengine_rds::{DecoderInfo, RdsParams};
 
-use crate::cli::{OnEnd, ProgrammeArgs, StereoArg};
+use super::MAX_OFFSET_HZ;
+use super::args::{OnEnd, StereoArg, WfmArgs};
+use crate::mode::Mode;
 
 fn flag(v: u8, name: &str) -> anyhow::Result<bool> {
     match v {
@@ -26,7 +29,7 @@ fn hex(s: &str, what: &str) -> anyhow::Result<u32> {
 
 /// Pre-emphasis option: "eu" (50 µs), "us" (75 µs), "off", or a time
 /// constant in µs.
-pub fn parse_preemphasis(s: &str) -> anyhow::Result<Option<f64>> {
+fn parse_preemphasis(s: &str) -> anyhow::Result<Option<f64>> {
     Ok(match s.to_ascii_lowercase().as_str() {
         "eu" | "50" => Some(50e-6),
         "us" | "75" => Some(75e-6),
@@ -45,9 +48,9 @@ pub fn parse_preemphasis(s: &str) -> anyhow::Result<Option<f64>> {
     })
 }
 
-pub fn mpx_config(p: &ProgrammeArgs) -> anyhow::Result<MpxConfig> {
-    if !(10_000.0..=100_000.0).contains(&p.deviation) {
-        bail!("--deviation must be 10000-100000 Hz (BS.450 specifies 75000 or 50000)");
+fn mpx_config(p: &WfmArgs) -> anyhow::Result<MpxConfig> {
+    if !(10_000.0..=MAX_OFFSET_HZ).contains(&p.deviation) {
+        bail!("--deviation must be 10000-{MAX_OFFSET_HZ} Hz (BS.450 specifies 75000 or 50000)");
     }
     if !(0.0..=7_500.0).contains(&p.rds_level) {
         bail!("--rds-level must be 0-7500 Hz (EN 50067 1.3)");
@@ -80,7 +83,7 @@ pub fn mpx_config(p: &ProgrammeArgs) -> anyhow::Result<MpxConfig> {
     })
 }
 
-pub fn rds_params(p: &ProgrammeArgs) -> anyhow::Result<RdsParams> {
+fn rds_params(p: &WfmArgs) -> anyhow::Result<RdsParams> {
     let pi = hex(&p.pi, "--pi")?;
     if pi > 0xffff {
         bail!("--pi must be 4 hex digits");
@@ -119,7 +122,7 @@ pub fn rds_params(p: &ProgrammeArgs) -> anyhow::Result<RdsParams> {
     })
 }
 
-fn end_policy(p: &ProgrammeArgs, stdin: bool) -> EndOfInput {
+fn end_policy(p: &WfmArgs, stdin: bool, realtime: bool) -> EndOfInput {
     if let Some(e) = p.on_end {
         return match e {
             OnEnd::Repeat => EndOfInput::Repeat,
@@ -127,12 +130,19 @@ fn end_policy(p: &ProgrammeArgs, stdin: bool) -> EndOfInput {
             OnEnd::Stop => EndOfInput::Stop,
         };
     }
-    if stdin { EndOfInput::Wait } else { EndOfInput::Repeat }
+    // A rendered file ends with the input.
+    if !realtime {
+        EndOfInput::Stop
+    } else if stdin {
+        EndOfInput::Wait
+    } else {
+        EndOfInput::Repeat
+    }
 }
 
 /// Open the programme input at the modulator's audio rate. `realtime`:
 /// for a transmitter, whose crystal error is corrected while running.
-pub fn open_programme(p: &ProgrammeArgs, audio_rate: f64, realtime: bool) -> anyhow::Result<Programme> {
+fn open_programme(p: &WfmArgs, audio_rate: f64, realtime: bool) -> anyhow::Result<Programme> {
     let (spec, stdin) = match (&p.audio, p.tone) {
         (_, Some(f)) => (InputSpec::Tone { freq: f, amplitude: 0.5, stereo: false }, false),
         (None, None) => return Ok(Programme::None),
@@ -142,21 +152,36 @@ pub fn open_programme(p: &ProgrammeArgs, audio_rate: f64, realtime: bool) -> any
         },
         (Some(a), None) => (InputSpec::File(PathBuf::from(a)), false),
     };
-    let end = end_policy(p, stdin);
+    let end = end_policy(p, stdin, realtime);
     let opts = AudioOptions { end, buffer: Duration::from_millis(500), adjustable_rate: realtime, ..Default::default() };
     let input = AudioInput::open(&spec, audio_rate, &opts)?;
     Ok(Programme::Audio(input, end))
 }
 
-/// Create the modulator for an output running at `sample_rate` (in real
-/// time for a transmitter).
-pub fn build_modulator(p: &ProgrammeArgs, sample_rate: f64, realtime: bool) -> anyhow::Result<WfmModulator> {
-    let cfg = mpx_config(p)?;
-    let rds = rds_params(p)?;
-    let programme = open_programme(p, WfmModulator::audio_rate_for(sample_rate), realtime)?;
-    let mut m = WfmModulator::new(cfg, programme, rds, p.rds != 0).map_err(anyhow::Error::msg)?;
-    m.set_local_offset_fn(Box::new(crate::rt::local_offset));
-    Ok(m)
+impl Mode for WfmArgs {
+    fn max_offset_hz(&self) -> f64 {
+        MAX_OFFSET_HZ
+    }
+
+    fn check(&self, carrier_mhz: Option<f64>) -> anyhow::Result<()> {
+        mpx_config(self)?;
+        rds_params(self)?;
+        if let Some(f) = carrier_mhz
+            && !(65.0..=108.0).contains(&f)
+        {
+            log::warn!("{f} MHz is outside the FM broadcast bands (65.8-108 MHz)");
+        }
+        Ok(())
+    }
+
+    fn modulator(&self, sample_rate: f64, realtime: bool) -> anyhow::Result<Box<dyn Modulator>> {
+        let cfg = mpx_config(self)?;
+        let rds = rds_params(self)?;
+        let programme = open_programme(self, WfmModulator::audio_rate_for(sample_rate), realtime)?;
+        let mut m = WfmModulator::new(cfg, programme, rds, self.rds != 0).map_err(anyhow::Error::msg)?;
+        m.set_local_offset_fn(Box::new(crate::rt::local_offset));
+        Ok(Box::new(m))
+    }
 }
 
 #[cfg(test)]

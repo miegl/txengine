@@ -6,8 +6,8 @@ use std::path::Path;
 
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
-/// Deviation corresponding to a full-scale MPX sample in rendered files.
-pub const MPX_FULL_SCALE: f64 = 100_000.0;
+/// Deviation corresponding to a full-scale sample in rendered WAV files.
+pub const WAV_FULL_SCALE: f64 = 100_000.0;
 
 enum Out {
     /// IEEE float WAV of deviation / 100 kHz.
@@ -27,10 +27,10 @@ pub struct FileSink {
 const CHUNK: usize = 16384;
 
 impl FileSink {
-    pub fn mpx_wav(path: &Path, fs: f64, hold: bool) -> anyhow::Result<FileSink> {
+    pub fn deviation_wav(path: &Path, fs: f64, hold: bool) -> anyhow::Result<FileSink> {
         let mut w = BufWriter::new(File::create(path)?);
         write_wav_header(&mut w, fs as u32, 0)?;
-        Ok(Self::new(Out::Wav { w, frames: 0 }, fs, "MPX WAV file", hold))
+        Ok(Self::new(Out::Wav { w, frames: 0 }, fs, "deviation WAV file", hold))
     }
 
     pub fn iq(path: &Path, fs: f64, hold: bool) -> anyhow::Result<FileSink> {
@@ -101,7 +101,7 @@ impl RfSink for FileSink {
         match &mut self.out {
             Out::Wav { w, frames } => {
                 for &s in samples {
-                    w.write_all(&((s as f64 / MPX_FULL_SCALE) as f32).to_le_bytes())?;
+                    w.write_all(&((s as f64 / WAV_FULL_SCALE) as f32).to_le_bytes())?;
                 }
                 *frames += samples.len() as u64;
             }

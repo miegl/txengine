@@ -5,7 +5,7 @@
 //! * [`modulator`] – differential coding, biphase symbols and the specified
 //!   data-channel spectrum shaping, generated at any sample rate.
 //! * [`decoder`] – an independent demodulator/decoder used to verify the
-//!   transmitted signal (tests and the `txengine analyze` tool).
+//!   transmitted signal (tests and the `txengine wfm analyze` tool).
 
 pub mod charset;
 pub mod decoder;

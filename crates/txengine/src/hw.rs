@@ -15,16 +15,13 @@ fn check_common(hw: &HardwareArgs) -> anyhow::Result<()> {
     if !(1.0..=250.0).contains(&hw.freq) {
         bail!("--freq must be given in MHz (e.g. 87.6)");
     }
-    if !(65.0..=108.0).contains(&hw.freq) {
-        log::warn!("{} MHz is outside the FM broadcast bands (65.8-108 MHz)", hw.freq);
-    }
     if hw.power > 7 {
         bail!("--power must be 0-7");
     }
     Ok(())
 }
 
-fn rp1_config(hw: &HardwareArgs) -> anyhow::Result<rp1::fm::Rp1FmConfig> {
+fn rp1_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<rp1::fm::Rp1FmConfig> {
     let pll = match hw.pll.as_deref().map(str::to_ascii_lowercase).as_deref() {
         None | Some("audio") => rp1::fm::Rp1Pll::Audio,
         Some("video") => rp1::fm::Rp1Pll::Video,
@@ -38,7 +35,7 @@ fn rp1_config(hw: &HardwareArgs) -> anyhow::Result<rp1::fm::Rp1FmConfig> {
         drive: rp1::gpio::Drive::from_level(hw.power),
         sample_rate: hw.sample_rate.unwrap_or(250_000.0),
         buffer: Duration::from_millis(hw.buffer_ms),
-        max_offset_hz: 100_000.0,
+        max_offset_hz,
         dma_channel: hw.dma_channel,
         tick: 0,
     })
@@ -55,24 +52,25 @@ fn warn_power() {
     }
 }
 
-/// Open the transmitter for the detected platform. Must be called while
-/// the process is still single threaded (it forks the shutdown guardian).
-pub fn open_transmitter(hw: &HardwareArgs) -> anyhow::Result<Box<dyn RfSink>> {
+/// Open the transmitter for the detected platform, able to move the carrier
+/// by up to ±`max_offset_hz`. Must be called while the process is still
+/// single threaded (it forks the shutdown guardian).
+pub fn open_transmitter(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
     check_common(hw)?;
     let plat = platform::detect()?;
     info!("{} ({}), crystal {:.3} MHz", plat.model, plat.soc, plat.osc_hz / 1e6);
     warn_power();
     match plat.soc {
         Soc::Bcm2712 => {
-            let cfg = rp1_config(hw)?;
+            let cfg = rp1_config(hw, max_offset_hz)?;
             Ok(Box::new(rp1::fm::Rp1FmTransmitter::new(&cfg, plat.osc_hz).context("RP1 transmitter")?))
         }
         Soc::Bcm2835 => bail!("the original Raspberry Pi 1/Zero (ARMv6) is not supported"),
-        _ => bcm_transmitter(&plat, hw),
+        _ => bcm_transmitter(&plat, hw, max_offset_hz),
     }
 }
 
-fn bcm_config(hw: &HardwareArgs) -> anyhow::Result<bcm::fm::BcmFmConfig> {
+fn bcm_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<bcm::fm::BcmFmConfig> {
     use bcm::cprman::PllId;
     use bcm::fm::{BcmMethod, Pacer};
     let method = match hw.pll.as_deref().map(str::to_ascii_lowercase).as_deref() {
@@ -96,20 +94,21 @@ fn bcm_config(hw: &HardwareArgs) -> anyhow::Result<bcm::fm::BcmFmConfig> {
         drive: hw.power,
         sample_rate: hw.sample_rate,
         buffer: Duration::from_millis(hw.buffer_ms),
-        max_offset_hz: 100_000.0,
+        max_offset_hz,
         dma_channel: hw.dma_channel,
         max_vco_change: 0.03,
     })
 }
 
-fn bcm_transmitter(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<Box<dyn RfSink>> {
-    let cfg = bcm_config(hw)?;
+fn bcm_transmitter(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
+    let cfg = bcm_config(hw, max_offset_hz)?;
     let b = Bcm::open(plat)?;
     Ok(Box::new(bcm::fm::BcmFmTransmitter::new(&cfg, &b).context("BCM transmitter")?))
 }
 
-/// Print the detected platform and frequency plan without touching the hardware.
-pub fn probe(hw: &HardwareArgs) -> anyhow::Result<()> {
+/// Print the detected platform and the frequency plan for a carrier
+/// offset of up to ±`max_offset_hz`, without touching the hardware.
+pub fn probe(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
     check_common(hw)?;
     let plat = platform::detect()?;
     println!("Board:    {}", plat.model);
@@ -129,7 +128,7 @@ pub fn probe(hw: &HardwareArgs) -> anyhow::Result<()> {
     }
     match plat.soc {
         Soc::Bcm2712 => {
-            let cfg = rp1_config(hw)?;
+            let cfg = rp1_config(hw, max_offset_hz)?;
             let pci = rp1::find_pci_device()?;
             println!("RP1:      {}", pci.display());
             let gpclk = cfg
@@ -169,14 +168,14 @@ pub fn probe(hw: &HardwareArgs) -> anyhow::Result<()> {
             let busy = rp1::dma::Dmac::kernel_channels_in_use();
             println!("DMA:      kernel channels in use {busy:#04x}");
         }
-        _ => bcm_probe(&plat, hw)?,
+        _ => bcm_probe(&plat, hw, max_offset_hz)?,
     }
     Ok(())
 }
 
-fn bcm_probe(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<()> {
+fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
     use bcm::cprman::{Cprman, Pll, PllId};
-    let cfg = bcm_config(hw)?;
+    let cfg = bcm_config(hw, max_offset_hz)?;
     let b = Bcm::open(plat)?;
     let cm = Cprman::new(b.cm.clone());
     let osc = plat.osc_hz;

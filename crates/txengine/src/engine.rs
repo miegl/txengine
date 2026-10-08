@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use log::{info, warn};
 use txengine_core::{CommandError, Modulator, RenderContext, RfSink};
-use txengine_fm::WfmModulator;
 
 use crate::clock::ClockDiscipline;
 use crate::control::ControlMsg;
@@ -28,7 +27,7 @@ pub struct EngineSummary {
 }
 
 fn handle_command(
-    m: &mut WfmModulator,
+    m: &mut dyn Modulator,
     sink: &mut dyn RfSink,
     clock: Option<&mut ClockDiscipline>,
     msg: ControlMsg,
@@ -81,7 +80,7 @@ fn handle_command(
 /// corrects a real-time sink for its crystal error.
 pub fn run(
     sink: &mut dyn RfSink,
-    m: &mut WfmModulator,
+    m: &mut dyn Modulator,
     mut clock: Option<&mut ClockDiscipline>,
     control: Option<Receiver<ControlMsg>>,
     opts: &EngineOptions,
@@ -176,22 +175,12 @@ pub fn run(
             && last_status.elapsed() >= iv
         {
             let dt = last_status.elapsed().as_secs_f64();
-            let st = m.take_stats().unwrap_or_default();
-            let fields = m.status().fields;
-            let field = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
-            let audio = field("audio_buffer").map(|v| format!(", audio buffer {v}")).unwrap_or_default();
-            let drift = field("audio_drift_ppm").map(|v| format!(", input drift {v} ppm")).unwrap_or_default();
+            let meters = Some(m.take_meters()).filter(|s| !s.is_empty()).map(|s| format!(", {s}")).unwrap_or_default();
             let crystal = clock.as_deref().map(|c| format!(", {}", c.summary())).unwrap_or_default();
             info!(
-                "status: {:.1} s, rate {:.1} S/s, peak deviation {:.1} kHz, MPX power {:+.1} dBr, HF limiter {:+.1} dB, limiter {:+.1} dB, clipped {}, audio underruns {}, output underruns {}{audio}{drift}{crystal}",
+                "status: {:.1} s, rate {:.1} S/s{meters}, output underruns {}{crystal}",
                 start.elapsed().as_secs_f64(),
                 (p.consumed - summary.samples) as f64 / dt,
-                st.peak_deviation / 1e3,
-                st.mpx_power_dbr,
-                -st.hf_limiter_db,
-                20.0 * (st.limiter_gain.max(1e-6) as f64).log10(),
-                st.clipped,
-                st.audio_underruns,
                 p.underruns,
             );
             summary.samples = p.consumed;

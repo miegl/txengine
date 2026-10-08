@@ -1,6 +1,6 @@
-//! `txengine analyze`: measure an FM multiplex recording.
+//! `txengine wfm analyze`: measure an FM multiplex recording.
 //!
-//! Works on files rendered by `txengine render` and on multiplex signals
+//! Works on files rendered by `txengine wfm render` and on multiplex signals
 //! demodulated from over-the-air captures, so the transmitter can be
 //! verified end to end against BS.450 / EN 50067.
 
@@ -10,7 +10,7 @@ use anyhow::bail;
 use txengine_dsp::{Fir, FirDesign};
 use txengine_rds::decoder::decode_mpx;
 
-use crate::cli::AnalyzeArgs;
+use super::args::AnalyzeArgs;
 
 /// Complex correlation of `x` with a tone at `f` (time origin at x[0]).
 fn corr(x: &[f32], fs: f64, f: f64, origin: usize) -> (f64, f64) {

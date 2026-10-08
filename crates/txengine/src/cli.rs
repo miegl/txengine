@@ -1,8 +1,15 @@
-//! Command line interface.
+//! Command line interface: a command per transmission mode, each with its
+//! own subcommands (`txengine wfm tx`), and tools that need no mode.
+//!
+//! Every mode transmits with [`Tx`] and renders to a file with [`Render`],
+//! which add the options shared by all modes (hardware, control, file
+//! output) to the mode's own.
 
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::wfm;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,14 +34,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Transmit.
-    Tx(TxArgs),
-    /// Render the signal to a file instead of transmitting (for testing).
-    Render(RenderArgs),
+    /// Wide-band FM broadcast: stereo multiplex and RDS.
+    #[command(subcommand)]
+    Wfm(Box<wfm::Command>),
     /// Show the detected hardware and the frequency plan, without transmitting.
     Probe(ProbeArgs),
-    /// Measure an FM multiplex recording (WAV): levels, RDS decode.
-    Analyze(AnalyzeArgs),
     /// Transmit test tones as raw frequency deviation (no audio processing,
     /// no compensation), e.g. to measure the modulation response.
     Tone(ToneArgs),
@@ -67,130 +71,10 @@ pub(crate) fn parse_ppm(s: &str) -> Result<Ppm, String> {
     Ok(Ppm::Fixed(v))
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum OnEnd {
-    /// Start the file again from the beginning.
-    Repeat,
-    /// Keep transmitting (silence, RDS) after the input ends.
-    Wait,
-    /// Stop transmitting when the input ends.
-    Stop,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum StereoArg {
-    Auto,
-    Mono,
-    Stereo,
-}
-
-/// Programme, RDS and modulation options shared by `tx` and `render`.
-#[derive(Debug, Clone, Args)]
-pub struct ProgrammeArgs {
-    /// Audio to transmit: a file (WAV, FLAC, MP3, OGG, AAC, ...) or '-' for
-    /// standard input. Without it only the carrier and RDS are transmitted.
-    #[arg(short, long, value_name = "FILE")]
-    pub audio: Option<String>,
-    /// Standard input is headerless S16LE PCM at this sample rate.
-    #[arg(long, value_name = "HZ", requires = "raw_channels")]
-    pub raw_rate: Option<u32>,
-    /// Channels of the headerless PCM on standard input.
-    #[arg(long, value_name = "N", requires = "raw_rate")]
-    pub raw_channels: Option<u16>,
-    /// What to do when the audio ends [default: repeat for files, wait for stdin].
-    #[arg(long, value_enum)]
-    pub on_end: Option<OnEnd>,
-    /// Test tone instead of audio input (Hz).
-    #[arg(long, value_name = "HZ", conflicts_with = "audio")]
-    pub tone: Option<f64>,
-
-    // RDS ------------------------------------------------------------------
-    /// RDS on (1) or off (0).
-    #[arg(long, default_value_t = 1, value_name = "0|1", help_heading = "RDS")]
-    pub rds: u8,
-    /// Programme identification code (4 hex digits).
-    #[arg(long, default_value = "1234", help_heading = "RDS")]
-    pub pi: String,
-    /// Programme service name (max. 8 characters).
-    #[arg(long, default_value = "txengine", help_heading = "RDS")]
-    pub ps: String,
-    /// RadioText (max. 64 characters).
-    #[arg(long, default_value = "txengine - FM/RDS transmitter for the Raspberry Pi", help_heading = "RDS")]
-    pub rt: String,
-    /// Programme type: 0-31 or a name such as "Pop music".
-    #[arg(long, default_value = "0", help_heading = "RDS")]
-    pub pty: String,
-    /// Traffic programme flag.
-    #[arg(long, default_value_t = 0, value_name = "0|1", help_heading = "RDS")]
-    pub tp: u8,
-    /// Traffic announcement flag.
-    #[arg(long, default_value_t = 0, value_name = "0|1", help_heading = "RDS")]
-    pub ta: u8,
-    /// Music (1) / speech (0).
-    #[arg(long, default_value_t = 1, value_name = "0|1", help_heading = "RDS")]
-    pub ms: u8,
-    /// Alternative frequency in MHz (repeat for several, max. 25).
-    #[arg(long, value_name = "MHZ", help_heading = "RDS")]
-    pub af: Vec<f64>,
-    /// Programme type name (max. 8 characters).
-    #[arg(long, help_heading = "RDS")]
-    pub ptyn: Option<String>,
-    /// Extended country code (hex), sent in group 1A.
-    #[arg(long, value_name = "HEX", help_heading = "RDS")]
-    pub ecc: Option<String>,
-    /// Language identification code (hex), sent in group 1A.
-    #[arg(long, value_name = "HEX", help_heading = "RDS")]
-    pub lic: Option<String>,
-    /// Clock time and date (group 4A), from the system clock.
-    #[arg(long, default_value_t = 1, value_name = "0|1", help_heading = "RDS")]
-    pub ct: u8,
-    /// Decoder identification bits d1-d3 as hex (d0/stereo is automatic).
-    #[arg(long, default_value = "0", value_name = "HEX", help_heading = "RDS")]
-    pub di: String,
-
-    // Modulation -----------------------------------------------------------
-    /// Maximum frequency deviation in Hz (75000 or 50000).
-    #[arg(long = "deviation", default_value_t = 75_000.0, value_name = "HZ", help_heading = "Modulation")]
-    pub deviation: f64,
-    /// Peak deviation of the audio [default: what pilot and RDS leave of --deviation].
-    #[arg(long, value_name = "HZ", help_heading = "Modulation")]
-    pub audio_deviation: Option<f64>,
-    /// Pilot tone deviation in Hz (BS.450: 8-10 % of 75 kHz).
-    #[arg(long, default_value_t = 6_750.0, value_name = "HZ", help_heading = "Modulation")]
-    pub pilot: f64,
-    /// RDS injection in Hz (EN 50067: 1000-7500, 2000 recommended).
-    #[arg(long, default_value_t = 2_000.0, value_name = "HZ", help_heading = "Modulation")]
-    pub rds_level: f64,
-    /// Pre-emphasis: eu (50 µs), us (75 µs), off, or a time constant in µs.
-    #[arg(long, default_value = "eu", help_heading = "Modulation")]
-    pub preemph: String,
-    /// Audio low-pass cut-off in Hz.
-    #[arg(long, default_value_t = 15_000.0, value_name = "HZ", help_heading = "Modulation")]
-    pub cutoff: f64,
-    /// Stereo coding.
-    #[arg(long, value_enum, default_value = "auto", help_heading = "Modulation")]
-    pub stereo: StereoArg,
-    /// Same as --stereo mono.
-    #[arg(long, help_heading = "Modulation")]
-    pub mono: bool,
-    /// Input gain in dB. With pre-emphasis, the level is already lowered by
-    /// the rise of the multiplex power (ITU-R BS.412) the pre-emphasis
-    /// causes for pink noise (4.3 dB at 50 µs, 6.8 dB at 75 µs), so a
-    /// programme keeps about the MPX power it has without pre-emphasis.
-    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true, value_name = "DB", help_heading = "Modulation")]
-    pub gain: f64,
-    /// Disable the limiters (HF and peak); overload is then hard clipped.
-    #[arg(long, help_heading = "Modulation")]
-    pub no_limiter: bool,
-    /// Do not pre-compensate the output stage's sample-and-hold roll-off.
-    #[arg(long, help_heading = "Modulation")]
-    pub no_hold_compensation: bool,
-}
-
 #[derive(Debug, Clone, Args)]
 pub struct HardwareArgs {
     /// Carrier frequency in MHz.
-    #[arg(short, long, default_value_t = 87.6, value_name = "MHZ")]
+    #[arg(short, long, value_name = "MHZ")]
     pub freq: f64,
     /// Output GPIO (repeat for several pins on the same clock generator).
     #[arg(short, long = "gpio", value_name = "N", help_heading = "Hardware")]
@@ -227,13 +111,21 @@ pub struct HardwareArgs {
     pub buffer_ms: u64,
 }
 
+/// `<mode> tx`: transmit with the mode's options `M`.
 #[derive(Debug, Clone, Args)]
-pub struct TxArgs {
+pub struct Tx<M: Args> {
     #[command(flatten)]
     pub hw: HardwareArgs,
     #[command(flatten)]
-    pub prog: ProgrammeArgs,
-    /// Control FIFO: one command per line (PS, RT, PTY, TA, ...); created if missing.
+    pub mode: M,
+    #[command(flatten)]
+    pub ctl: ControlArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ControlArgs {
+    /// Control FIFO: one command per line (the mode's settings, PPM, QUIT,
+    /// ...); created if missing.
     #[arg(short = 'C', long, value_name = "PATH", help_heading = "Control")]
     pub ctl: Option<PathBuf>,
     /// Control socket (Unix stream): commands get a reply line.
@@ -250,24 +142,33 @@ pub struct TxArgs {
     pub rt_priority: i32,
 }
 
+/// `<mode> render`: render the mode's signal (options `M`) to a file.
+#[derive(Debug, Clone, Args)]
+pub struct Render<M: Args> {
+    #[command(flatten)]
+    pub mode: M,
+    #[command(flatten)]
+    pub out: OutputArgs,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum RenderFormat {
-    /// Multiplex (instantaneous deviation / 100 kHz) as 32-bit float WAV.
-    Mpx,
-    /// Complex baseband FM signal, interleaved 32-bit float I/Q (.cf32).
+    /// Instantaneous frequency deviation / 100 kHz as 32-bit float WAV (in
+    /// WFM, the multiplex).
+    #[value(alias = "mpx")]
+    Deviation,
+    /// Complex baseband signal, interleaved 32-bit float I/Q (.cf32).
     Iq,
     /// Discard (benchmark).
     Null,
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct RenderArgs {
-    #[command(flatten)]
-    pub prog: ProgrammeArgs,
+pub struct OutputArgs {
     /// Output file.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-    #[arg(long, value_enum, default_value = "mpx")]
+    #[arg(long, value_enum, default_value = "deviation")]
     pub format: RenderFormat,
     /// Sample rate in Hz.
     #[arg(long, default_value_t = 250_000.0)]
@@ -304,15 +205,16 @@ pub struct ToneArgs {
     pub duration: f64,
 }
 
-#[derive(Debug, Clone, Args)]
-pub struct AnalyzeArgs {
-    /// WAV recording of an FM multiplex (sample rate >= 128 kHz).
-    pub file: PathBuf,
-    /// Deviation in Hz corresponding to a full-scale sample.
-    #[arg(long, default_value_t = 100_000.0)]
-    pub full_scale: f64,
-    /// Unix time of the first sample (to check RDS clock-time accuracy).
-    /// Read from `<file>.json` (`{"start_time": ...}`) if present.
-    #[arg(long, value_name = "UNIX")]
-    pub start_time: Option<f64>,
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    /// Every command combines shared options with a mode's own; clap
+    /// checks them for clashes only when a command is used.
+    #[test]
+    fn commands_are_consistent() {
+        Cli::command().debug_assert();
+    }
 }
