@@ -219,7 +219,10 @@ divider register, paced by hardware.
   a hertz.
 * The DMA engine's write rate to the PLL registers is limited (≈ 231 k
   writes/s on the Pi 2 and the Zero 2 W), so the sample rate is chosen from
-  a measurement at start-up, and the achieved rate is checked continuously.
+  a measurement at start-up: the highest even multiple of 19 kHz within
+  85 % of it (`fm::RATE_STEP`), which puts the images of the hold onto
+  harmonics of 19 kHz, where a switching stereo decoder makes no tones of
+  them. The achieved rate is checked continuously.
 * The PLL registers sit behind the slow A2W bus, which the firmware also
   uses to change the ARM clock (PLLB). If a firmware write meets one of the
   DMA engine's, it lands in the modulated PLL's registers instead (PLLB's

@@ -64,8 +64,8 @@ pub struct BcmFmConfig {
     pub pacer: Pacer,
     /// Pad drive strength 0..=7 (2..16 mA).
     pub drive: u8,
-    /// Output sample rate; `None`: the highest rate the DMA engine
-    /// sustains on this board (measured), at most 250 kS/s.
+    /// Output sample rate; `None`: the highest multiple of [`RATE_STEP`]
+    /// the DMA engine sustains on this board (measured), at most 250 kS/s.
     pub sample_rate: Option<f64>,
     pub buffer: Duration,
     pub max_offset_hz: f64,
@@ -364,6 +364,27 @@ const BCM2837_PLL_RESPONSE_DB: &[(f64, f64)] = &[
     (61e3, 0.06),
     (67e3, 0.075),
 ];
+
+/// The default sample rate is a multiple of this: an even multiple of the
+/// 19 kHz stereo pilot (190 kS/s on the Pi 2, 3 and Zero 2 W).
+///
+/// The output holds each sample, so the multiplex is repeated around every
+/// multiple of the sample rate, attenuated only by the hold (the pilot's
+/// images at `fs ± 19 kHz` by about 19 dB). A receiver with a wide IF
+/// passes the images within about ±200 kHz of the carrier, and a stereo
+/// decoder that switches with a 38 kHz square wave (most analogue ones)
+/// mixes them with the odd harmonics of 38 kHz into tones at
+/// `|fs - k · 19 kHz|`. At 195.9 kS/s the pilot's image at 176.9 kHz and
+/// the 5th harmonic (190 kHz) give a 13.1 kHz tone: −71 dB re 75 kHz in a
+/// model of such a decoder fed with the signal received from a Zero 2 W
+/// (−82 dB behind a ±150 kHz IF). The programme's images come back
+/// shifted by `fs − 190 kHz` the same way. With `fs` an even multiple of 19 kHz the
+/// images of the pilot and of RDS land on odd harmonics of 19 kHz and
+/// those of the programme around harmonics of 38 kHz, so every product
+/// falls on 19 kHz or on the programme's own frequencies, off only by the
+/// crystal error (a few hertz). From the 500 MHz pacer source, 190 kHz
+/// needs a fractional divider (see [`plan_pacer`]).
+pub const RATE_STEP: f64 = 38_000.0;
 
 /// Samples per second the DMA engine can deliver when each sample is a
 /// write of `word` to the register at `target_bus` plus a second control
@@ -733,7 +754,7 @@ impl BcmFmTransmitter {
             }
             Some(fs) => fs,
             None => {
-                let fs = ((0.85 * capacity / 1e3).floor() * 1e3).min(250_000.0);
+                let fs = ((0.85 * capacity).min(250_000.0) / RATE_STEP).floor() * RATE_STEP;
                 if fs < 150_000.0 {
                     return Err(HalError::Hardware(format!(
                         "the DMA engine sustains only {:.1} kS/s on this board; an FM multiplex needs at least 150 kS/s",

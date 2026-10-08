@@ -217,8 +217,9 @@ pub struct HardwareArgs {
     #[arg(long, help_heading = "Hardware")]
     pub pacer: Option<String>,
     /// Target sample rate of the output in Hz (the closest exact rate is
-    /// used). Default: 250000 on the Pi 5; on the Pi 1-4 the highest rate the
-    /// DMA engine sustains on the board (measured at start-up), at most 250000.
+    /// used). Default: 250000 on the Pi 5; on the Pi 1-4 the highest multiple
+    /// of 38000 the DMA engine sustains on the board (measured at start-up),
+    /// at most 250000: 190000 on the Pi 2, 3 and Zero 2 W.
     #[arg(long, value_name = "HZ", help_heading = "Hardware")]
     pub sample_rate: Option<f64>,
     /// Output buffer (transmit latency) in milliseconds.

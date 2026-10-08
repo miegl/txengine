@@ -195,7 +195,7 @@ Measured over the air with a USRP B210 (`tools/sdr_capture.py`,
 
 | | Raspberry Pi 5 | Raspberry Pi 2 | Raspberry Pi Zero 2 W |
 |---|---|---|---|
-| Sample rate | 250 kS/s | 194.9 kS/s (measured DMA capacity, see below) | 195.9 kS/s |
+| Sample rate | 250 kS/s | 190 kS/s (10 × 19 kHz within the DMA capacity, see below) | 190 kS/s |
 | Pilot | 6.749 kHz (target 6.75) | 6.74-6.76 kHz | 6.75-6.76 kHz |
 | 38 kHz carrier residual | 0.001 % | 0.005 % | 0.006 % |
 | Stereo separation (left only) | > 50 dB (1 kHz) | 55–58 dB (100 Hz – 14 kHz) | 51–56 dB (1–14 kHz) |
@@ -245,9 +245,32 @@ Hardware-specific findings that txengine handles:
 
 * **Pi 2 and Zero 2 W (and probably other BCM283x boards):** a DMA write to
   a PLL's fractional register takes about 4.3 µs, which caps the sample rate
-  at about 231 kS/s. txengine measures the capacity at start-up and picks a
-  rate with 15 % margin (`--sample-rate` above the capacity is refused), and
-  it watches the achieved rate while running.
+  at about 231 kS/s. txengine measures the capacity at start-up and picks the
+  highest even multiple of 19 kHz within 85 % of it, 190 kS/s
+  (`--sample-rate` above the capacity is refused), and it watches the
+  achieved rate while running.
+* **Pi 2 and Zero 2 W, sample rate and stereo decoders:** the output holds
+  each sample, so the multiplex is repeated around multiples of the sample
+  rate, attenuated only by the hold: the pilot's images at `fs ± 19 kHz` are
+  19 dB below it. An analogue stereo decoder switches with a 38 kHz square
+  wave, whose 3rd, 5th and 7th harmonics (114, 190, 266 kHz) demodulate
+  whatever the receiver's IF passes there. At the former rates
+  (193–196 kS/s, chosen with 1 kHz steps) the pilot's image at 174–177 kHz
+  beat with 190 kHz into a tone: for the Zero 2 W at 195.9 kS/s (176.9 kHz
+  against 190 kHz) a model of such a decoder, fed with the received signal,
+  gives 13.1 kHz at −71 dB re 75 kHz (−82 dB behind a ±150 kHz IF). At an
+  even multiple of 19 kHz every such product falls on 19 kHz or onto the
+  programme's own frequencies, so 190 kS/s it is: the images then lie
+  exactly on the 9th and 11th harmonic of the received pilot, and the
+  model's tone is gone (−96 dB on the Zero 2 W, its noise floor). From
+  PLLD_PER (500 MHz) the nearest integer divider gives 189.97 kS/s, so the
+  pacer uses a fractional (MASH 1) one: it moves each sample by at most
+  2 ns, and interleaved runs on a Pi 2 measured the same noise (within
+  0.3 dB) as with the integer divider. The Pi 5 (250 kS/s; its pacer divides
+  50 MHz by an integer, which gives no multiple of 19 kHz near it) has its
+  images at 231 and 269 kHz: only the 7th harmonic reaches one (3 kHz,
+  −67 dB in the model with an unlimited IF), and a ±150 kHz IF removes it
+  (−90 dB).
 * **Pi 2 and Zero 2 W, PLLA's and PLLC's loop:** with the firmware's loop gain
   (KI 2) the loop bandwidth is about 125 kHz. That leaves the VCO's
   phase noise around 10–30 kHz offset, in the audio and stereo bands,
