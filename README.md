@@ -200,7 +200,42 @@ Measured over the air with a USRP B210 (`tools/sdr_capture.py`,
 | Crystal error (carrier, pilot, playback speed) | −54 ppm; −0.3 ppm with `--ppm auto` | +7.3 ppm; +0.1 ppm with `--ppm auto` | +4.7 ppm; < 0.1 ppm with `--ppm auto` |
 | Timing | no sample slips in 25 s tone tests | no sample slips | no sample slips |
 | Modulation THD (10 kHz) | −71 dB | | |
+| Audio SNR, mono / stereo (re 75 kHz) | ≥ 69.5 / ≥ 56.5 dB | 71.2 / 59.8 dB | 56.0 / 43.9 dB |
+| Audio SNR, mono / stereo (re 0 dBFS) | ≥ 64 / ≥ 51 dB (65–70 / 53–56 dB at higher receiver gain) | 65.7 / 54.4 dB | 50.5 / 38.5 dB |
+| Audio THD (1 kHz, 0 dBFS) | −91 dB | −72 dB | −69 dB |
+| Audio frequency response (31.5 Hz – 15 kHz) | ±0.03 dB | ±0.04 dB | ±0.04 dB |
 | CPU (stereo + RDS, one core) | | 24 % at 600 MHz (throttled) | 11 % at 1 GHz, plus 4 % audio decoding |
+
+Audio figures: a reference stereo decoder (pilot-locked, 50 µs
+de-emphasis), unweighted 20 Hz – 15 kHz. A 0 dBFS tone deviates 40 kHz,
+not 65 kHz, because of the −4.3 dB pre-emphasis drive correction. The
+noise comes from the carrier, not from the signal processing: an
+unmodulated carrier has the same floor. In stereo the noise from the
+23–53 kHz subband adds to it. Measured per clock path (unmodulated
+carriers, AM and PM noise separated):
+
+* **Pi 2, Zero 2 W:** phase noise of the PLLs (PM 8–16 dB above AM).
+  PLLA, PLLC and PLLD measure the same on both boards, and neither the
+  GPCLK divider, the pad drive nor the slew rate changes it; integer-N
+  mode is 6 dB worse than fractional. With the firmware's loop gain it
+  was −91 dBc/Hz (Pi 2) and −86 dBc/Hz (Zero 2 W) at 10 kHz; txengine's
+  wider PLLA loop (see below) brings the Pi 2 to −101 dBc/Hz (stereo
+  44 → 54 dB). The Zero 2 W does not change with the loop gain: its
+  noise has another source (it is worse under CPU load and has a
+  −21 dBc 100 Hz spur, i.e. its supply). On the Pi 2 the mono SNR is now
+  limited by noise that only appears with modulation (72 dB for an
+  unmodulated carrier, 66 dB transmitting).
+* **Pi 5:** about −104 dBc/Hz at 10 kHz, with equal AM noise: noise
+  added after the PLL, not phase noise of it. It is the same for every
+  `pll_audio` setting (VCO 1050–1750 MHz, integer or fractional,
+  dividers), for `pll_sys`, and for any pad drive or slew. At a B210
+  gain of 20 dB the receiver contributes about half of it, so the table
+  gives lower bounds.
+
+The multiplex as computed (`txengine render`) has a noise floor of
+−128 dBFS (21 bits); quantising it to the frequency steps of the hardware
+gives −123 dBFS on the Pi 5 (0.17 Hz steps) and −106 dBFS on the BCM
+boards (1.41 Hz steps). Both are far below the RF noise.
 
 Hardware-specific findings that txengine handles:
 
