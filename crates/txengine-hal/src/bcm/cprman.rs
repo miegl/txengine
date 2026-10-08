@@ -249,6 +249,32 @@ const PER_CLOCKS: &[(&str, usize)] = &[
 ];
 /// VPU-mux clocks (4 = PLLA_CORE, 5 = PLLC_CORE0, 6 = PLLD_CORE, 8/9 = PLLC_CORE1/2).
 const VPU_CLOCKS: &[(&str, usize)] = &[("vpu", VPU), ("h264", H264), ("isp", ISP), ("v3d", V3D), ("sdram", SDRAM)];
+/// The VPU-mux clocks of the GPU's video and 3D blocks: idle unless video
+/// is decoded or encoded, the camera is used or 3D is drawn.
+const GPU_CLOCKS: &[&str] = &["h264", "isp", "v3d"];
+
+/// Other users of a PLL (see [`Pll::users`]).
+#[derive(Debug, Clone, Default)]
+pub struct PllUsers {
+    /// Enabled CM clocks selecting its PER channel.
+    pub per: Vec<String>,
+    /// Its enabled non-PER channels, with the VPU-mux clocks using them.
+    pub other: Vec<String>,
+    /// Every one of them feeds only the GPU's blocks ([`GPU_CLOCKS`]), or
+    /// nothing: no clock of the VPU, the SD card, the UARTs or a display.
+    pub gpu_only: bool,
+}
+
+impl PllUsers {
+    pub fn is_empty(&self) -> bool {
+        self.per.is_empty() && self.other.is_empty()
+    }
+
+    /// All users, for messages.
+    pub fn names(&self) -> Vec<String> {
+        self.per.iter().chain(&self.other).cloned().collect()
+    }
+}
 
 /// Handle to a PLL.
 #[derive(Debug, Clone)]
@@ -317,9 +343,10 @@ impl Pll {
 
     /// Other users of this PLL: enabled CM clocks selecting its PER channel
     /// (excluding `own_gpclk_ctl`) and enabled non-PER channels.
-    pub fn users(&self, own_gpclk_ctl: usize) -> (Vec<String>, Vec<String>) {
+    pub fn users(&self, own_gpclk_ctl: usize) -> PllUsers {
         let mut per_users = Vec::new();
         let mut other = Vec::new();
+        let mut gpu_only = true;
         let src = self.id.gpclk_source();
         for &(name, ctl) in PER_CLOCKS.iter().chain(self.emmc2.then_some(&("emmc2", EMMC2))) {
             if ctl == own_gpclk_ctl {
@@ -343,10 +370,15 @@ impl Pll {
                         users.push(name);
                     }
                 }
+            } else {
+                // DSI and CCP2 channels clock a display or camera directly.
+                gpu_only = false;
             }
+            gpu_only &= users.iter().all(|u| GPU_CLOCKS.contains(u));
             other.push(if users.is_empty() { cname.to_string() } else { format!("{cname} ({})", users.join(", ")) });
         }
-        (per_users, other)
+        gpu_only &= per_users.is_empty();
+        PllUsers { per: per_users, other, gpu_only }
     }
 
     /// Bring a powered-down PLL up (Linux `bcm2835_pll_on`).

@@ -189,14 +189,15 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<()> {
         if !running {
             println!("{}:     idle (powered down or unlocked)", id.name());
         } else {
-            let (per, other) = p.users(gp_ctl);
+            let u = p.users(gp_ctl);
             println!(
-                "{}:     VCO {:.3} MHz, PER {}, users: PER [{}], other channels [{}]",
+                "{}:     VCO {:.3} MHz, PER {}, users: PER [{}], other channels [{}]{}",
                 id.name(),
                 p.vco_hz() / 1e6,
                 p.per_divider().map_or("off".into(), |d| format!("/{d} = {:.3} MHz", p.vco_hz() / d as f64 / 1e6)),
-                per.join(", "),
-                other.join(", ")
+                u.per.join(", "),
+                u.other.join(", "),
+                if u.gpu_only && !u.is_empty() { " (GPU only)" } else { "" }
             );
         }
         match bcm::fm::plan_pll(&p, gpclk, cfg.carrier_hz, osc, cfg.max_offset_hz, cfg.max_vco_change) {

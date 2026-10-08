@@ -172,9 +172,19 @@ divider register, paced by hardware.
 
 * The carrier is a PLL (A, C or D) → PER divider → GPCLK → GPIO, or a GPCLK
   fractional divider from PLLD (`clkdiv`). The planner scans every clock
-  generator to find out who else uses each PLL and refuses changes of more
-  than 3 % (or any change of a PER divider that others use); idle PLLs are
-  preferred and powered up with the kernel's loop settings.
+  generator to find out who else uses each PLL (`Pll::users`) and refuses
+  changes of more than 3 % (or any change of a PER divider that others
+  use): PLLC clocks the VPU (and through it the SD card host, SPI, I2C and
+  the mini UART) and EMMC (the WiFi's SDIO host), PLLD the PL011 UART and
+  HDMI; the UARTs tolerate about ±3 % of baud rate error, and the SD and
+  SDIO buses run at their 50 MHz maximum. A PLL whose only users are the
+  GPU's video and 3D blocks (`h264`, `isp`, `v3d` on its CORE channel:
+  normally PLLA) may move down by up to 15 % on the BCM2836/7
+  (`fm::GPU_PLL_MAX_DECREASE`): from 2250 MHz that reaches every carrier
+  in 87.5–108 MHz, where ±3 % reaches 76 % of the band (PLLC at ±3 %:
+  50 %). Idle PLLs are preferred and powered up with the kernel's loop
+  settings; otherwise, on the BCM2836/7, PLLA, then PLLC (the BCM2711, not
+  measured, keeps PLLC first).
 * Loop gain of PLLA and PLLC: the firmware and Linux run every PLL with the loop
   filter gains KI 2, KP 8, KA 2 (`A2W_PLLx_ANA1/3`), which give PLLA a
   loop bandwidth of about 125 kHz (natural frequency fitted to the

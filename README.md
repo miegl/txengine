@@ -19,11 +19,13 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
 * **Modulation methods**
   * Pi 1-4 (BCM2835/6/7, BCM2711): fractional-N modulation of PLLA, PLLC or
     PLLD (20-bit fraction, 1-3 Hz steps), or a dithered fractional clock
-    divider (`--pll clkdiv`). The PLL is chosen automatically; PLLs used by
-    other parts of the system are only retuned within ±3 %. PLLA and PLLC
-    run with a wider loop than the firmware gives them (loop gain KI 5
-    instead of 2), which removes most of their phase noise from the
-    multiplex band.
+    divider (`--pll clkdiv`). The PLL is chosen automatically: on the
+    Pi 2/3 and Zero 2 W PLLA, which only clocks the GPU's video and 3D
+    blocks and may therefore move down by up to 15 %, which reaches the
+    whole band; PLLs that clock the rest of the system (VPU, SD card, WiFi,
+    UARTs) are only retuned within ±3 %. PLLA and PLLC run with a wider
+    loop than the firmware gives them (loop gain KI 5 instead of 2), which
+    removes most of their phase noise from the multiplex band.
   * Pi 5 (RP1): fractional-N modulation of the RP1 audio or video PLL
     (24-bit fraction, < 0.1 Hz steps).
 * **Crystal error correction**: the board's crystal error is measured
@@ -264,6 +266,19 @@ Hardware-specific findings that txengine handles:
   KI 2 uncompensated). The response is not perfectly stable: between two
   sessions it moved by 0.15 dB at 67 kHz on both boards, and by 0.05 dB
   under CPU and network load, which leaves the separation unchanged.
+* **Pi 2 and Zero 2 W, choosing the PLL:** retuning a PLL moves every
+  clock derived from it. PLLC clocks the VPU, from which the SD card host,
+  SPI, I2C and the mini UART (the serial console on boards with WiFi) take
+  their clocks, and the WiFi's SDIO host. The SD and SDIO buses run at
+  their 50 MHz maximum and a UART tolerates about ±3 % of baud rate error,
+  so PLLC (like PLLD: PL011 UART, HDMI) stays within ±3 %, which reaches
+  only half of the band. PLLA only clocks the GPU's video and 3D blocks,
+  idle on a transmitter, so txengine prefers it and lets it move down by up
+  to 15 % (the blocks run slower; upwards the 3 % limit stays). That
+  reaches every carrier in 87.5–108 MHz on a 10 kHz raster (from the
+  firmware's 2250 MHz at most −12 %), and the response, noise and separation measure the same
+  at −14 % (VCO 1927 MHz) as at +1.2 %. PLLC moved by −3.6 % caused no SD
+  or WiFi errors and no lost packets on either board.
 * **BCM283x/BCM2711, CPU clock changes:** the firmware changes the ARM clock
   over the same slow PLL register bus that the DMA engine keeps busy. When
   the two collide, the firmware's write lands in the modulated PLL instead:

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
-use super::cprman::{Cprman, Pll, PllConfig, PllId, PllState};
+use super::cprman::{Cprman, Pll, PllConfig, PllId, PllState, PllUsers};
 use super::dma::{ControlBlock, DmaChannel};
 use super::regs::{self, cm, dma as dmar, pads, pcm, pwm};
 use super::{Bcm, gpclk_for_pin};
@@ -69,7 +69,13 @@ pub struct BcmFmConfig {
     pub buffer: Duration,
     pub max_offset_hz: f64,
     pub dma_channel: Option<usize>,
-    /// Largest relative VCO change accepted for a PLL with other users.
+    /// Largest relative VCO change accepted for a PLL with other users
+    /// (below, see [`GPU_PLL_MAX_DECREASE`] for one that only clocks the
+    /// GPU). PLLC clocks the VPU, from which the SD card host, SPI, I2C
+    /// and the mini UART (the console on boards with WiFi) derive their
+    /// clocks, and EMMC (the WiFi's SDIO host); PLLD the PL011 UART and
+    /// HDMI. The UARTs tolerate a baud rate error of about ±3 %, and the
+    /// SD and SDIO buses already run at their 50 MHz maximum.
     pub max_vco_change: f64,
 }
 
@@ -112,8 +118,8 @@ pub struct BcmPlan {
     /// Largest offset the register can represent under any crystal error
     /// correction up to ±[`MAX_CLOCK_ERROR_PPM`].
     pub max_offset_hz: f64,
-    pub per_users: Vec<String>,
-    pub other_users: Vec<String>,
+    /// Who else uses the PLL.
+    pub users: PllUsers,
     /// Hz per register unit at the carrier.
     pub step_hz: f64,
     /// Loop filter integral gain to set on the PLL (see [`modulation_ki`]);
@@ -163,6 +169,15 @@ pub fn modulation_ki(pll: &Pll) -> Option<u32> {
     (matches!(pll.id, PllId::A | PllId::C) && !pll.is_bcm2711()).then_some(MODULATION_KI)
 }
 
+/// How far down the VCO of a PLL whose only users are the GPU's video and
+/// 3D blocks (normally PLLA) may be moved on the BCM2836/7: those blocks
+/// then run up to this much slower, and nothing else depends on them. From
+/// PLLA's 2250 MHz this reaches every carrier in 87.5–108 MHz (at most
+/// −12 % is needed; ±3 % reaches 76 % of the band). The loop's response
+/// and noise measure the same from 1927 to 2365 MHz (−14 % to +5 %).
+/// Upwards, which would overclock the blocks, the general limit applies.
+pub const GPU_PLL_MAX_DECREASE: f64 = 0.15;
+
 /// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
 pub fn plan_pll(
     pll: &Pll,
@@ -174,14 +189,16 @@ pub fn plan_pll(
 ) -> Result<BcmPlan> {
     let gp_ctl = cm::gp(gpclk);
     let running = pll.is_powered() && pll.is_locked();
-    let (per_users, other_users) = if running { pll.users(gp_ctl) } else { (Vec::new(), Vec::new()) };
-    let shared = !per_users.is_empty() || !other_users.is_empty();
+    let users = if running { pll.users(gp_ctl) } else { PllUsers::default() };
+    let shared = !users.is_empty();
+    let max_decrease =
+        if users.gpu_only && !pll.is_bcm2711() { max_change.max(GPU_PLL_MAX_DECREASE) } else { max_change };
     let fb = if running { pll.fb_mult() } else { 1.0 };
     let unit_hz = osc * fb / (1u64 << cm::A2W_FRAC_BITS) as f64;
     let vco_old = if running { pll.vco_hz() } else { 0.0 };
     let cur_per = pll.per_divider();
     // A PER channel used by another clock must keep its divider.
-    let per_choices: Vec<u32> = match (cur_per, per_users.is_empty()) {
+    let per_choices: Vec<u32> = match (cur_per, users.per.is_empty()) {
         (Some(d), false) => vec![d],
         _ => (1..=8).collect(),
     };
@@ -198,7 +215,7 @@ pub fn plan_pll(
             // VCO limits; BCM2835/6/7 switch the feedback pre-divider above
             // 1.75 GHz, which we never change on a running PLL.
             let (lo, hi) = if running && shared {
-                (vco_old * (1.0 - max_change), vco_old * (1.0 + max_change))
+                (vco_old * (1.0 - max_decrease), vco_old * (1.0 + max_change))
             } else if running {
                 (600e6, if fb > 1.0 { 2.4e9 } else { 1.75e9 })
             } else {
@@ -245,8 +262,7 @@ pub fn plan_pll(
                         carrier_hz: center * unit_hz / n as f64,
                         max_offset_hz: ((frac.min(1.0 - frac)) * (1u64 << cm::A2W_FRAC_BITS) as f64) / units_per_hz
                             - reserve_hz,
-                        per_users: per_users.clone(),
-                        other_users: other_users.clone(),
+                        users: users.clone(),
                         step_hz: 1.0 / units_per_hz,
                         loop_ki: modulation_ki(pll),
                     },
@@ -256,12 +272,14 @@ pub fn plan_pll(
     }
     best.map(|b| b.1).ok_or_else(|| {
         HalError::Config(format!(
-            "{} cannot produce {:.4} MHz without moving its VCO more than {:.1} % \
+            "{} cannot produce {:.4} MHz with its VCO within -{:.0} % / +{:.0} % of {:.1} MHz \
              (it also drives: {}); choose another --pll",
             pll.id.name(),
             carrier / 1e6,
+            max_decrease * 100.0,
             max_change * 100.0,
-            per_users.iter().chain(&other_users).cloned().collect::<Vec<_>>().join(", ")
+            vco_old / 1e6,
+            users.names().join(", ")
         ))
     })
 }
@@ -299,8 +317,7 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
         vco_new: pll.vco_hz(),
         carrier_hz: src * 4096.0 / center,
         max_offset_hz: max_offset,
-        per_users: Vec::new(),
-        other_users: Vec::new(),
+        users: PllUsers::default(),
         step_hz: 1.0 / units_per_hz.abs(),
         loop_ki: None,
     })
@@ -592,17 +609,18 @@ impl BcmFmTransmitter {
             Some(BcmMethod::Pll(id)) => plan_pll(&pll_of(id), gpclk, cfg.carrier_hz, osc, cfg.max_offset_hz, cfg.max_vco_change)?,
             Some(BcmMethod::ClkDiv) => plan_clkdiv(&pll_of(PllId::D), gpclk, cfg.carrier_hz, cfg.max_offset_hz)?,
             None => {
-                // An idle PLL is ideal; otherwise PLLC (as PiFmAdv) with the
-                // smallest VCO change, then PLLA.
+                // An idle PLL is ideal. Otherwise, on the BCM2836/7, PLLA,
+                // which normally clocks only the GPU's blocks and covers the
+                // whole band (see `GPU_PLL_MAX_DECREASE`), then PLLC, which
+                // clocks the VPU, the SD card and the WiFi. The BCM2711 has
+                // not been measured and keeps PLLC first.
                 let candidates = [PllId::A, PllId::C, PllId::D];
                 let idle = candidates.into_iter().find(|&id| {
                     let p = pll_of(id);
-                    !(p.is_powered() && p.is_locked()) || {
-                        let (a, b) = p.users(gp_ctl);
-                        a.is_empty() && b.is_empty()
-                    }
+                    !(p.is_powered() && p.is_locked()) || p.users(gp_ctl).is_empty()
                 });
-                let order: Vec<PllId> = idle.into_iter().chain([PllId::C, PllId::A]).collect();
+                let shared = if bcm.bcm2711 { [PllId::C, PllId::A] } else { [PllId::A, PllId::C] };
+                let order: Vec<PllId> = idle.into_iter().chain(shared).collect();
                 let mut last = None;
                 let mut found = None;
                 for id in order {
@@ -737,7 +755,7 @@ impl BcmFmTransmitter {
             cpu: cpu.0.take().unwrap_or_default(),
         };
 
-        let users: Vec<String> = plan.per_users.iter().chain(&plan.other_users).cloned().collect();
+        let users = plan.users.names();
         let method = match plan.method {
             BcmMethod::Pll(id) => {
                 let change = if plan.vco_old > 0.0 {
@@ -1358,8 +1376,7 @@ mod tests {
             vco_new: 0.0,
             carrier_hz,
             max_offset_hz: 100e3,
-            per_users: Vec::new(),
-            other_users: Vec::new(),
+            users: PllUsers::default(),
             step_hz: 1.0 / units_per_hz.abs(),
             loop_ki: None,
         }
