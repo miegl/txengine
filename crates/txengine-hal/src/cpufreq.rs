@@ -55,15 +55,15 @@ impl CpuClockPin {
             }
             let available = std::fs::read_to_string(p.join("scaling_available_governors")).unwrap_or_default();
             if !available.split_whitespace().any(|g| g == "performance") {
-                warn!(
-                    "{}: no `performance` cpufreq governor; CPU clock changes may disturb the carrier",
-                    p.display()
-                );
+                warn!("{}: no `performance` cpufreq governor; CPU clock changes may disturb the carrier", p.display());
                 continue;
             }
             match std::fs::write(&gov, "performance") {
                 Ok(()) => changed.push((gov, old)),
-                Err(e) => warn!("cannot fix the CPU clock ({}: {e}); CPU clock changes may disturb the carrier", gov.display()),
+                Err(e) => warn!(
+                    "cannot fix the CPU clock ({}: {e}); CPU clock changes may disturb the carrier",
+                    gov.display()
+                ),
             }
         }
         if let Some((_, old)) = changed.first() {

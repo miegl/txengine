@@ -5,7 +5,7 @@ pub mod mpx;
 use log::info;
 use txengine_audio::{AudioInput, EndOfInput};
 use txengine_core::{CommandError, CommandOutput, Modulator, ModulatorStatus, RenderContext, SampleFormat, SinkInfo};
-use txengine_rds::encoder::{LocalOffsetFn, af_code, encode8, encode_rt};
+use txengine_rds::encoder::{LocalOffsetFn, af_code, encode_rt, encode8};
 use txengine_rds::{RdsEncoder, RdsParams};
 
 pub use mpx::{MpxConfig, MpxGenerator, MpxStats, NoAudio, StereoMode};
@@ -50,7 +50,12 @@ fn invalid(e: impl std::fmt::Display) -> CommandError {
 }
 
 impl WfmModulator {
-    pub fn new(cfg: MpxConfig, programme: Programme, rds: RdsParams, rds_enabled: bool) -> Result<WfmModulator, String> {
+    pub fn new(
+        cfg: MpxConfig,
+        programme: Programme,
+        rds: RdsParams,
+        rds_enabled: bool,
+    ) -> Result<WfmModulator, String> {
         let rds = RdsEncoder::new(rds).map_err(|e| e.to_string())?;
         Ok(WfmModulator {
             cfg,
@@ -124,9 +129,10 @@ impl Modulator for WfmModulator {
         self.cfg.output_response_db = sink.response_db.clone();
         let mpx = MpxGenerator::new(self.cfg.clone(), sink.sample_rate, stereo_src)?;
         if let Programme::Audio(a, _) = &self.programme
-            && (a.rate - mpx.audio_rate()).abs() > 1e-6 {
-                return Err(format!("audio input runs at {} Hz, the multiplex needs {} Hz", a.rate, mpx.audio_rate()));
-            }
+            && (a.rate - mpx.audio_rate()).abs() > 1e-6
+        {
+            return Err(format!("audio input runs at {} Hz, the multiplex needs {} Hz", a.rate, mpx.audio_rate()));
+        }
         // DI d0 follows the actual stereo coding.
         let stereo = mpx.is_stereo();
         let mut p = self.rds.params().clone();
@@ -140,7 +146,11 @@ impl Modulator for WfmModulator {
             self.cfg.rds_deviation / 1e3,
             if self.rds_enabled { "" } else { " (off)" },
             self.cfg.max_deviation / 1e3,
-            self.cfg.preemphasis.map_or("off".to_string(), |t| format!("{:.0} µs (drive {:+.1} dB to keep the MPX power)", t * 1e6, mpx.drive_db())),
+            self.cfg.preemphasis.map_or("off".to_string(), |t| format!(
+                "{:.0} µs (drive {:+.1} dB to keep the MPX power)",
+                t * 1e6,
+                mpx.drive_db()
+            )),
             mpx.audio_rate()
         );
         let mut mpx = mpx;
@@ -210,7 +220,8 @@ impl Modulator for WfmModulator {
                 Ok(format!("RT set to \"{arg}\""))
             }
             "PTY" => {
-                let pty = txengine_rds::pty::parse(targ).ok_or_else(|| invalid("PTY must be 0-31 or a programme type name"))?;
+                let pty = txengine_rds::pty::parse(targ)
+                    .ok_or_else(|| invalid("PTY must be 0-31 or a programme type name"))?;
                 self.update_rds(|p| {
                     p.pty = pty;
                     Ok(())
@@ -218,7 +229,8 @@ impl Modulator for WfmModulator {
                 Ok(format!("PTY set to {pty} ({})", txengine_rds::pty::RDS[pty as usize]))
             }
             "PI" => {
-                let pi = u16::from_str_radix(targ.trim_start_matches("0x"), 16).map_err(|_| invalid("PI must be 4 hex digits"))?;
+                let pi = u16::from_str_radix(targ.trim_start_matches("0x"), 16)
+                    .map_err(|_| invalid("PI must be 4 hex digits"))?;
                 self.update_rds(|p| {
                     p.pi = pi;
                     Ok(())
@@ -249,7 +261,11 @@ impl Modulator for WfmModulator {
                 Ok("RadioText A/B flag toggled".into())
             }
             "PTYN" => {
-                let v = if targ.eq_ignore_ascii_case("OFF") || targ.is_empty() { None } else { Some(encode8(arg).map_err(invalid)?) };
+                let v = if targ.eq_ignore_ascii_case("OFF") || targ.is_empty() {
+                    None
+                } else {
+                    Some(encode8(arg).map_err(invalid)?)
+                };
                 self.update_rds(|p| {
                     p.ptyn = v;
                     Ok(())
@@ -276,7 +292,8 @@ impl Modulator for WfmModulator {
                 Ok(format!("{n} alternative frequencies set"))
             }
             "DI" => {
-                let v = u8::from_str_radix(targ.trim_start_matches("0x"), 16).map_err(|_| invalid("DI must be a hex value 0-F"))?;
+                let v = u8::from_str_radix(targ.trim_start_matches("0x"), 16)
+                    .map_err(|_| invalid("DI must be a hex value 0-F"))?;
                 if v > 15 {
                     return Err(invalid("DI must be 0-F"));
                 }
@@ -293,7 +310,10 @@ impl Modulator for WfmModulator {
                 let v = if targ.eq_ignore_ascii_case("OFF") {
                     None
                 } else {
-                    Some(u16::from_str_radix(targ.trim_start_matches("0x"), 16).map_err(|_| invalid("expected a hex value or OFF"))?)
+                    Some(
+                        u16::from_str_radix(targ.trim_start_matches("0x"), 16)
+                            .map_err(|_| invalid("expected a hex value or OFF"))?,
+                    )
                 };
                 let c = cmd.to_ascii_uppercase();
                 self.update_rds(|p| {

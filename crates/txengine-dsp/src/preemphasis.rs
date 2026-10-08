@@ -35,10 +35,8 @@ impl Preemphasis {
     /// accurate up to `f_max` Hz.
     pub fn new(tau: f64, fs: f64, f_max: f64) -> Preemphasis {
         let grid: Vec<f64> = (0..=200).map(|i| 20.0 + (f_max - 20.0) * i as f64 / 200.0).collect();
-        let target: Vec<f64> = grid
-            .iter()
-            .map(|&f| 10.0 * (1.0 + (2.0 * std::f64::consts::PI * f * tau).powi(2)).log10())
-            .collect();
+        let target: Vec<f64> =
+            grid.iter().map(|&f| 10.0 * (1.0 + (2.0 * std::f64::consts::PI * f * tau).powi(2)).log10()).collect();
         let cost = |p: &[f64]| -> f64 {
             let (a, b) = (p[0], p[1]);
             if !(-0.95..0.95).contains(&a) || !(0.0..0.999).contains(&b) {
@@ -91,7 +89,9 @@ impl Preemphasis {
     pub fn pink_power_gain_db(&self, fs: f64, f_lo: f64, f_hi: f64) -> f64 {
         const N: usize = 2000;
         let r = (f_hi / f_lo).ln();
-        let p = |i: usize| crate::from_db(2.0 * response_db(self.a as f64, self.b as f64, f_lo * (r * i as f64 / N as f64).exp(), fs));
+        let p = |i: usize| {
+            crate::from_db(2.0 * response_db(self.a as f64, self.b as f64, f_lo * (r * i as f64 / N as f64).exp(), fs))
+        };
         // Trapezoidal rule on a uniform log-frequency grid.
         let sum: f64 = (1..N).map(p).sum::<f64>() + 0.5 * (p(0) + p(N));
         10.0 * (sum / N as f64).log10()

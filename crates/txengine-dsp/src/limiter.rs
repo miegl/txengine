@@ -164,7 +164,14 @@ pub struct PreemphasisLimiter {
 
 impl PreemphasisLimiter {
     /// `frame_rate`: frames per second; `lookahead` and the releases in seconds.
-    pub fn new(frame: usize, frame_rate: f64, threshold: f32, lookahead: f64, hf_release: f64, peak_release: f64) -> PreemphasisLimiter {
+    pub fn new(
+        frame: usize,
+        frame_rate: f64,
+        threshold: f32,
+        lookahead: f64,
+        hf_release: f64,
+        peak_release: f64,
+    ) -> PreemphasisLimiter {
         assert!(frame >= 1);
         let hf = LookaheadGain::new(frame_rate, lookahead, hf_release);
         PreemphasisLimiter {
@@ -241,7 +248,9 @@ impl PreemphasisLimiter {
         let (hs, gs) = ((h1 - h0) / f as f32, (g1 - g0) / f as f32);
         let (mut h, mut g) = (h0, g0);
         let inputs = xm.iter().zip(xs).zip(dm).zip(ds);
-        for (((d, (((&xm, &xs), &dm), &ds)), m), s) in slot.iter_mut().zip(inputs).zip(m_out.iter_mut()).zip(s_out.iter_mut()) {
+        for (((d, (((&xm, &xs), &dm), &ds)), m), s) in
+            slot.iter_mut().zip(inputs).zip(m_out.iter_mut()).zip(s_out.iter_mut())
+        {
             let [om, os, odm, ods] = *d;
             *m = g * (om + h * odm);
             *s = g * (os + h * ods);

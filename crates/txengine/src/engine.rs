@@ -92,7 +92,8 @@ pub fn run(
     if let Some(c) = clock.as_deref_mut() {
         c.attach(sink)?;
     }
-    let actual_rate = |clock: &Option<&mut ClockDiscipline>| fs * clock.as_deref().map_or(1.0, ClockDiscipline::rate_ratio);
+    let actual_rate =
+        |clock: &Option<&mut ClockDiscipline>| fs * clock.as_deref().map_or(1.0, ClockDiscipline::rate_ratio);
     let mut buf = vec![0f32; info.buffer_len.max(1 << 14)];
     // Render in chunks of ~4 ms: small enough to keep latency and command
     // response low, large enough to be efficient.
@@ -129,10 +130,11 @@ pub fn run(
             break;
         }
         if let Some(d) = opts.duration
-            && start.elapsed().as_secs_f64() >= d {
-                reason = "duration reached".into();
-                break;
-            }
+            && start.elapsed().as_secs_f64() >= d
+        {
+            reason = "duration reached".into();
+            break;
+        }
         if m.finished() {
             reason = "end of input".into();
             break;

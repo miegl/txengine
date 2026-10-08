@@ -5,11 +5,11 @@
 
 use std::time::{Duration, Instant};
 
+use txengine_hal::rp1::Rp1;
 use txengine_hal::rp1::clocks::{ClockGen, Pll, PllId};
 use txengine_hal::rp1::fm::{Rp1Pll, plan_clocks};
 use txengine_hal::rp1::gpio::{Drive, Gpio};
 use txengine_hal::rp1::regs;
-use txengine_hal::rp1::Rp1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a: Vec<String> = std::env::args().collect();

@@ -27,9 +27,7 @@ impl Pagemap {
         let v = virt;
         let mut entry = [0u8; 8];
         let off = (v / self.page_size * 8) as u64;
-        self.file
-            .read_exact_at(&mut entry, off)
-            .map_err(|e| HalError::io("read /proc/self/pagemap", e))?;
+        self.file.read_exact_at(&mut entry, off).map_err(|e| HalError::io("read /proc/self/pagemap", e))?;
         let e = u64::from_le_bytes(entry);
         if e & PM_PRESENT == 0 {
             return Err(HalError::Hardware(format!("page at {virt:#x} is not resident")));

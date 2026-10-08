@@ -15,9 +15,9 @@
 //! feedback pre-divider.
 use std::time::Duration;
 
+use txengine_hal::bcm::Bcm;
 use txengine_hal::bcm::cprman::{Cprman, Pll, PllId};
 use txengine_hal::bcm::regs::{self, cm::*};
-use txengine_hal::bcm::Bcm;
 use txengine_hal::platform;
 
 fn arg<T: std::str::FromStr>(a: &[String], i: usize, what: &str) -> T {
@@ -38,7 +38,9 @@ fn dump(c: &Cprman, osc: f64) {
             c.read(cmr),
             ct & A2W_CTRL_NDIV_MASK,
             (ct & A2W_CTRL_PDIV_MASK) >> A2W_CTRL_PDIV_SHIFT,
-            osc / 1e6 * ((ct & A2W_CTRL_NDIV_MASK) as f64 + fr as f64 / (1 << 20) as f64) * if a1 & ANA1_FB_PREDIV != 0 { 2.0 } else { 1.0 },
+            osc / 1e6
+                * ((ct & A2W_CTRL_NDIV_MASK) as f64 + fr as f64 / (1 << 20) as f64)
+                * if a1 & ANA1_FB_PREDIV != 0 { 2.0 } else { 1.0 },
             if a1 & ANA1_FB_PREDIV != 0 { 2 } else { 1 },
             c.read(per),
             ana.join(" "),
@@ -89,12 +91,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The lock bit may lag the write: wait for it to drop first.
                 while plla.is_locked() && t.elapsed() < Duration::from_micros(200) {}
                 while !plla.is_locked() && t.elapsed() < Duration::from_millis(100) {}
-                if plla.is_locked() { times.push(t.elapsed().as_secs_f64() * 1e6) } else { failed += 1 }
+                if plla.is_locked() {
+                    times.push(t.elapsed().as_secs_f64() * 1e6)
+                } else {
+                    failed += 1
+                }
                 std::thread::sleep(Duration::from_millis(2));
             }
             times.sort_by(f64::total_cmp);
             let pct = |q: f64| times.get(((times.len() as f64 - 1.0) * q) as usize).copied().unwrap_or(f64::NAN);
-            println!("KI {ki}: {} large steps, lock after {:.0} / {:.0} / {:.0} us (min/median/max), {failed} failed", n, pct(0.0), pct(0.5), pct(1.0));
+            println!(
+                "KI {ki}: {} large steps, lock after {:.0} / {:.0} / {:.0} us (min/median/max), {failed} failed",
+                n,
+                pct(0.0),
+                pct(0.5),
+                pct(1.0)
+            );
             set(2277.6e6);
             plla.wait_lock()?;
             let mut drops = 0;

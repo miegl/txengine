@@ -107,12 +107,7 @@ pub fn run(a: &AnalyzeArgs) -> anyhow::Result<()> {
     let (pilot, pilot_ph, pilot_f) = find_tone(body, fs, 19_000.0, 20.0);
     let stereo = pilot > 1_000.0;
     if stereo {
-        println!(
-            "Pilot:      {:.0} Hz deviation ({:.1} % of 75 kHz) at {:.3} Hz",
-            pilot,
-            pilot / 750.0,
-            pilot_f
-        );
+        println!("Pilot:      {:.0} Hz deviation ({:.1} % of 75 kHz) at {:.3} Hz", pilot, pilot / 750.0, pilot_f);
         // Stereo demodulation with a pilot-locked 38 kHz reference.
         let lp = FirDesign::lowpass(fs, 15_000.0, 19_000.0, 70.0);
         let (mut fm, mut fsub) = (Fir::new(&lp), Fir::new(&lp));
@@ -148,7 +143,13 @@ pub fn run(a: &AnalyzeArgs) -> anyhow::Result<()> {
         100.0 * (d.blocks_total - d.blocks_ok) as f64 / d.blocks_total as f64
     );
     if let Some(pi) = st.pi {
-        println!("  PI {pi:04X}  PTY {}  TP {}  TA {}  MS {}", st.pty.unwrap_or(0), st.tp.unwrap_or(false) as u8, st.ta.unwrap_or(false) as u8, st.ms.unwrap_or(false) as u8);
+        println!(
+            "  PI {pi:04X}  PTY {}  TP {}  TA {}  MS {}",
+            st.pty.unwrap_or(0),
+            st.tp.unwrap_or(false) as u8,
+            st.ta.unwrap_or(false) as u8,
+            st.ms.unwrap_or(false) as u8
+        );
     }
     println!("  PS   \"{}\"", st.ps_string());
     if !st.rt.is_empty() {

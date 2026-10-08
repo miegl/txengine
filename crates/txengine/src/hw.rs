@@ -47,7 +47,11 @@ fn warn_power() {
     if let Some(p) = platform::PowerStatus::read() {
         let problems = p.problems();
         if !problems.is_empty() {
-            log::warn!("firmware reports {} (get_throttled {:#x}); use a stronger power supply / better cooling", problems.join(", "), p.0);
+            log::warn!(
+                "firmware reports {} (get_throttled {:#x}); use a stronger power supply / better cooling",
+                problems.join(", "),
+                p.0
+            );
         }
     }
 }
@@ -116,7 +120,10 @@ pub fn probe(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
     println!("Crystal:  {:.3} MHz", plat.osc_hz / 1e6);
     if let Some(p) = platform::PowerStatus::read() {
         let problems = p.problems();
-        println!("Power:    {}", if problems.is_empty() { "ok".to_string() } else { format!("{} ({:#x})", problems.join(", "), p.0) });
+        println!(
+            "Power:    {}",
+            if problems.is_empty() { "ok".to_string() } else { format!("{} ({:#x})", problems.join(", "), p.0) }
+        );
     }
     match crate::rt::kernel_clock() {
         Some(k) if k.synchronised => println!(
@@ -203,7 +210,11 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::
             Ok(plan) => println!(
                 "          plan: VCO {:.3} MHz{}, PER /{}, GPCLK /{}, carrier {:.6} MHz, step {:.2} Hz{}",
                 plan.vco_new / 1e6,
-                if plan.vco_old > 0.0 { format!(" ({:+.2} %)", (plan.vco_new / plan.vco_old - 1.0) * 100.0) } else { String::new() },
+                if plan.vco_old > 0.0 {
+                    format!(" ({:+.2} %)", (plan.vco_new / plan.vco_old - 1.0) * 100.0)
+                } else {
+                    String::new()
+                },
                 plan.per_div,
                 plan.gp_div,
                 plan.carrier_hz / 1e6,
@@ -215,7 +226,11 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::
     }
     let plld = Pll::new(&cm, PllId::D, osc, b.bcm2711);
     if let Ok(plan) = bcm::fm::plan_clkdiv(&plld, gpclk, cfg.carrier_hz, cfg.max_offset_hz) {
-        println!("clkdiv:   GPCLK divider {:.4} from PLLD_PER, step {:.0} Hz (dithered)", plan.center / 4096.0, plan.step_hz);
+        println!(
+            "clkdiv:   GPCLK divider {:.4} from PLLD_PER, step {:.0} Hz (dithered)",
+            plan.center / 4096.0,
+            plan.step_hz
+        );
     }
     Ok(())
 }

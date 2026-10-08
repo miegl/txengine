@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 
 use txengine_hal::mem::pinned::PinnedMemory;
 use txengine_hal::mem::{DmaMemory, DmaMemoryExt};
+use txengine_hal::rp1::Rp1;
 use txengine_hal::rp1::dma::Dmac;
 use txengine_hal::rp1::regs::{self, dmac::*, lli};
 use txengine_hal::rp1::ticks::DmaTick;
-use txengine_hal::rp1::Rp1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -26,7 +26,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let clocks = rp1.clocks();
     let clocks_set = rp1.block_set(regs::CLOCKS_MAIN);
     let dmac = Dmac::new(rp1.block(regs::DMA));
-    println!("DMAC ID {:#x} COMPVER {:#x} CFG {:#x} CHEN {:#x}", dmac.id(), dmac.compver(), rp1.block(regs::DMA).read(CFG), dmac.chen());
+    println!(
+        "DMAC ID {:#x} COMPVER {:#x} CFG {:#x} CHEN {:#x}",
+        dmac.id(),
+        dmac.compver(),
+        rp1.block(regs::DMA).read(CFG),
+        dmac.chen()
+    );
     println!("CLK_DMA_CTRL {:#x}", clocks.read(regs::clk::CLK_DMA_CTRL));
     println!("kernel channels in use: {:#x}", Dmac::kernel_channels_in_use());
     if dmac.ensure_running(&clocks, &clocks_set) {

@@ -310,7 +310,12 @@ fn folded_dot2(half: &[f32], wa: &[f32], wb: &[f32]) -> (f32, f32) {
         a0 = half[m - 1] * (la[m - 1] + ha[0]);
         b0 = half[m - 1] * (lb[m - 1] + hb[0]);
     }
-    let it = half.chunks_exact(2).zip(la.chunks_exact(2)).zip(lb.chunks_exact(2)).zip(ha.rchunks_exact(2)).zip(hb.rchunks_exact(2));
+    let it = half
+        .chunks_exact(2)
+        .zip(la.chunks_exact(2))
+        .zip(lb.chunks_exact(2))
+        .zip(ha.rchunks_exact(2))
+        .zip(hb.rchunks_exact(2));
     for ((((h, la), lb), ha), hb) in it {
         a0 += h[0] * (la[0] + ha[1]);
         b0 += h[0] * (lb[0] + hb[1]);
@@ -462,7 +467,11 @@ mod tests {
 
     #[test]
     fn linear_phase_matches_direct_form() {
-        for taps in [FirDesign::lowpass(50_000.0, 15_000.0, 18_500.0, 80.0), FirDesign::inverse_sinc(9, 250_000.0, 62_000.0), vec![0.25, 0.5, 0.5, 0.25]] {
+        for taps in [
+            FirDesign::lowpass(50_000.0, 15_000.0, 18_500.0, 80.0),
+            FirDesign::inverse_sinc(9, 250_000.0, 62_000.0),
+            vec![0.25, 0.5, 0.5, 0.25],
+        ] {
             let mut d0 = Fir::new(&taps);
             let mut d1 = Fir::new(&taps);
             let mut lp = LinearPhaseFir::new(&taps);
@@ -476,7 +485,10 @@ mod tests {
                 lp1.process(&mut c);
                 for i in 0..block {
                     let (ea, eb) = (d0.process(x[i]), d1.process(y[i]));
-                    assert!((a[i] - ea).abs() < 1e-5 && (b[i] - eb).abs() < 1e-5 && (c[i] - ea).abs() < 1e-5, "block {block} i {i}");
+                    assert!(
+                        (a[i] - ea).abs() < 1e-5 && (b[i] - eb).abs() < 1e-5 && (c[i] - ea).abs() < 1e-5,
+                        "block {block} i {i}"
+                    );
                 }
             }
         }
@@ -517,7 +529,10 @@ mod tests {
                 crate::sinc(f / fs) * 10f64.powf(db / 20.0)
             };
             let h = FirDesign::inverse_response(11, fs, 62_000.0, resp);
-            let worst = (0..=62).map(|k| k as f64 * 1e3).map(|f| db(FirDesign::response(&h, f, fs).0 * resp(f)).abs()).fold(0.0, f64::max);
+            let worst = (0..=62)
+                .map(|k| k as f64 * 1e3)
+                .map(|f| db(FirDesign::response(&h, f, fs).0 * resp(f)).abs())
+                .fold(0.0, f64::max);
             assert!(worst < 0.03, "fs {fs}: residual {worst} dB");
         }
     }

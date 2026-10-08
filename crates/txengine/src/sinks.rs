@@ -11,9 +11,15 @@ pub const WAV_FULL_SCALE: f64 = 100_000.0;
 
 enum Out {
     /// IEEE float WAV of deviation / 100 kHz.
-    Wav { w: BufWriter<File>, frames: u64 },
+    Wav {
+        w: BufWriter<File>,
+        frames: u64,
+    },
     /// Interleaved complex float baseband (FM modulated, unit amplitude).
-    Iq { w: BufWriter<File>, phase: f64 },
+    Iq {
+        w: BufWriter<File>,
+        phase: f64,
+    },
     Null,
 }
 

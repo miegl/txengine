@@ -3,7 +3,7 @@
 use txengine_dsp::{FirDesign, Preemphasis, sinc};
 use txengine_fm::mpx::{AudioFeed, MpxConfig, MpxGenerator, StereoMode};
 use txengine_rds::decoder::decode_mpx;
-use txengine_rds::encoder::{encode8, encode_rt};
+use txengine_rds::encoder::{encode_rt, encode8};
 use txengine_rds::{RdsEncoder, RdsParams};
 
 /// Stereo test signal: independent tones on L and R.
@@ -213,7 +213,8 @@ fn measured_output_response_is_equalised() {
     let table = [(0.0, 0.0), (10e3, 0.03), (19e3, 0.10), (38e3, 0.34), (57e3, 0.50), (67e3, 0.545)];
     let fs = 195_925.0;
     let response = |f: f64| sinc(f / fs) * 10f64.powf(txengine_core::interpolate_db(&table, f) / 20.0);
-    let cfg = MpxConfig { preemphasis: None, rds_deviation: 0.0, output_response_db: table.to_vec(), ..Default::default() };
+    let cfg =
+        MpxConfig { preemphasis: None, rds_deviation: 0.0, output_response_db: table.to_vec(), ..Default::default() };
     let (x, mpx) = render(cfg, fs, (1000.0, 0.5), (1000.0, 0.0), 2.0);
     let (p, _) = component(&x, fs, 19_000.0);
     assert!((p * response(19_000.0) - 6_750.0).abs() < 7.0, "pilot {:.1}", p * response(19_000.0));
@@ -377,7 +378,8 @@ fn hf_overload_lowers_only_the_treble() {
         fn read(&mut self, out: &mut [[f32; 2]]) -> usize {
             for o in out.iter_mut() {
                 let t = self.n as f64 / self.fa;
-                let v = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin() + 0.4 * (2.0 * std::f64::consts::PI * 10_000.0 * t).sin();
+                let v = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin()
+                    + 0.4 * (2.0 * std::f64::consts::PI * 10_000.0 * t).sin();
                 *o = [v as f32; 2];
                 self.n += 1;
             }
@@ -402,6 +404,9 @@ fn hf_overload_lowers_only_the_treble() {
     let change = 20.0 * (lf / nominal).log10();
     assert!((-0.05..0.45).contains(&change), "1 kHz level {change:+.2} dB re flat");
     let (hf, _) = component(&x, fs, 10_000.0);
-    let full = 0.4 * txengine_dsp::from_db(mpx.drive_db()) * mpx.audio_deviation() * Preemphasis::new(50e-6, mpx.audio_rate(), 15_000.0).gain_at(10_000.0, mpx.audio_rate());
+    let full = 0.4
+        * txengine_dsp::from_db(mpx.drive_db())
+        * mpx.audio_deviation()
+        * Preemphasis::new(50e-6, mpx.audio_rate(), 15_000.0).gain_at(10_000.0, mpx.audio_rate());
     assert!(hf < 0.9 * full, "10 kHz {hf} Hz, unlimited {full} Hz");
 }

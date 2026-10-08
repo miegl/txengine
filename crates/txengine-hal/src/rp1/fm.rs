@@ -26,12 +26,12 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
+use super::Rp1;
 use super::clocks::{ClockGen, ClockGenRegs, FcSource, Pll, PllId, PllRegs, measure};
 use super::dma::{DmaChannel, Dmac};
 use super::gpio::{Drive, Gpio, PinRegs, gpclk_for_pin};
 use super::regs::{self, dmac::*, lli};
 use super::ticks::DmaTick;
-use super::Rp1;
 use crate::MAX_CLOCK_ERROR_PPM;
 use crate::error::{HalError, Result};
 use crate::guardian::Guardian;
@@ -179,8 +179,8 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
                     }
                     // Prefer: no GPCLK division, VCO near the known-good
                     // rate, fraction far from integer boundaries.
-                    let score = (gp_div - 1) as f64 * 10.0 + ((vco - PREFERRED_VCO) / PREFERRED_VCO).abs() * 5.0
-                        - margin;
+                    let score =
+                        (gp_div - 1) as f64 * 10.0 + ((vco - PREFERRED_VCO) / PREFERRED_VCO).abs() * 5.0 - margin;
                     if best.as_ref().is_none_or(|(s, _)| score < *s) {
                         let frac_center = (frac * FRAC_ONE).round();
                         let frac_per_hz = n as f64 / ref_hz * FRAC_ONE;
@@ -675,7 +675,6 @@ impl Rp1FmTransmitter {
             g.dismiss();
         }
     }
-
 }
 
 impl RfSink for Rp1FmTransmitter {
@@ -710,7 +709,8 @@ impl RfSink for Rp1FmTransmitter {
     fn poll(&mut self) -> Result<SinkPoll, SinkError> {
         let k = self.blocks as u64;
         if !self.running {
-            let writable = ((k - (self.validated - self.completed)) as usize * self.block_len).saturating_sub(self.fill);
+            let writable =
+                ((k - (self.validated - self.completed)) as usize * self.block_len).saturating_sub(self.fill);
             return Ok(SinkPoll { writable, consumed: 0, written: self.written, underruns: self.underruns });
         }
         if self.last_health.elapsed() > Duration::from_millis(100) {

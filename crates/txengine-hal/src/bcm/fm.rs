@@ -180,14 +180,7 @@ pub fn modulation_ki(pll: &Pll) -> Option<u32> {
 pub const GPU_PLL_MAX_DECREASE: f64 = 0.15;
 
 /// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
-pub fn plan_pll(
-    pll: &Pll,
-    gpclk: usize,
-    carrier: f64,
-    osc: f64,
-    max_offset: f64,
-    max_change: f64,
-) -> Result<BcmPlan> {
+pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64, max_change: f64) -> Result<BcmPlan> {
     let gp_ctl = cm::gp(gpclk);
     let running = pll.is_powered() && pll.is_locked();
     let users = if running { pll.users(gp_ctl) } else { PllUsers::default() };
@@ -484,7 +477,11 @@ pub fn plan_pacer(src_hz: f64, target: f64, min_rng: u32, max_rng: u32, max_clk_
         for rng in rngs {
             let c = PacerClock::new(src_hz, (src_hz * 4096.0 / (target * rng as f64)).round() as u32, rng);
             // MASH 1 alternates between DIVI and DIVI + 1 source cycles.
-            if c.divf != 0 && (2..=4095).contains(&c.divi) && src_hz / c.divi as f64 <= max_clk_hz && src_hz / c.divider() >= 5e6 {
+            if c.divf != 0
+                && (2..=4095).contains(&c.divi)
+                && src_hz / c.divi as f64 <= max_clk_hz
+                && src_hz / c.divider() >= 5e6
+            {
                 candidates.push(c);
             }
         }
@@ -558,9 +555,10 @@ impl Restorer {
         }
         restore_clock(&self.cm, self.gp_ctl, self.gp_saved);
         if let Some((pll, s)) = &self.pll
-            && let Err(e) = pll.restore(s) {
-                warn!("{}: {e}", pll.id.name());
-            }
+            && let Err(e) = pll.restore(s)
+        {
+            warn!("{}: {e}", pll.id.name());
+        }
         self.cpu.restore();
     }
 }
@@ -679,7 +677,9 @@ impl BcmFmTransmitter {
 
         // Choose the modulation method.
         let plan = match cfg.method {
-            Some(BcmMethod::Pll(id)) => plan_pll(&pll_of(id), gpclk, cfg.carrier_hz, osc, cfg.max_offset_hz, cfg.max_vco_change)?,
+            Some(BcmMethod::Pll(id)) => {
+                plan_pll(&pll_of(id), gpclk, cfg.carrier_hz, osc, cfg.max_offset_hz, cfg.max_vco_change)?
+            }
             Some(BcmMethod::ClkDiv) => plan_clkdiv(&pll_of(PllId::D), gpclk, cfg.carrier_hz, cfg.max_offset_hz)?,
             None => {
                 // An idle PLL is ideal. Otherwise, on the BCM2836/7, PLLA,
@@ -823,7 +823,12 @@ impl BcmFmTransmitter {
             gp_saved: (cpr.read(gp_ctl), cpr.read(cm::div(gp_ctl))),
             pacer_clk_saved: (cpr.read(pacer_ctl), cpr.read(cm::div(pacer_ctl))),
             pwm_saved: [bcm.pwm.read(pwm::CTL), bcm.pwm.read(pwm::DMAC), bcm.pwm.read(pwm::RNG1)],
-            pcm_saved: [bcm.pcm.read(pcm::CS), bcm.pcm.read(pcm::MODE), bcm.pcm.read(pcm::TXC), bcm.pcm.read(pcm::DREQ_A)],
+            pcm_saved: [
+                bcm.pcm.read(pcm::CS),
+                bcm.pcm.read(pcm::MODE),
+                bcm.pcm.read(pcm::TXC),
+                bcm.pcm.read(pcm::DREQ_A),
+            ],
             pins: pins_state,
             pll: pll.as_ref().map(|p| (p.clone(), p.snapshot())),
             cpu: cpu.0.take().unwrap_or_default(),
@@ -833,11 +838,18 @@ impl BcmFmTransmitter {
         let method = match plan.method {
             BcmMethod::Pll(id) => {
                 let change = if plan.vco_old > 0.0 {
-                    format!(", VCO {:.3} -> {:.3} MHz ({:+.2} %)", plan.vco_old / 1e6, plan.vco_new / 1e6, (plan.vco_new / plan.vco_old - 1.0) * 100.0)
+                    format!(
+                        ", VCO {:.3} -> {:.3} MHz ({:+.2} %)",
+                        plan.vco_old / 1e6,
+                        plan.vco_new / 1e6,
+                        (plan.vco_new / plan.vco_old - 1.0) * 100.0
+                    )
                 } else {
                     format!(", VCO {:.3} MHz (was idle)", plan.vco_new / 1e6)
                 };
-                let ki = plan.loop_ki.map_or(String::new(), |k| format!(", loop KI {} -> {k}", pll.as_ref().map_or(0, |p| p.loop_ki())));
+                let ki = plan
+                    .loop_ki
+                    .map_or(String::new(), |k| format!(", loop KI {} -> {k}", pll.as_ref().map_or(0, |p| p.loop_ki())));
                 format!("{}_PER /{} -> GPCLK{gpclk} /{}{change}{ki}", id.name(), plan.per_div, plan.gp_div)
             }
             BcmMethod::ClkDiv => format!(
@@ -884,11 +896,13 @@ impl BcmFmTransmitter {
             response_db: match plan.method {
                 // Only the configurations that were measured: PLLA or PLLC
                 // retuned while running, with txengine's loop gain.
-                BcmMethod::Pll(PllId::A | PllId::C) if !plan.power_up && plan.loop_ki == Some(MODULATION_KI) => match bcm.soc {
-                    Soc::Bcm2836 => BCM2836_PLL_RESPONSE_DB.to_vec(),
-                    Soc::Bcm2837 => BCM2837_PLL_RESPONSE_DB.to_vec(),
-                    _ => Vec::new(),
-                },
+                BcmMethod::Pll(PllId::A | PllId::C) if !plan.power_up && plan.loop_ki == Some(MODULATION_KI) => {
+                    match bcm.soc {
+                        Soc::Bcm2836 => BCM2836_PLL_RESPONSE_DB.to_vec(),
+                        Soc::Bcm2837 => BCM2837_PLL_RESPONSE_DB.to_vec(),
+                        _ => Vec::new(),
+                    }
+                }
                 _ => Vec::new(),
             },
         };
@@ -998,13 +1012,21 @@ impl BcmFmTransmitter {
     fn init_ring(&mut self) {
         let center = self.center_word();
         let a_ti = dmar::TI_NO_WIDE_BURSTS | dmar::TI_WAIT_RESP;
-        let b_ti = dmar::TI_NO_WIDE_BURSTS | dmar::TI_WAIT_RESP | dmar::TI_DEST_DREQ | (self.permap << dmar::TI_PERMAP_SHIFT);
+        let b_ti =
+            dmar::TI_NO_WIDE_BURSTS | dmar::TI_WAIT_RESP | dmar::TI_DEST_DREQ | (self.permap << dmar::TI_PERMAP_SHIFT);
         for k in 0..self.n {
             let a = self.cb_off(2 * k);
             let b = self.cb_off(2 * k + 1);
             self.write_cb(
                 a,
-                ControlBlock { ti: a_ti, source: self.bus(self.samples_off + 4 * k), dest: self.target_bus, length: 4, stride: 0, next: self.bus(b) },
+                ControlBlock {
+                    ti: a_ti,
+                    source: self.bus(self.samples_off + 4 * k),
+                    dest: self.target_bus,
+                    length: 4,
+                    stride: 0,
+                    next: self.bus(b),
+                },
             );
             self.write_cb(
                 b,
@@ -1022,8 +1044,28 @@ impl BcmFmTransmitter {
         // Idle loop: hold the carrier at the centre frequency.
         let ia = self.idle_off;
         let ib = self.idle_off + dmar::CB_SIZE;
-        self.write_cb(ia, ControlBlock { ti: a_ti, source: self.bus(self.idle_word_off), dest: self.target_bus, length: 4, stride: 0, next: self.bus(ib) });
-        self.write_cb(ib, ControlBlock { ti: b_ti, source: self.bus(self.dummy_off), dest: self.fifo_bus, length: 4, stride: 0, next: self.bus(ia) });
+        self.write_cb(
+            ia,
+            ControlBlock {
+                ti: a_ti,
+                source: self.bus(self.idle_word_off),
+                dest: self.target_bus,
+                length: 4,
+                stride: 0,
+                next: self.bus(ib),
+            },
+        );
+        self.write_cb(
+            ib,
+            ControlBlock {
+                ti: b_ti,
+                source: self.bus(self.dummy_off),
+                dest: self.fifo_bus,
+                length: 4,
+                stride: 0,
+                next: self.bus(ia),
+            },
+        );
         self.mem.write_u32(self.idle_word_off, center);
         self.mem.write_u32(self.dummy_off, 0);
         self.mem.flush(0, self.mem.len());
@@ -1132,7 +1174,9 @@ impl BcmFmTransmitter {
                 self.pcm.write(pcm::CS, pcm::CS_EN | pcm::CS_TXCLR);
                 // TXCLR takes two PCM clocks; SYNC echoes after the same delay.
                 self.pcm.write(pcm::CS, pcm::CS_EN | pcm::CS_SYNC);
-                crate::sys::wait_until(Duration::from_millis(10), "PCM sync", || self.pcm.read(pcm::CS) & pcm::CS_SYNC != 0)?;
+                crate::sys::wait_until(Duration::from_millis(10), "PCM sync", || {
+                    self.pcm.read(pcm::CS) & pcm::CS_SYNC != 0
+                })?;
                 self.pcm.write(pcm::DREQ_A, (15 << 24) | (15 << 8));
                 self.pcm.write(pcm::CS, pcm::CS_EN | pcm::CS_DMAEN | pcm::CS_TXERR);
             }
@@ -1314,7 +1358,10 @@ impl RfSink for BcmFmTransmitter {
             warn!("the {:?} pacer did not start; configuring it again", self.pacer);
             self.start_pacer()?;
             crate::sys::wait_until(Duration::from_millis(20), "DMA pacing", || moving(self)).map_err(|_| {
-                HalError::Hardware(format!("DMA channel {} is not being paced by the {:?} (no DREQ)", self.ch.ch, self.pacer))
+                HalError::Hardware(format!(
+                    "DMA channel {} is not being paced by the {:?} (no DREQ)",
+                    self.ch.ch, self.pacer
+                ))
             })?;
         }
         self.running = true;
@@ -1338,7 +1385,9 @@ impl RfSink for BcmFmTransmitter {
                 Some(pos) => {
                     if pos != self.last_pos || self.parked {
                         self.last_progress = now;
-                    } else if self.written > self.consumed && now.duration_since(self.last_progress) > Duration::from_millis(100) {
+                    } else if self.written > self.consumed
+                        && now.duration_since(self.last_progress) > Duration::from_millis(100)
+                    {
                         // Data is queued but the engine has not moved: the pacer
                         // stopped requesting (or was reconfigured by someone else).
                         warn!(
@@ -1509,7 +1558,13 @@ mod tests {
         let osc = 19.2e6;
         let unit_hz = osc / (1u64 << cm::A2W_FRAC_BITS) as f64;
         let center = (87.6e6 * 16.0 / unit_hz).round();
-        let p = plan(BcmMethod::Pll(PllId::A), center, 16.0 / unit_hz, (center / (1u64 << cm::A2W_FRAC_BITS) as f64) as u32, center * unit_hz / 16.0);
+        let p = plan(
+            BcmMethod::Pll(PllId::A),
+            center,
+            16.0 / unit_hz,
+            (center / (1u64 << cm::A2W_FRAC_BITS) as f64) as u32,
+            center * unit_hz / 16.0,
+        );
         for ppm in [-MAX_CLOCK_ERROR_PPM, -7.0, 0.0, 6.44, MAX_CLOCK_ERROR_PPM] {
             let (frac, per_hz) = p.corrected_frac(ppm);
             for offset in [-75e3, 0.0, 75e3] {
@@ -1530,7 +1585,9 @@ mod tests {
 
     #[test]
     fn pacer_respects_limits() {
-        for (src, target, min, max) in [(500e6, 194_000.0, 2, 1 << 16), (19.2e6, 228_000.0, 2, 1 << 16), (500e6, 195_000.0, 8, 1024)] {
+        for (src, target, min, max) in
+            [(500e6, 194_000.0, 2, 1 << 16), (19.2e6, 228_000.0, 2, 1 << 16), (500e6, 195_000.0, 8, 1024)]
+        {
             let c = plan_pacer(src, target, min, max, 25e6).unwrap();
             let clk = src / c.divider();
             assert!((5e6..=25e6).contains(&clk), "{src} {target}: clock {clk}");

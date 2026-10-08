@@ -432,7 +432,8 @@ impl Pll {
         }
         let r = self.id.regs();
         self.cm.write(r.frac, frac);
-        let ctrl = (self.cm.read(r.ctrl) & !(A2W_CTRL_NDIV_MASK | A2W_CTRL_PDIV_MASK)) | ndiv | (1 << A2W_CTRL_PDIV_SHIFT);
+        let ctrl =
+            (self.cm.read(r.ctrl) & !(A2W_CTRL_NDIV_MASK | A2W_CTRL_PDIV_MASK)) | ndiv | (1 << A2W_CTRL_PDIV_SHIFT);
         self.cm.write(r.ctrl, ctrl);
         self.wait_lock()?;
         let (rc, rf) = (self.cm.read(r.ctrl) & A2W_CTRL_NDIV_MASK, self.cm.read(r.frac) & A2W_FRAC_MASK);
@@ -468,7 +469,11 @@ impl Pll {
         }
         self.wait_lock()?;
         if self.loop_ki() != ki {
-            return Err(HalError::Hardware(format!("{}: loop gain KI read back {} instead of {ki}", self.id.name(), self.loop_ki())));
+            return Err(HalError::Hardware(format!(
+                "{}: loop gain KI read back {} instead of {ki}",
+                self.id.name(),
+                self.loop_ki()
+            )));
         }
         debug!("{}: loop gain KI {ki}, locked", self.id.name());
         Ok(())

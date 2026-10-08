@@ -44,11 +44,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (s, e) in ranges.iter().take(20) {
         println!("  used {s:#06x}..{e:#06x}");
     }
-    println!("words changed within 2 s: {} {:x?}", changed.len(), changed.iter().take(16).map(|i| i * 4).collect::<Vec<_>>());
+    println!(
+        "words changed within 2 s: {} {:x?}",
+        changed.len(),
+        changed.iter().take(16).map(|i| i * 4).collect::<Vec<_>>()
+    );
 
     // DMA copy test in a quiet area.
     let (src, dst, l) = (0x8000usize, 0x9000usize, 0xa000usize);
-    let saved: Vec<(usize, u32)> = [src, dst, l].iter().flat_map(|&o| (0..16).map(move |k| o + 4 * k)).map(|o| (o, sram.read(o))).collect();
+    let saved: Vec<(usize, u32)> =
+        [src, dst, l].iter().flat_map(|&o| (0..16).map(move |k| o + 4 * k)).map(|o| (o, sram.read(o))).collect();
     let rp1 = Rp1::open()?;
     let dmac = Dmac::new(rp1.block(regs::DMA));
     dmac.ensure_running(&rp1.clocks(), &rp1.block_set(regs::CLOCKS_MAIN));
@@ -81,7 +86,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ch.stop()?;
         }
         let ok = (0..16).all(|k| sram.read(dst + 4 * k) == 0xa5a5_0000 + k as u32);
-        println!("system address {base:#x}: finished {done}, data {} (INTSTATUS {:#x})", if ok { "copied" } else { "NOT copied" }, ch.intstatus());
+        println!(
+            "system address {base:#x}: finished {done}, data {} (INTSTATUS {:#x})",
+            if ok { "copied" } else { "NOT copied" },
+            ch.intstatus()
+        );
         ch.clear_intstatus(0xffff_ffff);
     }
     for (o, v) in saved {

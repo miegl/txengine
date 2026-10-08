@@ -2,7 +2,7 @@
 
 use txengine_dsp::{PhaseAccumulator, SineTable};
 use txengine_rds::decoder::decode_mpx;
-use txengine_rds::encoder::{RdsParams, af_code, encode8, encode_rt};
+use txengine_rds::encoder::{RdsParams, af_code, encode_rt, encode8};
 use txengine_rds::{DecoderInfo, RdsEncoder, RdsModulator};
 
 /// RDS-only multiplex: `level` Hz deviation on the 57 kHz subcarrier.

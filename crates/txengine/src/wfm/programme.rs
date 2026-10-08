@@ -7,7 +7,7 @@ use anyhow::{Context, bail};
 use txengine_audio::{AudioInput, AudioOptions, EndOfInput, InputSpec};
 use txengine_core::Modulator;
 use txengine_fm::{MpxConfig, Programme, StereoMode, WfmModulator};
-use txengine_rds::encoder::{af_code, encode8, encode_rt};
+use txengine_rds::encoder::{af_code, encode_rt, encode8};
 use txengine_rds::{DecoderInfo, RdsParams};
 
 use super::MAX_OFFSET_HZ;
@@ -113,7 +113,12 @@ fn rds_params(p: &WfmArgs) -> anyhow::Result<RdsParams> {
         tp: flag(p.tp, "tp")?,
         ta: flag(p.ta, "ta")?,
         ms: flag(p.ms, "ms")?,
-        di: DecoderInfo { stereo: false, artificial_head: di & 2 != 0, compressed: di & 4 != 0, dynamic_pty: di & 8 != 0 },
+        di: DecoderInfo {
+            stereo: false,
+            artificial_head: di & 2 != 0,
+            compressed: di & 4 != 0,
+            dynamic_pty: di & 8 != 0,
+        },
         af,
         ptyn: p.ptyn.as_deref().map(encode8).transpose().context("--ptyn")?,
         ecc: ecc.map(|e| e as u8),
@@ -153,7 +158,8 @@ fn open_programme(p: &WfmArgs, audio_rate: f64, realtime: bool) -> anyhow::Resul
         (Some(a), None) => (InputSpec::File(PathBuf::from(a)), false),
     };
     let end = end_policy(p, stdin, realtime);
-    let opts = AudioOptions { end, buffer: Duration::from_millis(500), adjustable_rate: realtime, ..Default::default() };
+    let opts =
+        AudioOptions { end, buffer: Duration::from_millis(500), adjustable_rate: realtime, ..Default::default() };
     let input = AudioInput::open(&spec, audio_rate, &opts)?;
     Ok(Programme::Audio(input, end))
 }

@@ -200,7 +200,8 @@ impl PowerMeter {
     /// oldest one only once the window is full).
     fn dbr(&self) -> f64 {
         let (e, n) = self.ring.iter().fold((self.energy, self.n), |a, b| (a.0 + b.0, a.1 + b.1));
-        let (e, n) = if self.ring.len() == 60 { (e - self.ring[self.pos].0, n - self.ring[self.pos].1) } else { (e, n) };
+        let (e, n) =
+            if self.ring.len() == 60 { (e - self.ring[self.pos].0, n - self.ring[self.pos].1) } else { (e, n) };
         if n == 0 {
             return f64::NEG_INFINITY;
         }
@@ -518,13 +519,7 @@ impl MpxGenerator {
     /// Render `out.len()` samples of instantaneous frequency deviation (Hz).
     /// `first_sample_time` is the emission time of `out[0]` (Unix seconds,
     /// NaN if unknown), used for the RDS clock-time group.
-    pub fn render(
-        &mut self,
-        out: &mut [f32],
-        audio: &mut dyn AudioFeed,
-        rds: &mut RdsEncoder,
-        first_sample_time: f64,
-    ) {
+    pub fn render(&mut self, out: &mut [f32], audio: &mut dyn AudioFeed, rds: &mut RdsEncoder, first_sample_time: f64) {
         let dt = 1.0 / self.fs;
         for (k, block) in out.chunks_mut(BLOCK).enumerate() {
             self.render_block(block, audio, rds, first_sample_time + (k * BLOCK) as f64 * dt);

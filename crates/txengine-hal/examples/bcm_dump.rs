@@ -16,19 +16,39 @@ use txengine_hal::platform;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let ch: usize = args.first().filter(|a| !a.starts_with("--")).map(|s| s.parse()).transpose()?.unwrap_or(14);
-    let watch: Option<f64> = args.iter().position(|a| a == "--watch").and_then(|i| args.get(i + 1)).map(|s| s.parse()).transpose()?;
+    let watch: Option<f64> =
+        args.iter().position(|a| a == "--watch").and_then(|i| args.get(i + 1)).map(|s| s.parse()).transpose()?;
     let plat = platform::detect()?;
     let b = Bcm::open(&plat)?;
     if let Some(secs) = watch {
         use regs::cm::*;
         let c = Cprman::new(b.cm.clone());
         let regs: &[(&str, usize)] = &[
-            ("CM_PLLA", PLLA), ("PLLA_CTRL", A2W_PLLA_CTRL), ("PLLA_ANA0", A2W_PLLA_ANA0), ("PLLA_ANA1", A2W_PLLA_ANA0 + 4),
-            ("PLLA_ANA2", A2W_PLLA_ANA0 + 8), ("PLLA_ANA3", A2W_PLLA_ANA0 + 12), ("PLLA_PER", A2W_PLLA_PER), ("PLLA_CORE", A2W_PLLA_CORE),
-            ("PLLA_DSI0", A2W_PLLA_DSI0), ("PLLA_CCP2", A2W_PLLA_CCP2), ("CM_PLLC", PLLC), ("PLLC_CTRL", A2W_PLLC_CTRL),
-            ("PLLC_FRAC", A2W_PLLC_FRAC), ("PLLC_PER", A2W_PLLC_PER), ("PLLC_CORE0", A2W_PLLC_CORE0), ("LOCK", LOCK),
-            ("XOSC", A2W_XOSC_CTRL), ("VPUCTL", VPU), ("VPUDIV", div(VPU)), ("V3DCTL", V3D), ("V3DDIV", div(V3D)),
-            ("H264CTL", H264), ("ISPCTL", ISP), ("GP0CTL", GP0), ("GP0DIV", div(GP0)),
+            ("CM_PLLA", PLLA),
+            ("PLLA_CTRL", A2W_PLLA_CTRL),
+            ("PLLA_ANA0", A2W_PLLA_ANA0),
+            ("PLLA_ANA1", A2W_PLLA_ANA0 + 4),
+            ("PLLA_ANA2", A2W_PLLA_ANA0 + 8),
+            ("PLLA_ANA3", A2W_PLLA_ANA0 + 12),
+            ("PLLA_PER", A2W_PLLA_PER),
+            ("PLLA_CORE", A2W_PLLA_CORE),
+            ("PLLA_DSI0", A2W_PLLA_DSI0),
+            ("PLLA_CCP2", A2W_PLLA_CCP2),
+            ("CM_PLLC", PLLC),
+            ("PLLC_CTRL", A2W_PLLC_CTRL),
+            ("PLLC_FRAC", A2W_PLLC_FRAC),
+            ("PLLC_PER", A2W_PLLC_PER),
+            ("PLLC_CORE0", A2W_PLLC_CORE0),
+            ("LOCK", LOCK),
+            ("XOSC", A2W_XOSC_CTRL),
+            ("VPUCTL", VPU),
+            ("VPUDIV", div(VPU)),
+            ("V3DCTL", V3D),
+            ("V3DDIV", div(V3D)),
+            ("H264CTL", H264),
+            ("ISPCTL", ISP),
+            ("GP0CTL", GP0),
+            ("GP0DIV", div(GP0)),
         ];
         let read_all = |out: &mut Vec<u32>| {
             out.clear();
@@ -77,7 +97,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("PWM {name:6} {:#010x}", b.pwm.read(off));
     }
     let base = ch * 0x100;
-    for (name, off) in [("CS", 0x0), ("CONBLK", 0x4), ("TI", 0x8), ("SRC", 0xc), ("DST", 0x10), ("LEN", 0x14), ("NEXT", 0x1c), ("DEBUG", 0x20)] {
+    for (name, off) in [
+        ("CS", 0x0),
+        ("CONBLK", 0x4),
+        ("TI", 0x8),
+        ("SRC", 0xc),
+        ("DST", 0x10),
+        ("LEN", 0x14),
+        ("NEXT", 0x1c),
+        ("DEBUG", 0x20),
+    ] {
         println!("DMA{ch} {name:6} {:#010x}", b.dma.read(base + off));
     }
     println!("DMA ENABLE {:#010x}  INT_STATUS {:#010x}", b.dma.read(0xff0), b.dma.read(0xfe0));

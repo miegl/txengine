@@ -75,9 +75,7 @@ impl Mapping {
     /// non-cacheable (for RAM) mapping.
     pub fn map_physical(phys: u64, len: usize, uncached: bool, what: &str) -> Result<Mapping> {
         if !phys.is_multiple_of(page_size() as u64) {
-            return Err(HalError::Config(format!(
-                "{what}: physical address {phys:#x} is not page aligned"
-            )));
+            return Err(HalError::Config(format!("{what}: physical address {phys:#x} is not page aligned")));
         }
         let flags = libc::O_RDWR | if uncached { libc::O_SYNC } else { 0 };
         let fd = open(Path::new("/dev/mem"), flags)?;

@@ -92,9 +92,7 @@ impl PinnedMemory {
         };
 
         let pm = Pagemap::open()?;
-        mem.pages = (0..len / page)
-            .map(|i| pm.phys(ptr as usize + i * page))
-            .collect::<Result<_>>()?;
+        mem.pages = (0..len / page).map(|i| pm.phys(ptr as usize + i * page)).collect::<Result<_>>()?;
         // SAFETY: inside our mapping.
         unsafe { cache::clean_invalidate(ptr, len) };
         debug!("{}", mem.describe());
@@ -114,9 +112,7 @@ impl PinnedMemory {
         for (i, &p) in self.pages.iter().enumerate() {
             let now = pm.phys(self.ptr as usize + i * self.page)?;
             if now != p {
-                return Err(HalError::Hardware(format!(
-                    "DMA page {i} migrated from {p:#x} to {now:#x}"
-                )));
+                return Err(HalError::Hardware(format!("DMA page {i} migrated from {p:#x} to {now:#x}")));
             }
         }
         Ok(())

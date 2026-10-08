@@ -59,7 +59,11 @@ pub fn spawn_fifo(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<()> {
     }
     // Opening read-write keeps a writer attached, so the reader never sees
     // EOF when a client (e.g. `echo ... > fifo`) closes its end.
-    let f = std::fs::OpenOptions::new().read(true).write(true).open(path).with_context(|| format!("open {}", path.display()))?;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
     let p = path.to_path_buf();
     std::thread::Builder::new().name("txengine-ctl".into()).spawn(move || {
         let mut r = BufReader::new(f);

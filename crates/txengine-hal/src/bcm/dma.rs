@@ -60,9 +60,10 @@ fn kernel_channels_in_use(mask: u32, bcm2711: bool) -> u32 {
         let name = e.file_name().to_string_lossy().into_owned();
         let Some(idx) = name.rsplit("chan").next().and_then(|s| s.parse::<usize>().ok()) else { continue };
         if read_trimmed(e.path().join("in_use")).is_ok_and(|s| s == "1")
-            && let Some(&hw) = order.get(idx) {
-                used |= 1 << hw;
-            }
+            && let Some(&hw) = order.get(idx)
+        {
+            used |= 1 << hw;
+        }
     }
     used
 }
@@ -89,17 +90,20 @@ impl DmaChannel {
                     return Err(HalError::Config(format!("DMA channel {ch} cannot be used (1-{max})")));
                 }
                 if mask & (1 << ch) == 0 {
-                    warn!("DMA channel {ch} is reserved for the VideoCore firmware (mask {mask:#06x}); using it anyway");
+                    warn!(
+                        "DMA channel {ch} is reserved for the VideoCore firmware (mask {mask:#06x}); using it anyway"
+                    );
                 }
                 if used & (1 << ch) != 0 || active(ch) {
                     return Err(HalError::Hardware(format!("DMA channel {ch} is in use")));
                 }
                 ch
             }
-            None => (1..=max)
-                .rev()
-                .find(|&ch| mask & (1 << ch) != 0 && used & (1 << ch) == 0 && !active(ch))
-                .ok_or_else(|| HalError::Hardware(format!("no free DMA channel (mask {mask:#06x}, in use {used:#06x})")))?,
+            None => {
+                (1..=max).rev().find(|&ch| mask & (1 << ch) != 0 && used & (1 << ch) == 0 && !active(ch)).ok_or_else(
+                    || HalError::Hardware(format!("no free DMA channel (mask {mask:#06x}, in use {used:#06x})")),
+                )?
+            }
         };
         debug!("DMA: using channel {ch} (Linux mask {mask:#06x}, kernel in use {used:#06x})");
         Ok(DmaChannel { regs: dma_block.window(ch * CHANNEL_SIZE, CHANNEL_SIZE), global: dma_block.clone(), ch })
@@ -160,11 +164,7 @@ impl DmaChannel {
     pub fn errors(&self) -> Option<String> {
         let cs = self.cs();
         let dbg = self.debug();
-        if cs & CS_ERROR != 0 || dbg & DEBUG_ERRORS != 0 {
-            Some(format!("CS {cs:#010x} DEBUG {dbg:#x}"))
-        } else {
-            None
-        }
+        if cs & CS_ERROR != 0 || dbg & DEBUG_ERRORS != 0 { Some(format!("CS {cs:#010x} DEBUG {dbg:#x}")) } else { None }
     }
 
     /// Stop the channel.

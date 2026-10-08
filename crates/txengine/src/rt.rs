@@ -58,7 +58,10 @@ pub fn make_realtime(priority: i32) {
             p.sched_priority = priority;
             let rc = libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &p);
             if rc != 0 {
-                warn!("cannot use SCHED_FIFO ({}); running with normal priority", std::io::Error::from_raw_os_error(rc));
+                warn!(
+                    "cannot use SCHED_FIFO ({}); running with normal priority",
+                    std::io::Error::from_raw_os_error(rc)
+                );
             } else {
                 debug!("transmit thread runs SCHED_FIFO priority {priority}");
             }

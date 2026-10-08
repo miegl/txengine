@@ -20,7 +20,12 @@ impl AudioFeed for Noise {
 }
 
 fn report(name: &str, dt: f64, n: usize, fs: f64) {
-    println!("{name:28} {:7.1} ns/sample  {:5.1} % of one core at {:.0} kS/s", dt / n as f64 * 1e9, dt / (n as f64 / fs) * 100.0, fs / 1e3);
+    println!(
+        "{name:28} {:7.1} ns/sample  {:5.1} % of one core at {:.0} kS/s",
+        dt / n as f64 * 1e9,
+        dt / (n as f64 / fs) * 100.0,
+        fs / 1e3
+    );
 }
 
 fn main() {

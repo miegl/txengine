@@ -27,7 +27,14 @@ fn main() {
         data.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0 * 100e3).collect()
     };
     let d = decode_mpx(&x, rate as f64);
-    println!("{} groups, blocks ok {}/{} level {:.0} offset {:.2}", d.groups.len(), d.blocks_ok, d.blocks_total, d.level, d.carrier_offset);
+    println!(
+        "{} groups, blocks ok {}/{} level {:.0} offset {:.2}",
+        d.groups.len(),
+        d.blocks_ok,
+        d.blocks_total,
+        d.level,
+        d.carrier_offset
+    );
     println!("errors at bits {:?} (of {} bits)", d.errors_at, x.len() as f64 / rate as f64 * 1187.5);
     let _ = BlockSync::default();
 }

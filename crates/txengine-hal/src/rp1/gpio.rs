@@ -86,9 +86,8 @@ impl Gpio {
     /// given drive strength and fast slew rate.
     pub fn set_function_output(&self, gpio: u32, funcsel: u32, drive: Drive) -> Result<()> {
         let g = Self::check(gpio)?;
-        let p = (self.pads.read(pad(g)) & !(PAD_OD | PAD_DRIVE_MASK))
-            | PAD_SLEWFAST
-            | ((drive as u32) << PAD_DRIVE_SHIFT);
+        let p =
+            (self.pads.read(pad(g)) & !(PAD_OD | PAD_DRIVE_MASK)) | PAD_SLEWFAST | ((drive as u32) << PAD_DRIVE_SHIFT);
         self.pads.write(pad(g), p);
         let c = (self.io.read(ctrl(g)) & !(CTRL_FUNCSEL_MASK | CTRL_OUTOVER_MASK | CTRL_OEOVER_MASK))
             | (funcsel & CTRL_FUNCSEL_MASK);

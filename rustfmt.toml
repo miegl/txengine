@@ -1,0 +1,5 @@
+# `cargo fmt`. Lines up to 120 columns, and struct literals, calls and
+# chains kept on one line whenever they fit.
+edition = "2024"
+max_width = 120
+use_small_heuristics = "Max"

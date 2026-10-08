@@ -278,7 +278,8 @@ mod tests {
             let mut s = 0.0;
             for i in 0..n {
                 let f = -2.0 + 4.0 * (i as f64 + 0.5) / n as f64;
-                s += (std::f64::consts::PI * f / 4.0).cos() * (2.0 * std::f64::consts::PI * f * x).cos() * 4.0 / n as f64;
+                s += (std::f64::consts::PI * f / 4.0).cos() * (2.0 * std::f64::consts::PI * f * x).cos() * 4.0
+                    / n as f64;
             }
             let closed = h(x) / (2.0 * std::f64::consts::PI);
             assert!((s - closed).abs() < 1e-3, "x={x}: {s} vs {closed}");

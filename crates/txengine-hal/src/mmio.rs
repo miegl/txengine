@@ -37,12 +37,7 @@ impl Mmio {
             offset.checked_add(len).is_some_and(|end| end <= self.len),
             "MMIO window {offset:#x}+{len:#x} outside {self:?}"
         );
-        Mmio {
-            map: self.map.clone(),
-            offset: self.offset + offset,
-            len,
-            device_base: self.device_base + offset as u64,
-        }
+        Mmio { map: self.map.clone(), offset: self.offset + offset, len, device_base: self.device_base + offset as u64 }
     }
 
     pub fn len(&self) -> usize {

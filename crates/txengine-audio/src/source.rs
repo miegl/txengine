@@ -258,7 +258,9 @@ impl Source for Generated {
     fn info(&self) -> SourceInfo {
         let (description, channels) = match self.kind {
             Gen::Silence => ("silence".to_string(), 1),
-            Gen::Tone(f, a, st) => (format!("{f} Hz test tone at {a}{}", if st { " (left channel)" } else { "" }), if st { 2 } else { 1 }),
+            Gen::Tone(f, a, st) => {
+                (format!("{f} Hz test tone at {a}{}", if st { " (left channel)" } else { "" }), if st { 2 } else { 1 })
+            }
         };
         SourceInfo { description, rate: self.rate, channels, live: false, seekable: true }
     }

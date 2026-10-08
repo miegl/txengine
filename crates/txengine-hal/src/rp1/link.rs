@@ -31,7 +31,9 @@ impl AspmGuard {
             match std::fs::read_to_string(&p) {
                 Ok(v) if v.trim() == "1" => match std::fs::write(&p, "0") {
                     Ok(()) => disabled.push(p),
-                    Err(e) => warn!("cannot disable PCIe {a} on the RP1 link ({e}); expect occasional 1-sample timing slips"),
+                    Err(e) => {
+                        warn!("cannot disable PCIe {a} on the RP1 link ({e}); expect occasional 1-sample timing slips")
+                    }
                 },
                 _ => {}
             }

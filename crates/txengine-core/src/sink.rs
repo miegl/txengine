@@ -147,10 +147,6 @@ pub trait RfSink: Send {
     /// called at any time, also before [`RfSink::start`]; fails beyond
     /// ±[`SinkInfo::max_clock_error_ppm`].
     fn set_clock_error_ppm(&mut self, ppm: f64) -> Result<(), SinkError> {
-        if ppm == 0.0 {
-            Ok(())
-        } else {
-            Err(SinkError::config("this output cannot correct a clock error"))
-        }
+        if ppm == 0.0 { Ok(()) } else { Err(SinkError::config("this output cannot correct a clock error")) }
     }
 }

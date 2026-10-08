@@ -13,10 +13,10 @@
 //! as the kernel does, and everything else is powered.
 use std::time::Duration;
 
+use txengine_hal::rp1::Rp1;
 use txengine_hal::rp1::clocks::{ClockGen, Pll, PllId};
 use txengine_hal::rp1::gpio::{Drive, Gpio};
 use txengine_hal::rp1::regs::{self, clk::*};
-use txengine_hal::rp1::Rp1;
 
 fn dump(c: &txengine_hal::mmio::Mmio) {
     for (name, base) in [("sys", PLL_SYS), ("audio", PLL_AUDIO), ("video", PLL_VIDEO)] {
@@ -30,7 +30,12 @@ fn dump(c: &txengine_hal::mmio::Mmio) {
             c.read(base + PLL_SEC)
         );
     }
-    println!("gp0: ctrl {:#x} div_int {} div_frac {:#x}", c.read(gp_ctrl(0)), c.read(gp_div_int(0)), c.read(gp_div_frac(0)));
+    println!(
+        "gp0: ctrl {:#x} div_int {} div_frac {:#x}",
+        c.read(gp_ctrl(0)),
+        c.read(gp_div_int(0)),
+        c.read(gp_div_frac(0))
+    );
 }
 
 fn arg<T: std::str::FromStr>(a: &[String], i: usize, what: &str) -> T {
@@ -48,7 +53,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if a.first().map(String::as_str) == Some("dump") {
         dump(&clocks);
         let (io, pads) = (rp1.block(regs::IO_BANK0), rp1.block(regs::PADS_BANK0));
-        println!("gpio4: ctrl {:#x} pad {:#x}, GPCLK_OE {:#x}", io.read(regs::gpio::ctrl(4)), pads.read(regs::gpio::pad(4)), clocks.read(GPCLK_OE_CTRL));
+        println!(
+            "gpio4: ctrl {:#x} pad {:#x}, GPCLK_OE {:#x}",
+            io.read(regs::gpio::ctrl(4)),
+            pads.read(regs::gpio::pad(4)),
+            clocks.read(GPCLK_OE_CTRL)
+        );
         return Ok(());
     }
     if a.first().map(String::as_str) == Some("off") {
@@ -66,7 +76,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         clocks.write(PLL_AUDIO + PLL_PRIM, 0x55000);
         Pll::new(&clocks, PllId::Audio, 50e6).wait_lock()?;
         dump(&clocks);
-        println!("gpio4: ctrl {:#x} pad {:#x}, GPCLK_OE {:#x}", io.read(regs::gpio::ctrl(4)), pads.read(regs::gpio::pad(4)), clocks.read(GPCLK_OE_CTRL));
+        println!(
+            "gpio4: ctrl {:#x} pad {:#x}, GPCLK_OE {:#x}",
+            io.read(regs::gpio::ctrl(4)),
+            pads.read(regs::gpio::pad(4)),
+            clocks.read(GPCLK_OE_CTRL)
+        );
         return Ok(());
     }
     let set = rp1.block_set(regs::CLOCKS_MAIN);
@@ -108,9 +123,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let gdiv: u32 = a.get(7).map(|s| s.parse()).transpose()?.unwrap_or(1);
             gp.configure(7, gdiv, 0)?;
             let vco = 50.0 * (int as f64 + frac as f64 / (1u64 << 24) as f64);
-            println!("pll_audio VCO {vco:.6} MHz / {d1} / {d2} / {gdiv} = {:.6} MHz, pwr {pwr:#x}", vco / (d1 * d2 * gdiv) as f64);
+            println!(
+                "pll_audio VCO {vco:.6} MHz / {d1} / {d2} / {gdiv} = {:.6} MHz, pwr {pwr:#x}",
+                vco / (d1 * d2 * gdiv) as f64
+            );
         }
-        _ => return Err("usage: rp1_pn dump | xosc <div> <s> | sys <div> <s> | audio <int> <frac> <d1> <d2> <s> [pwr] [gp_div]".into()),
+        _ => {
+            return Err(
+                "usage: rp1_pn dump | xosc <div> <s> | sys <div> <s> | audio <int> <frac> <d1> <d2> <s> [pwr] [gp_div]"
+                    .into(),
+            );
+        }
     }
     gp.enable_output();
     // PN_DRIVE: pad drive level 0-7 (default 7 = 12 mA); PN_SLEW=slow clears SLEWFAST.

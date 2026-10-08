@@ -190,7 +190,15 @@ pub struct RateEstimator {
 
 impl RateEstimator {
     pub fn new(fs: f64) -> RateEstimator {
-        RateEstimator { fs, origin: None, points: VecDeque::new(), weights: Vec::new(), bin: None, line: None, rejected: 0 }
+        RateEstimator {
+            fs,
+            origin: None,
+            points: VecDeque::new(),
+            weights: Vec::new(),
+            bin: None,
+            line: None,
+            rejected: 0,
+        }
     }
 
     /// Forget the data (the timeline was interrupted).
@@ -494,7 +502,13 @@ impl ClockDiscipline {
             return "crystal error correction off".into();
         }
         let measured = match (self.measured, self.synchronised) {
-            (Some(f), _) => format!("measured {:+.3} ± {:.3} ppm over {:.0} s against {}", f.ppm, f.stderr_ppm, f.span, self.reference.name()),
+            (Some(f), _) => format!(
+                "measured {:+.3} ± {:.3} ppm over {:.0} s against {}",
+                f.ppm,
+                f.stderr_ppm,
+                f.span,
+                self.reference.name()
+            ),
             (None, Some(false)) => format!("not measured: {} is not synchronised", self.reference.name()),
             (None, _) => "not measured yet".into(),
         };
@@ -507,7 +521,10 @@ impl ClockDiscipline {
             (Ppm::Auto, Some(_)) => format!("crystal {:+.2} ppm", self.ppm),
             (Ppm::Auto, None) => "crystal not measured yet".into(),
             (Ppm::Fixed(v), m) => {
-                format!("crystal {v:+.2} ppm (fixed{})", m.map_or(String::new(), |f| format!(", measured {:+.2}", f.ppm)))
+                format!(
+                    "crystal {v:+.2} ppm (fixed{})",
+                    m.map_or(String::new(), |f| format!(", measured {:+.2}", f.ppm))
+                )
             }
             (Ppm::Off, _) => "crystal correction off".into(),
         }
@@ -562,11 +579,15 @@ mod tests {
     fn estimates_a_constant_error() {
         let mut est = RateEstimator::new(FS);
         let mut last = None;
-        readings(60.0, |_| 12.3, |_, n, t0, t1| {
-            if let Some(o) = bracket(n, t0, t1) {
-                last = est.add(o).or(last);
-            }
-        });
+        readings(
+            60.0,
+            |_| 12.3,
+            |_, n, t0, t1| {
+                if let Some(o) = bracket(n, t0, t1) {
+                    last = est.add(o).or(last);
+                }
+            },
+        );
         let fit = last.unwrap();
         assert!((fit.ppm - 12.3).abs() < 0.01, "{fit:?}");
         assert!(fit.stderr_ppm < 0.01, "{fit:?}");
@@ -594,7 +615,11 @@ mod tests {
     fn ignores_outliers_and_restarts_after_a_jump() {
         let mut est = RateEstimator::new(FS);
         let mut fits = Vec::new();
-        let o = |time: f64, offset: f64| Observation { sample: ((time - offset) * FS * (1.0 + 8e-6)) as u64, time, uncertainty: 1e-6 };
+        let o = |time: f64, offset: f64| Observation {
+            sample: ((time - offset) * FS * (1.0 + 8e-6)) as u64,
+            time,
+            uncertainty: 1e-6,
+        };
         for k in 0..100 {
             // One wild point at 50 s.
             let offset = if k == 50 { 5e-3 } else { 0.0 };
@@ -692,7 +717,8 @@ mod tests {
 
     impl Rig {
         fn new(mode: Ppm) -> Rig {
-            let reference = FakeReference { time: Arc::new(AtomicU64::new(0)), synced: Arc::new(AtomicBool::new(true)) };
+            let reference =
+                FakeReference { time: Arc::new(AtomicU64::new(0)), synced: Arc::new(AtomicBool::new(true)) };
             let mut clock = ClockDiscipline::new(mode, Box::new(reference.clone()));
             let mut sink = FakeSink::new();
             clock.attach(&mut sink).unwrap();

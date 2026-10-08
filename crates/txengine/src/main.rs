@@ -59,11 +59,14 @@ fn tone(a: &cli::ToneArgs) -> anyhow::Result<()> {
     let mut buf = vec![0f32; 4096];
     let mut fill = |buf: &mut [f32]| {
         for x in buf.iter_mut() {
-            *x = osc.iter_mut().map(|o| {
-                let v = table.sin(o.harmonic_frac(1));
-                o.advance();
-                dev * v
-            }).sum();
+            *x = osc
+                .iter_mut()
+                .map(|o| {
+                    let v = table.sin(o.harmonic_frac(1));
+                    o.advance();
+                    dev * v
+                })
+                .sum();
         }
     };
     let p = sink.poll()?;

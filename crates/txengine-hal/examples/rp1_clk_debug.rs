@@ -1,8 +1,8 @@
 //! Dump and exercise RP1 clock generator state (diagnostics).
 
+use txengine_hal::rp1::Rp1;
 use txengine_hal::rp1::clocks::{FcSource, Pll, PllId, measure};
 use txengine_hal::rp1::regs::{self, clk::*};
-use txengine_hal::rp1::Rp1;
 
 fn dump(clocks: &txengine_hal::mmio::Mmio, label: &str) {
     println!("--- {label}");

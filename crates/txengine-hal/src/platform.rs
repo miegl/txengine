@@ -58,10 +58,7 @@ const DT: &str = "/proc/device-tree";
 fn dt_strings(path: &str) -> Vec<String> {
     std::fs::read(Path::new(DT).join(path))
         .map(|b| {
-            b.split(|&c| c == 0)
-                .filter(|s| !s.is_empty())
-                .map(|s| String::from_utf8_lossy(s).into_owned())
-                .collect()
+            b.split(|&c| c == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect()
         })
         .unwrap_or_default()
 }
@@ -111,9 +108,7 @@ fn soc_from_cpuinfo() -> Option<Soc> {
 /// Peripheral base from the `soc` node's `ranges` (like bcm_host_get_peripheral_address).
 fn periph_base_from_dt() -> Option<u64> {
     let r = std::fs::read(Path::new(DT).join("soc/ranges")).ok()?;
-    let word = |i: usize| -> Option<u32> {
-        Some(u32::from_be_bytes(r.get(i * 4..i * 4 + 4)?.try_into().ok()?))
-    };
+    let word = |i: usize| -> Option<u32> { Some(u32::from_be_bytes(r.get(i * 4..i * 4 + 4)?.try_into().ok()?)) };
     // <child-bus-addr parent-addr... size>; the parent address is one cell on
     // BCM283x and two cells (high, low) on BCM2711.
     if word(0)? != 0x7e00_0000 {
@@ -132,9 +127,7 @@ fn periph_base_from_dt() -> Option<u64> {
 pub fn detect() -> Result<Platform> {
     let compat = dt_strings("compatible");
     let soc = soc_from_compatible(&compat).or_else(soc_from_cpuinfo).ok_or_else(|| {
-        HalError::Unsupported(format!(
-            "not a supported Raspberry Pi (device-tree compatible: {compat:?})"
-        ))
+        HalError::Unsupported(format!("not a supported Raspberry Pi (device-tree compatible: {compat:?})"))
     })?;
     let model = dt_strings("model").into_iter().next().unwrap_or_else(|| format!("unknown {soc} board"));
 

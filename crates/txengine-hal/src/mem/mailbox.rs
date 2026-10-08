@@ -11,8 +11,7 @@ use crate::sys::{Mapping, open, page_size, round_up};
 
 /// `_IOWR(100, 0, char *)` – the size field depends on the pointer width of
 /// the calling process.
-const IOCTL_MBOX_PROPERTY: u32 =
-    (3 << 30) | ((std::mem::size_of::<*mut u8>() as u32) << 16) | (100 << 8);
+const IOCTL_MBOX_PROPERTY: u32 = (3 << 30) | ((std::mem::size_of::<*mut u8>() as u32) << 16) | (100 << 8);
 
 const TAG_ALLOCATE_MEMORY: u32 = 0x0003_000c;
 const TAG_LOCK_MEMORY: u32 = 0x0003_000d;
@@ -76,10 +75,7 @@ impl Mailbox {
             return Err(HalError::last_os(format!("mailbox property {tag:#x}")));
         }
         if buf[1] != RESPONSE_SUCCESS {
-            return Err(HalError::Hardware(format!(
-                "mailbox property {tag:#x} failed (response code {:#x})",
-                buf[1]
-            )));
+            return Err(HalError::Hardware(format!("mailbox property {tag:#x} failed (response code {:#x})", buf[1])));
         }
         if buf[4] & 0x8000_0000 == 0 {
             return Err(HalError::Hardware(format!("mailbox tag {tag:#x} not handled by firmware")));
@@ -117,7 +113,8 @@ impl VcMemory {
     pub fn alloc(len: usize) -> Result<VcMemory> {
         let mbox = Mailbox::open()?;
         let len = round_up(len, page_size());
-        let handle = mbox.property(TAG_ALLOCATE_MEMORY, &[len as u32, page_size() as u32, flags::DIRECT | flags::ZERO], 1)?[0];
+        let handle =
+            mbox.property(TAG_ALLOCATE_MEMORY, &[len as u32, page_size() as u32, flags::DIRECT | flags::ZERO], 1)?[0];
         if handle == 0 {
             return Err(HalError::Hardware(format!(
                 "VideoCore could not allocate {} KiB (increase gpu_mem?)",

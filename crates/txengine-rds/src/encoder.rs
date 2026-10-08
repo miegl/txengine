@@ -251,7 +251,8 @@ impl RdsEncoder {
                 self.credits[i] = 0.0;
             }
         }
-        let pick = (0..4).filter(|&i| available[i]).max_by(|&a, &b| self.credits[a].total_cmp(&self.credits[b])).unwrap();
+        let pick =
+            (0..4).filter(|&i| available[i]).max_by(|&a, &b| self.credits[a].total_cmp(&self.credits[b])).unwrap();
         self.credits[pick] -= total;
         match [Slot::Basic, Slot::RadioText, Slot::PtyName, Slot::Slow][pick] {
             Slot::Basic => self.group_0a(),
@@ -311,13 +312,11 @@ impl RdsEncoder {
 
     fn group_1a(&mut self) -> Group {
         // Alternate between the configured slow labelling codes.
-        let variants: Vec<u16> = [
-            self.params.ecc.map(|ecc| ecc as u16),
-            self.params.lic.map(|lic| (3 << 12) | (lic & 0xfff)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let variants: Vec<u16> =
+            [self.params.ecc.map(|ecc| ecc as u16), self.params.lic.map(|lic| (3 << 12) | (lic & 0xfff))]
+                .into_iter()
+                .flatten()
+                .collect();
         let b3 = variants[self.slow_variant % variants.len()];
         self.slow_variant = self.slow_variant.wrapping_add(1);
         // Block 4: programme item number; day 0 means "no valid PIN".
