@@ -20,9 +20,10 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
   * Pi 1-4 (BCM2835/6/7, BCM2711): fractional-N modulation of PLLA, PLLC or
     PLLD (20-bit fraction, 1-3 Hz steps), or a dithered fractional clock
     divider (`--pll clkdiv`). The PLL is chosen automatically; PLLs used by
-    other parts of the system are only retuned within ±3 %. PLLA runs with
-    a wider loop than the firmware gives it (loop gain KI 5 instead of 2),
-    which removes most of its phase noise from the multiplex band.
+    other parts of the system are only retuned within ±3 %. PLLA and PLLC
+    run with a wider loop than the firmware gives them (loop gain KI 5
+    instead of 2), which removes most of their phase noise from the
+    multiplex band.
   * Pi 5 (RP1): fractional-N modulation of the RP1 audio or video PLL
     (24-bit fraction, < 0.1 Hz steps).
 * **Crystal error correction**: the board's crystal error is measured
@@ -244,8 +245,8 @@ Hardware-specific findings that txengine handles:
   at about 231 kS/s. txengine measures the capacity at start-up and picks a
   rate with 15 % margin (`--sample-rate` above the capacity is refused), and
   it watches the achieved rate while running.
-* **Pi 2 and Zero 2 W, PLLA's loop:** with the firmware's loop gain
-  (KI 2) PLLA's loop bandwidth is about 125 kHz. That leaves the VCO's
+* **Pi 2 and Zero 2 W, PLLA's and PLLC's loop:** with the firmware's loop gain
+  (KI 2) the loop bandwidth is about 125 kHz. That leaves the VCO's
   phase noise around 10–30 kHz offset, in the audio and stereo bands,
   poorly suppressed (Pi 2: 44 dB stereo SNR), and makes the modulation
   response rise by 0.57 dB with 6° of lag at 67 kHz (35 dB separation
@@ -257,7 +258,12 @@ Hardware-specific findings that txengine handles:
   the wider loop's noise peak at 300–600 kHz offset (+1 dB in the
   neighbouring 200 kHz channels), and the 3rd harmonic of a full-scale
   1 kHz tone at −80 instead of −86 dB. The firmware's gain is restored
-  afterwards.
+  afterwards. PLLA and PLLC are the same design: at the same VCO frequency
+  their responses agree within 0.01 dB, at KI 2 and at KI 5 (Pi 2, PLLC:
+  stereo SNR 53.2 dB and separation 58–60 dB at KI 5, 44.6 dB and 33 dB at
+  KI 2 uncompensated). The response is not perfectly stable: between two
+  sessions it moved by 0.15 dB at 67 kHz on both boards, and by 0.05 dB
+  under CPU and network load, which leaves the separation unchanged.
 * **BCM283x/BCM2711, CPU clock changes:** the firmware changes the ARM clock
   over the same slow PLL register bus that the DMA engine keeps busy. When
   the two collide, the firmware's write lands in the modulated PLL instead:

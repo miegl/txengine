@@ -138,8 +138,8 @@ impl BcmPlan {
     }
 }
 
-/// Loop filter integral gain (ANA1 KI) txengine sets on PLLA of the
-/// BCM2836/7 while modulating it, instead of the firmware's KI 2.
+/// Loop filter integral gain (ANA1 KI) txengine sets on PLLA and PLLC of
+/// the BCM2836/7 while modulating them, instead of the firmware's KI 2.
 ///
 /// The gain sets the loop bandwidth: about 125 kHz at KI 2, 600 kHz at KI 5
 /// (measured from the modulation response, each step ×1.5–1.9). At KI 2
@@ -152,13 +152,15 @@ impl BcmPlan {
 /// gains 1 dB more SNR but adds 3–5 dB there; KI 7 also raises the noise
 /// close to the carrier. On the Zero 2 W, whose noise has another source
 /// (its supply), the gain changes neither the noise nor anything else.
-pub const PLLA_MODULATION_KI: u32 = 5;
+/// PLLA and PLLC are the same design: at the same VCO frequency their
+/// responses agree within 0.01 dB at KI 2 and at KI 5, on both boards.
+pub const MODULATION_KI: u32 = 5;
 
 /// The loop filter integral gain for modulating `pll`, if it differs from
-/// the PLL's current setting: PLLA of the BCM2836/7. (PLLC and PLLD also
-/// clock the VPU and the peripherals; the BCM2711 has not been measured.)
+/// the PLL's current setting: PLLA and PLLC of the BCM2836/7. (PLLD, which
+/// clocks the UART and HDMI, and the BCM2711 have not been measured.)
 pub fn modulation_ki(pll: &Pll) -> Option<u32> {
-    (pll.id == PllId::A && !pll.is_bcm2711()).then_some(PLLA_MODULATION_KI)
+    (matches!(pll.id, PllId::A | PllId::C) && !pll.is_bcm2711()).then_some(MODULATION_KI)
 }
 
 /// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
@@ -304,15 +306,18 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
     })
 }
 
-/// Modulation response of PLLA on the BCM2836 (Raspberry Pi 2 v1.1) beyond
-/// the zero-order hold, `(Hz, dB)`: PLLA retuned while running (feedback
-/// pre-divider on), with txengine's loop gain [`PLLA_MODULATION_KI`].
-/// Measured over the air (`txengine tone`, 13 probe tones of 2.5 and 5 kHz,
-/// USRP B210; three runs agree within ±0.01 dB). The loop lifts high
-/// modulation frequencies slightly, and delays them by at most 0.25° at
-/// 67 kHz. (With the firmware's KI 2 the lift was 0.40 dB at 38 kHz and
-/// 0.57 dB at 67 kHz, with 6° of phase lag.)
-const BCM2836_PLLA_RESPONSE_DB: &[(f64, f64)] = &[
+/// Modulation response of PLLA and PLLC on the BCM2836 (Raspberry Pi 2
+/// v1.1) beyond the zero-order hold, `(Hz, dB)`: retuned while running
+/// (feedback pre-divider on), with txengine's loop gain [`MODULATION_KI`].
+/// Measured over the air on PLLA at 2277.6 MHz (`txengine tone`, 13 probe
+/// tones of 2.5 and 5 kHz, USRP B210; three runs agree within ±0.01 dB).
+/// The loop lifts high modulation frequencies slightly, and delays them by
+/// at most 0.25° at 67 kHz. (With the firmware's KI 2 the lift was 0.40 dB
+/// at 38 kHz and 0.57 dB at 67 kHz, with 6° of phase lag.) PLLA from 1927
+/// to 2365 MHz and PLLC at 1927 MHz measure the same within 0.02 dB in
+/// one session; between sessions the whole response moved by up to
+/// 0.15 dB at 67 kHz (0.05 dB at 38 kHz), on both boards alike.
+const BCM2836_PLL_RESPONSE_DB: &[(f64, f64)] = &[
     (0.0, 0.0),
     (10e3, 0.005),
     (15e3, 0.005),
@@ -327,10 +332,10 @@ const BCM2836_PLLA_RESPONSE_DB: &[(f64, f64)] = &[
     (67e3, 0.12),
 ];
 
-/// The same for PLLA on the BCM2837, measured on a Raspberry Pi Zero 2 W
+/// The same for PLLA and PLLC on the BCM2837, measured on a Raspberry Pi Zero 2 W
 /// (RP3A0; two runs agree within ±0.04 dB). (KI 2: 0.33 dB at 38 kHz,
 /// 0.48 dB and 5° at 67 kHz.)
-const BCM2837_PLLA_RESPONSE_DB: &[(f64, f64)] = &[
+const BCM2837_PLL_RESPONSE_DB: &[(f64, f64)] = &[
     (0.0, 0.0),
     (19e3, 0.0),
     (30e3, 0.01),
@@ -783,11 +788,11 @@ impl BcmFmTransmitter {
             realtime: true,
             zero_order_hold: true,
             response_db: match plan.method {
-                // Only the configurations that were measured: PLLA retuned
-                // while running, with txengine's loop gain.
-                BcmMethod::Pll(PllId::A) if !plan.power_up && plan.loop_ki == Some(PLLA_MODULATION_KI) => match bcm.soc {
-                    Soc::Bcm2836 => BCM2836_PLLA_RESPONSE_DB.to_vec(),
-                    Soc::Bcm2837 => BCM2837_PLLA_RESPONSE_DB.to_vec(),
+                // Only the configurations that were measured: PLLA or PLLC
+                // retuned while running, with txengine's loop gain.
+                BcmMethod::Pll(PllId::A | PllId::C) if !plan.power_up && plan.loop_ki == Some(MODULATION_KI) => match bcm.soc {
+                    Soc::Bcm2836 => BCM2836_PLL_RESPONSE_DB.to_vec(),
+                    Soc::Bcm2837 => BCM2837_PLL_RESPONSE_DB.to_vec(),
                     _ => Vec::new(),
                 },
                 _ => Vec::new(),
