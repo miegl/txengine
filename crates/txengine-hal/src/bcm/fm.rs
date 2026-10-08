@@ -14,8 +14,9 @@
 //!
 //! Pacing: each sample is two DMA control blocks – write the sample to the
 //! clock register, then write a dummy word to the PWM (or PCM) FIFO, which
-//! the peripheral drains at exactly the sample rate (its clock is an integer
-//! division of PLLD or the crystal, so there is no jitter).
+//! the peripheral drains at exactly the sample rate (its clock is a division
+//! of PLLD or the crystal: an integer one without jitter, or a fractional one
+//! whose jitter is at most 2 ns, see [`plan_pacer`]).
 //!
 //! The control blocks form a ring whose last written sample links to an idle
 //! loop that holds the carrier at the centre frequency. If the producer falls
@@ -400,30 +401,80 @@ fn measure_dma_rate(ch: &DmaChannel, target_bus: u32, word: u32) -> Result<f64> 
     Ok(PAIRS as f64 / worst.as_secs_f64())
 }
 
-/// Integer clock divider and frame length (clocks per sample, within
+/// Pacer clock: the source divided by `divi + divf / 4096` (a fractional
+/// divider runs MASH 1), and one FIFO word per `rng` clocks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PacerClock {
+    pub divi: u32,
+    pub divf: u32,
+    pub rng: u32,
+    /// Samples per second (exact, from the nominal source frequency).
+    pub fs: f64,
+}
+
+impl PacerClock {
+    /// Divider `units / 4096`.
+    fn new(src_hz: f64, units: u32, rng: u32) -> PacerClock {
+        PacerClock { divi: units >> 12, divf: units & 0xfff, rng, fs: src_hz * 4096.0 / (units as f64 * rng as f64) }
+    }
+
+    pub fn divider(&self) -> f64 {
+        self.divi as f64 + self.divf as f64 / 4096.0
+    }
+
+    pub fn mash(&self) -> u32 {
+        u32::from(self.divf != 0)
+    }
+}
+
+/// Slowest source for a fractional pacer divider. MASH 1 makes each clock
+/// period one source cycle longer or shorter, so a sample leaves up to one
+/// source cycle early or late: 2 ns from PLLD_PER (500 MHz), no more than
+/// the DMA engine's own timing resolution (one core clock cycle). On a
+/// Pi 2 at 190 kS/s the multiplex noise measured the same (±0.2 dB) with
+/// MASH 1 as with the nearest integer divider (189.97 kS/s). From the
+/// 19.2 MHz crystal it would be 52 ns.
+const MASH_MIN_SOURCE_HZ: f64 = 250e6;
+
+/// Clock divider and frame length (clocks per sample, within
 /// `min_rng..=max_rng`) for the pacer, closest to `target` samples/s.
 ///
-/// The peripheral clock is kept between 5 MHz and `max_clk_hz`, and among
-/// equally close settings the fastest clock wins: the PWM and PCM register
-/// synchronisers run on it, and with a slow clock successive register
-/// writes get lost (BCM2835 peripherals, PWM `STA.BERR`).
-pub fn plan_pacer(src_hz: f64, target: f64, min_rng: u32, max_rng: u32, max_clk_hz: f64) -> Option<(u32, u32, f64)> {
-    let mut best: Option<(u32, u32, f64)> = None;
-    for div in 2..=4095u32 {
-        let clk = src_hz / div as f64;
+/// The peripheral clock is kept between 5 MHz and `max_clk_hz`. An integer
+/// divider has no jitter at all and is used if one comes within 1 ppm of
+/// the target; otherwise, from a fast source, a fractional one (which hits
+/// any rate within a fraction of a hertz). Among settings that are equally
+/// close the fastest clock wins: the PWM and PCM register synchronisers run
+/// on it, and with a slow clock successive register writes get lost
+/// (BCM2835 peripherals, PWM `STA.BERR`).
+pub fn plan_pacer(src_hz: f64, target: f64, min_rng: u32, max_rng: u32, max_clk_hz: f64) -> Option<PacerClock> {
+    let mut candidates = Vec::new();
+    for divi in 2..=4095u32 {
+        let clk = src_hz / divi as f64;
         if clk > max_clk_hz || clk < 5e6 {
             continue;
         }
         let rng = (clk / target).round() as u32;
-        if !(min_rng..=max_rng).contains(&rng) {
-            continue;
-        }
-        let fs = clk / rng as f64;
-        if best.is_none_or(|b| (fs - target).abs() < (b.2 - target).abs() - 1e-6) {
-            best = Some((div, rng, fs));
+        if (min_rng..=max_rng).contains(&rng) {
+            candidates.push(PacerClock::new(src_hz, divi << 12, rng));
         }
     }
-    best
+    if src_hz >= MASH_MIN_SOURCE_HZ {
+        let rngs = ((5e6 / target).ceil() as u32).max(min_rng)..=((max_clk_hz / target).floor() as u32).min(max_rng);
+        for rng in rngs {
+            let c = PacerClock::new(src_hz, (src_hz * 4096.0 / (target * rng as f64)).round() as u32, rng);
+            // MASH 1 alternates between DIVI and DIVI + 1 source cycles.
+            if c.divf != 0 && (2..=4095).contains(&c.divi) && src_hz / c.divi as f64 <= max_clk_hz && src_hz / c.divider() >= 5e6 {
+                candidates.push(c);
+            }
+        }
+    }
+    let clk = |c: &PacerClock| src_hz / c.divider();
+    let error_uhz = |c: &PacerClock| ((c.fs - target).abs() * 1e6).round() as u64;
+    let close = candidates.iter().filter(|c| (c.fs - target).abs() <= 1e-6 * target);
+    if let Some(c) = close.min_by(|a, b| a.mash().cmp(&b.mash()).then(clk(b).total_cmp(&clk(a)))) {
+        return Some(*c);
+    }
+    candidates.into_iter().min_by(|a, b| error_uhz(a).cmp(&error_uhz(b)).then(clk(b).total_cmp(&clk(a))))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -525,7 +576,8 @@ pub struct BcmFmTransmitter {
     gpio: Mmio,
     pads_regs: Mmio,
     pacer: Pacer,
-    pacer_clk: (u32, u32, u32),
+    /// Clock source and setting of the pacer.
+    pacer_clk: (u32, PacerClock),
     pins: Vec<(u32, u32)>,
     drive: u8,
     restorer: Restorer,
@@ -691,8 +743,9 @@ impl BcmFmTransmitter {
                 fs
             }
         };
-        let (pdiv, prng, fs) = plan_pacer(pclk_hz, target, min_rng, max_rng, max_clk)
+        let pclock = plan_pacer(pclk_hz, target, min_rng, max_rng, max_clk)
             .ok_or_else(|| HalError::Config(format!("no pacer setting for {target} S/s")))?;
+        let fs = pclock.fs;
 
         // Ring size.
         let n = ((cfg.buffer.as_secs_f64() * fs) as usize).clamp(4096, 65536);
@@ -771,8 +824,9 @@ impl BcmFmTransmitter {
                 plan.vco_old / plan.per_div as f64 / 1e6
             ),
         };
+        let pdiv = if pclock.divf == 0 { pclock.divi.to_string() } else { format!("{:.4} (MASH 1)", pclock.divider()) };
         let description = format!(
-            "BCM{} {method}: carrier {:.6} MHz on GPIO{:?}, {:.3} kS/s ({} clock {:.1} MHz /{pdiv} /{prng}), \
+            "BCM{} {method}: carrier {:.6} MHz on GPIO{:?}, {:.3} kS/s ({} clock {:.1} MHz /{pdiv} /{}), \
              {step_desc} step {:.2} Hz, DMA ch{}, {n} samples ({:.1} ms), drive {} mA",
             if bcm.bcm2711 { "2711" } else { "283x" },
             plan.carrier_hz / 1e6,
@@ -780,6 +834,7 @@ impl BcmFmTransmitter {
             fs / 1e3,
             if cfg.pacer == Pacer::Pwm { "PWM" } else { "PCM" },
             pclk_hz / 1e6,
+            pclock.rng,
             plan.step_hz,
             ch.ch,
             n as f64 / fs * 1e3,
@@ -825,7 +880,7 @@ impl BcmFmTransmitter {
             gpio: bcm.gpio.clone(),
             pads_regs: bcm.pads.clone(),
             pacer: cfg.pacer,
-            pacer_clk: (pclk_src, pdiv, prng),
+            pacer_clk: (pclk_src, pclock),
             pins,
             drive: cfg.drive,
             restorer,
@@ -1011,7 +1066,8 @@ impl BcmFmTransmitter {
     }
 
     fn start_pacer(&mut self) -> Result<()> {
-        let (src, div, rng) = self.pacer_clk;
+        let (src, PacerClock { divi, divf, rng, .. }) = self.pacer_clk;
+        let mash = self.pacer_clk.1.mash();
         match self.pacer {
             Pacer::Pwm => {
                 // Every write must pass the PWM clock-domain synchroniser
@@ -1023,7 +1079,7 @@ impl BcmFmTransmitter {
                     attempt += 1;
                     self.pwm.write(pwm::CTL, 0);
                     self.pwm.write(pwm::DMAC, 0);
-                    self.cm.clock_start(cm::PWM, src, div, 0, 0)?;
+                    self.cm.clock_start(cm::PWM, src, divi, divf, mash)?;
                     self.pwm_write_confirmed(pwm::CTL, 0)?;
                     self.pwm_write_confirmed(pwm::DMAC, 0)?;
                     self.pwm_write_confirmed(pwm::RNG1, rng)?;
@@ -1048,7 +1104,7 @@ impl BcmFmTransmitter {
             }
             Pacer::Pcm => {
                 self.pcm.write(pcm::CS, pcm::CS_EN);
-                self.cm.clock_start(cm::PCM, src, div, 0, 0)?;
+                self.cm.clock_start(cm::PCM, src, divi, divf, mash)?;
                 // One 8-bit channel per frame of `rng` clocks.
                 self.pcm.write(pcm::TXC, pcm::TXC_CH1EN);
                 self.pcm.write(pcm::MODE, ((rng - 1) << pcm::MODE_FLEN_SHIFT) | (1 << pcm::MODE_FSLEN_SHIFT));
@@ -1382,12 +1438,26 @@ mod tests {
     fn pacer_is_exact_with_a_fast_clock() {
         // PLLD_PER at 500 MHz: 250 kS/s exactly, with the fastest clock
         // within 5..25 MHz.
-        let (div, rng, fs) = plan_pacer(500e6, 250_000.0, 2, 1 << 16, 25e6).unwrap();
-        assert_eq!(fs, 250_000.0);
-        let clk = 500e6 / div as f64;
-        assert!((5e6..=25e6).contains(&clk), "clock {clk}");
-        assert_eq!(div * rng, 2000);
-        assert_eq!(div, 20, "fastest exact clock is 25 MHz");
+        let c = plan_pacer(500e6, 250_000.0, 2, 1 << 16, 25e6).unwrap();
+        assert_eq!(c.fs, 250_000.0);
+        assert_eq!((c.divi, c.divf, c.rng), (20, 0, 100), "fastest exact clock is 25 MHz, integer");
+    }
+
+    #[test]
+    fn pacer_is_fractional_for_a_multiple_of_the_pilot() {
+        // 190 kS/s = 10 x 19 kHz: integer dividers of 500 MHz miss it by
+        // 30 Hz (/47 /56); MASH 1 comes within 1 ppm.
+        for (min, max) in [(2, 1 << 16), (8, 1024)] {
+            let c = plan_pacer(500e6, 190_000.0, min, max, 25e6).unwrap();
+            assert!((c.fs - 190_000.0).abs() <= 0.19, "{c:?}");
+            assert_eq!(c.mash(), 1);
+            let clk = 500e6 / c.divider();
+            assert!((5e6..=25e6).contains(&clk) && 500e6 / c.divi as f64 <= 25e6, "{c:?}");
+            assert!((c.fs - 500e6 / (c.divider() * c.rng as f64)).abs() < 1e-6);
+        }
+        // Not from the crystal: one of its cycles is 52 ns of jitter.
+        let c = plan_pacer(19.2e6, 190_000.0, 2, 1 << 16, 25e6).unwrap();
+        assert_eq!(c.mash(), 0);
     }
 
     fn plan(method: BcmMethod, center: f64, units_per_hz: f64, ndiv: u32, carrier_hz: f64) -> BcmPlan {
@@ -1440,14 +1510,14 @@ mod tests {
     #[test]
     fn pacer_respects_limits() {
         for (src, target, min, max) in [(500e6, 194_000.0, 2, 1 << 16), (19.2e6, 228_000.0, 2, 1 << 16), (500e6, 195_000.0, 8, 1024)] {
-            let (div, rng, fs) = plan_pacer(src, target, min, max, 25e6).unwrap();
-            let clk = src / div as f64;
+            let c = plan_pacer(src, target, min, max, 25e6).unwrap();
+            let clk = src / c.divider();
             assert!((5e6..=25e6).contains(&clk), "{src} {target}: clock {clk}");
-            assert!((min..=max).contains(&rng));
+            assert!((min..=max).contains(&c.rng));
             // The rate is always exact (the DSP uses it); with the 19.2 MHz
-            // crystal as source only a few clocks qualify, so the request is
-            // met within 0.5 %.
-            assert!((fs - target).abs() / target < 5e-3, "{src} {target}: {fs}");
+            // crystal as source only a few integer dividers qualify, so the
+            // request is met within 0.5 %.
+            assert!((c.fs - target).abs() / target < 5e-3, "{src} {target}: {}", c.fs);
         }
         // Nothing fits: a clock source below 5 MHz.
         assert!(plan_pacer(4e6, 100_000.0, 2, 1 << 16, 25e6).is_none());

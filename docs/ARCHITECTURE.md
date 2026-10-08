@@ -213,7 +213,10 @@ divider register, paced by hardware.
   so the set-up confirms each write by reading it back or waiting for the
   status it causes, checks `STA.BERR`, and the pacer clock is kept between
   5 and 25 MHz; after starting, the DMA position must advance or the pacer
-  is configured again.
+  is configured again. The pacer clock divides PLLD_PER by an integer when
+  that hits the rate within 1 ppm, otherwise by a fractional divider
+  (MASH 1, at most 2 ns of jitter), which hits any rate within a fraction of
+  a hertz.
 * The DMA engine's write rate to the PLL registers is limited (≈ 231 k
   writes/s on the Pi 2 and the Zero 2 W), so the sample rate is chosen from
   a measurement at start-up, and the achieved rate is checked continuously.
