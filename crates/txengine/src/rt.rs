@@ -71,10 +71,13 @@ pub fn make_realtime(priority: i32) {
 
 /// Exclusive instance lock: two transmitters fighting over the same PLL and
 /// DMA tick would corrupt each other's output.
-pub fn instance_lock() -> anyhow::Result<OwnedFd> {
+/// `name` tells transmitters apart (`txengine` for the Pi's own hardware).
+pub fn instance_lock(name: &str) -> anyhow::Result<OwnedFd> {
+    use std::ffi::CString;
     use std::os::fd::FromRawFd;
-    let path = c"/run/txengine.lock";
-    let alt = c"/tmp/txengine.lock";
+    let name: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let path = CString::new(format!("/run/{name}.lock"))?;
+    let alt = CString::new(format!("/tmp/{name}.lock"))?;
     // SAFETY: plain syscalls with valid C strings.
     let fd = unsafe {
         let mut fd = libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC, 0o644);

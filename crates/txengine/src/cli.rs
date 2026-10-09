@@ -42,6 +42,8 @@ pub enum Command {
     /// Transmit test tones as raw frequency deviation (no audio processing,
     /// no compensation), e.g. to measure the modulation response.
     Tone(ToneArgs),
+    /// List the transmitters found (for --device).
+    Devices,
 }
 
 /// How the crystal error is corrected.
@@ -76,12 +78,16 @@ pub struct HardwareArgs {
     /// Carrier frequency in MHz.
     #[arg(short, long, value_name = "MHZ")]
     pub freq: f64,
+    /// Transmitter: "pi" (this Raspberry Pi's GPIOs) or "auto": the only
+    /// one found. `txengine devices` lists them.
+    #[arg(short, long, value_name = "DEVICE", help_heading = "Hardware")]
+    pub device: Option<String>,
     /// Output GPIO (repeat for several pins on the same clock generator).
     #[arg(short, long = "gpio", value_name = "N", help_heading = "Hardware")]
     pub gpio: Vec<u32>,
     /// Carrier synthesis: PLL to modulate (Pi 1-4: a, c, d; Pi 5: audio, video)
     /// or "clkdiv" to modulate the clock divider instead of a PLL.
-    #[arg(long, help_heading = "Hardware")]
+    #[arg(long, help_heading = "Raspberry Pi")]
     pub pll: Option<String>,
     /// Output drive strength 0-7 (2-16 mA; the Pi 5 has 4 steps up to 12 mA).
     #[arg(long, default_value_t = 7, value_name = "0-7", help_heading = "Hardware")]
@@ -95,10 +101,10 @@ pub struct HardwareArgs {
     #[arg(long, default_value = "auto", value_parser = parse_ppm, allow_hyphen_values = true, value_name = "auto|PPM|off", help_heading = "Hardware")]
     pub ppm: Ppm,
     /// DMA channel to use [default: a free one].
-    #[arg(long, help_heading = "Hardware")]
+    #[arg(long, help_heading = "Raspberry Pi")]
     pub dma_channel: Option<usize>,
     /// Pi 1-4: peripheral pacing the DMA (pwm or pcm).
-    #[arg(long, help_heading = "Hardware")]
+    #[arg(long, help_heading = "Raspberry Pi")]
     pub pacer: Option<String>,
     /// Target sample rate of the output in Hz (the closest exact rate is
     /// used). Default: 250000 on the Pi 5; on the Pi 1-4 the highest multiple

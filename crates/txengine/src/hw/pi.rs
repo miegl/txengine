@@ -1,4 +1,4 @@
-//! Selecting and configuring the hardware backend for the running board.
+//! The Raspberry Pi's own GPIO clock outputs (Pi 2-5, Zero 2 W).
 
 use std::time::Duration;
 
@@ -9,17 +9,8 @@ use txengine_hal::bcm::{self, Bcm};
 use txengine_hal::platform::{self, Platform, Soc};
 use txengine_hal::rp1;
 
+use super::{Backend, Found};
 use crate::cli::HardwareArgs;
-
-fn check_common(hw: &HardwareArgs) -> anyhow::Result<()> {
-    if !(1.0..=250.0).contains(&hw.freq) {
-        bail!("--freq must be given in MHz (e.g. 87.6)");
-    }
-    if hw.power > 7 {
-        bail!("--power must be 0-7");
-    }
-    Ok(())
-}
 
 fn rp1_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<rp1::fm::Rp1FmConfig> {
     let pll = match hw.pll.as_deref().map(str::to_ascii_lowercase).as_deref() {
@@ -56,11 +47,50 @@ fn warn_power() {
     }
 }
 
+pub struct Pi;
+
+impl Backend for Pi {
+    fn name(&self) -> &'static str {
+        "pi"
+    }
+
+    fn summary(&self) -> &'static str {
+        "this Raspberry Pi's GPIO clock outputs (Pi 2-5, Zero 2 W)"
+    }
+
+    fn discover(&self) -> Vec<Found> {
+        match platform::detect() {
+            Ok(p) if p.soc != Soc::Bcm2835 => {
+                vec![Found { device: "pi".into(), description: format!("{} ({})", p.model, p.soc) }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn check(&self, args: &str, _hw: &HardwareArgs) -> anyhow::Result<()> {
+        if !args.is_empty() {
+            bail!("--device pi takes no arguments");
+        }
+        Ok(())
+    }
+
+    fn lock_name(&self, _args: &str) -> anyhow::Result<String> {
+        Ok("txengine".into())
+    }
+
+    fn open(&self, _args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
+        open_transmitter(hw, max_offset_hz)
+    }
+
+    fn probe(&self, _args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
+        probe(hw, max_offset_hz)
+    }
+}
+
 /// Open the transmitter for the detected platform, able to move the carrier
 /// by up to ±`max_offset_hz`. Must be called while the process is still
 /// single threaded (it forks the shutdown guardian).
-pub fn open_transmitter(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
-    check_common(hw)?;
+fn open_transmitter(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
     let plat = platform::detect()?;
     info!("{} ({}), crystal {:.3} MHz", plat.model, plat.soc, plat.osc_hz / 1e6);
     warn_power();
@@ -112,8 +142,7 @@ fn bcm_transmitter(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> an
 
 /// Print the detected platform and the frequency plan for a carrier
 /// offset of up to ±`max_offset_hz`, without touching the hardware.
-pub fn probe(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
-    check_common(hw)?;
+fn probe(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
     let plat = platform::detect()?;
     println!("Board:    {}", plat.model);
     println!("SoC:      {}", plat.soc);

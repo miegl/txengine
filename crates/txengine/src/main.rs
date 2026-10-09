@@ -27,7 +27,8 @@ fn main() {
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let result = match &cli.command {
         Command::Wfm(c) => wfm::run(c),
-        Command::Probe(a) => hw::probe(&a.hw, wfm::MAX_OFFSET_HZ),
+        Command::Probe(a) => hw::select(&a.hw).and_then(|d| d.probe(&a.hw, wfm::MAX_OFFSET_HZ)),
+        Command::Devices => hw::list_devices(),
         Command::Tone(a) => tone(a),
     };
     if let Err(e) = result {
@@ -40,10 +41,11 @@ fn tone(a: &cli::ToneArgs) -> anyhow::Result<()> {
     if a.tones.iter().any(|&f| !(0.0..=120_000.0).contains(&f)) {
         anyhow::bail!("--tones must be within 0-120000 Hz");
     }
-    let _lock = rt::instance_lock()?;
+    let device = hw::select(&a.hw)?;
+    let _lock = rt::instance_lock(&device.lock_name()?)?;
     rt::install_signal_handlers();
     // Planned as for WFM, so that the measured response applies to it.
-    let mut sink = hw::open_transmitter(&a.hw, wfm::MAX_OFFSET_HZ)?;
+    let mut sink = device.open(&a.hw, wfm::MAX_OFFSET_HZ)?;
     let fs = sink.info().sample_rate;
     if a.tones.iter().any(|&f| f >= fs / 2.0) {
         anyhow::bail!("tones must be below half the sample rate ({:.0} Hz)", fs / 2.0);

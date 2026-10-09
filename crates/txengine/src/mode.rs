@@ -28,12 +28,13 @@ pub trait Mode {
 pub fn transmit(hw: &HardwareArgs, ctl: &ControlArgs, mode: &dyn Mode) -> anyhow::Result<()> {
     // Validate everything that does not need the hardware first.
     mode.check(Some(hw.freq))?;
-    let _lock = rt::instance_lock()?;
+    let device = hw::select(hw)?;
+    let _lock = rt::instance_lock(&device.lock_name()?)?;
     rt::install_signal_handlers();
 
     // The hardware is opened while still single threaded: it forks the
     // shutdown guardian.
-    let mut sink = hw::open_transmitter(hw, mode.max_offset_hz())?;
+    let mut sink = device.open(hw, mode.max_offset_hz())?;
     let mut m = mode.modulator(sink.info().sample_rate, true)?;
     m.configure(sink.info()).map_err(anyhow::Error::msg)?;
     let mut clock = clock::ClockDiscipline::new(hw.ppm, Box::new(clock::SystemClock::default()));
