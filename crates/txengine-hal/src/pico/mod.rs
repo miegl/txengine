@@ -171,6 +171,12 @@ impl Pico {
     }
 
     pub fn describe(&self) -> String {
-        format!("Raspberry Pi Pico ({}, serial {}, port {})", self.info.chip.name(), self.usb.serial, self.usb.port())
+        format!(
+            "Raspberry Pi {} ({}, serial {}, port {})",
+            self.info.chip.board(),
+            self.info.chip.name(),
+            self.usb.serial,
+            self.usb.port()
+        )
     }
 }

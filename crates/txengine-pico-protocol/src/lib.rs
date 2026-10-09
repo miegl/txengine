@@ -118,6 +118,14 @@ impl Chip {
             Chip::Rp2350 => "RP2350",
         }
     }
+
+    /// The Raspberry Pi board the firmware is built for.
+    pub fn board(self) -> &'static str {
+        match self {
+            Chip::Rp2040 => "Pico",
+            Chip::Rp2350 => "Pico 2",
+        }
+    }
 }
 
 /// Little-endian field reader.

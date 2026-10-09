@@ -55,10 +55,10 @@ impl Backend for Pico {
         pico::list()
             .into_iter()
             .map(|d| {
-                let chip = if d.pid == proto::PID_RP2350 { "Pico 2 (RP2350)" } else { "Pico (RP2040)" };
+                let chip = if d.pid == proto::PID_RP2350 { proto::Chip::Rp2350 } else { proto::Chip::Rp2040 };
                 Found {
                     device: format!("pico:{}", d.serial),
-                    description: format!("Raspberry Pi {chip} on USB port {}", d.port()),
+                    description: format!("Raspberry Pi {} ({}) on USB port {}", chip.board(), chip.name(), d.port()),
                 }
             })
             .collect()
