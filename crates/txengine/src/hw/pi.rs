@@ -67,9 +67,12 @@ impl Backend for Pi {
         }
     }
 
-    fn check(&self, args: &str, _hw: &HardwareArgs) -> anyhow::Result<()> {
+    fn check(&self, args: &str, hw: &HardwareArgs) -> anyhow::Result<()> {
         if !args.is_empty() {
             bail!("--device pi takes no arguments");
+        }
+        if hw.synthesis.is_some() {
+            bail!("--synthesis applies to the Pico");
         }
         Ok(())
     }

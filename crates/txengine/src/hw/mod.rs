@@ -1,13 +1,14 @@
 //! Transmitter hardware: the backends txengine transmits with, and choosing
 //! one (`--device BACKEND[:ARGS]`).
 //!
-//! A backend is a kind of hardware, such as this Raspberry Pi's GPIOs. Each
-//! finds the devices of its kind that are present, checks the options that
-//! apply to it (rejecting the others), and opens a device as an
-//! [`RfSink`]. Without `--device`, txengine uses the only device found. A
-//! new backend implements [`Backend`] and is added to [`BACKENDS`].
+//! A backend is a kind of hardware: this Raspberry Pi's GPIOs, a Pico on
+//! USB, ... Each finds the devices of its kind that are present, checks the
+//! options that apply to it (rejecting the others), and opens a device as
+//! an [`RfSink`]. Without `--device`, txengine uses the only device found.
+//! A new backend implements [`Backend`] and is added to [`BACKENDS`].
 
 mod pi;
+mod pico;
 
 use anyhow::bail;
 use txengine_core::RfSink;
@@ -40,7 +41,7 @@ pub trait Backend: Sync {
     fn probe(&self, args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()>;
 }
 
-pub const BACKENDS: &[&dyn Backend] = &[&pi::Pi];
+pub const BACKENDS: &[&dyn Backend] = &[&pi::Pi, &pico::Pico];
 
 /// A backend and its arguments.
 pub struct Selected {
@@ -68,7 +69,10 @@ pub fn select(hw: &HardwareArgs) -> anyhow::Result<Selected> {
             let found = discover();
             match found.as_slice() {
                 [one] => one.device.clone(),
-                [] => bail!("no transmitter found: run on a Raspberry Pi (`txengine devices` lists what is found)"),
+                [] => bail!(
+                    "no transmitter found: run on a Raspberry Pi, or connect a Pico with the txengine firmware \
+                     (`txengine devices` lists what is found)"
+                ),
                 many => {
                     let list: Vec<_> = many.iter().map(|f| format!("{} ({})", f.device, f.description)).collect();
                     bail!("several transmitters found, pick one with --device: {}", list.join(", "))

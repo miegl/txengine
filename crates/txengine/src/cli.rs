@@ -15,8 +15,8 @@ use crate::wfm;
 #[command(
     name = "txengine",
     version,
-    about = "FM/RDS transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W)",
-    long_about = "FM/RDS transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W).\n\n\
+    about = "FM/RDS transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB",
+    long_about = "FM/RDS transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB.\n\n\
         Transmitting without a licence is illegal in most countries. Connect the output to a \
         receiver with a shielded cable and attenuator, or use a dummy load, and always low-pass \
         filter the square-wave output before it reaches an antenna."
@@ -78,18 +78,22 @@ pub struct HardwareArgs {
     /// Carrier frequency in MHz.
     #[arg(short, long, value_name = "MHZ")]
     pub freq: f64,
-    /// Transmitter: "pi" (this Raspberry Pi's GPIOs) or "auto": the only
-    /// one found. `txengine devices` lists them.
+    /// Transmitter: "pi" (this Raspberry Pi's GPIOs), "pico" (a Raspberry
+    /// Pi Pico or Pico 2 on USB with the txengine firmware; pico:SERIAL or
+    /// pico:PORT picks one of several), or "auto": the only one found.
+    /// `txengine devices` lists them.
     #[arg(short, long, value_name = "DEVICE", help_heading = "Hardware")]
     pub device: Option<String>,
-    /// Output GPIO (repeat for several pins on the same clock generator).
+    /// Output GPIO (repeat for several pins on the same clock generator)
+    /// [default: 4; Pico: 21].
     #[arg(short, long = "gpio", value_name = "N", help_heading = "Hardware")]
     pub gpio: Vec<u32>,
     /// Carrier synthesis: PLL to modulate (Pi 1-4: a, c, d; Pi 5: audio, video)
     /// or "clkdiv" to modulate the clock divider instead of a PLL.
     #[arg(long, help_heading = "Raspberry Pi")]
     pub pll: Option<String>,
-    /// Output drive strength 0-7 (2-16 mA; the Pi 5 has 4 steps up to 12 mA).
+    /// Output drive strength 0-7 (2-16 mA; the Pi 5 and the Pico have 4
+    /// steps up to 12 mA).
     #[arg(long, default_value_t = 7, value_name = "0-7", help_heading = "Hardware")]
     pub power: u8,
     /// Crystal frequency error to correct: "auto" measures it continuously
@@ -100,6 +104,14 @@ pub struct HardwareArgs {
     /// speed.
     #[arg(long, default_value = "auto", value_parser = parse_ppm, allow_hyphen_values = true, value_name = "auto|PPM|off", help_heading = "Hardware")]
     pub ppm: Ppm,
+    /// Pico: how the carrier is made. "pll": PLL_USB's feedback divider,
+    /// dithered (any of the clock-output GPIOs). "pio": a PIO bit stream at
+    /// 240-264 Mbit/s (the Pico's system clock is raised for it, and its
+    /// core voltage to 1.20 V; any GPIO): less noise next to the carrier,
+    /// but the bit stream puts lines all over the FM band, measured up to
+    /// about -15 dBc (txengine picks the bit rate that keeps them lowest).
+    #[arg(long, value_name = "pll|pio", help_heading = "Raspberry Pi Pico")]
+    pub synthesis: Option<String>,
     /// DMA channel to use [default: a free one].
     #[arg(long, help_heading = "Raspberry Pi")]
     pub dma_channel: Option<usize>,
@@ -109,9 +121,20 @@ pub struct HardwareArgs {
     /// Target sample rate of the output in Hz (the closest exact rate is
     /// used). Default: 250000 on the Pi 5; on the Pi 1-4 the highest multiple
     /// of 38000 the DMA engine sustains on the board (measured at start-up),
-    /// at most 250000: 190000 on the Pi 2, 3 and Zero 2 W.
+    /// at most 250000: 190000 on the Pi 2, 3 and Zero 2 W; 166667 on the
+    /// Pico (about 190000 with --synthesis pio).
     #[arg(long, value_name = "HZ", help_heading = "Hardware")]
     pub sample_rate: Option<f64>,
+    /// Pico: when the feedback divider is written, in system clock cycles
+    /// after the reference edge (for measurements).
+    #[arg(long, hide = true)]
+    pub pico_phase: Option<u8>,
+    /// Pico: PLL reference divider (for measurements).
+    #[arg(long, hide = true, default_value_t = 2)]
+    pub pico_refdiv: u8,
+    /// Pico: sigma-delta update rate in Hz (for measurements).
+    #[arg(long, hide = true)]
+    pub pico_update_rate: Option<f64>,
     /// Output buffer (transmit latency) in milliseconds.
     #[arg(long, default_value_t = 60, value_name = "MS", help_heading = "Hardware")]
     pub buffer_ms: u64,

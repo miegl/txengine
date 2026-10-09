@@ -6,9 +6,11 @@ pub mod error;
 pub mod guardian;
 pub mod mem;
 pub mod mmio;
+pub mod pico;
 pub mod platform;
 pub mod rp1;
 pub mod sys;
+pub mod usbfs;
 
 pub use error::{HalError, Result};
 

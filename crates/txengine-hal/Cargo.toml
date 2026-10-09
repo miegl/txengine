@@ -1,6 +1,6 @@
 [package]
 name = "txengine-hal"
-description = "Raspberry Pi hardware backends for txengine (BCM2835/6/7, BCM2711, BCM2712 + RP1)"
+description = "Hardware backends for txengine (Raspberry Pi BCM2835/6/7, BCM2711, BCM2712 + RP1; Pico over USB)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 txengine-core.workspace = true
+txengine-pico-protocol.workspace = true
 libc.workspace = true
 log.workspace = true
 thiserror.workspace = true

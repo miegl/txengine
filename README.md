@@ -3,7 +3,9 @@
 An FM broadcast transmitter for the Raspberry Pi, written in Rust. It turns a
 GPIO pin into a wide-band FM transmitter with a standards-conformant stereo
 multiplex (ITU-R BS.450) and RDS (EN 50067), on the Raspberry Pi 2, 3, 4, 5 and
-Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
+Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries. A Raspberry
+Pi Pico or Pico 2 with txengine's firmware does the same on USB, for any Linux
+computer.
 
 > **Transmitting without a licence is illegal in most countries.** The output
 > is a square wave rich in harmonics. Connect it to a receiver with a shielded
@@ -28,6 +30,14 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
     removes most of their phase noise from the multiplex band.
   * Pi 5 (RP1): fractional-N modulation of the RP1 audio or video PLL
     (24-bit fraction, < 0.1 Hz steps).
+  * Pico and Pico 2 (RP2040, RP2350) on USB: their PLLs have integer
+    feedback dividers only, so the firmware switches `PLL_USB`'s divider
+    between neighbouring values with a second-order sigma-delta modulator,
+    3 million times a second, by DMA paced by a PIO state machine that is
+    aligned to the crystal. Alternatively (`--synthesis pio`) a PIO state
+    machine puts the carrier out as a bit stream at 240-264 Mbit/s: less
+    noise next to the carrier, but lines all over the FM band. txengine
+    renders the samples on the computer.
 * **Crystal error correction**: the board's crystal error is measured
   continuously against the system clock (NTP, or GPS through chrony) and
   corrected in the carrier frequency, the subcarriers and the playback
@@ -38,7 +48,8 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
   15 kHz programme low-pass, look-ahead limiter that bounds the true
   (inter-sample) composite peak, 19 kHz pilot, DSB-SC stereo subcarrier,
   RDS, and pre-compensation of the output stage's measured frequency
-  response (sample-and-hold and, on the Pi 2 and Zero 2 W, the PLL loop).
+  response (sample-and-hold, interpolation and, on the Pi 2, the Zero 2 W
+  and the Pico, the PLL loop).
 * **Levels**: the drive is lowered by the rise of the multiplex power the
   pre-emphasis causes for pink noise (4.3 dB at 50 µs), so a programme keeps
   about the MPX power (ITU-R BS.412) it has without pre-emphasis; the status
@@ -72,9 +83,13 @@ Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries.
 | Raspberry Pi 2 v1.2, 3, 3+ | BCM2837 | supported, not yet tested on hardware |
 | Raspberry Pi 4, 400 | BCM2711 | supported, not yet tested on hardware |
 | Raspberry Pi 1, Zero, Zero W | BCM2835 (ARMv6) | not supported |
+| Raspberry Pi Pico (on USB) | RP2040 | tested over the air |
+| Raspberry Pi Pico 2 (on USB) | RP2350A | tested over the air |
 
-The default output is GPIO4 (pin 7). `txengine probe -f 87.6` shows what will
-be used on a given board without transmitting.
+The default output is GPIO4 (pin 7); on the Pico GP21 (pin 27, ground on
+pin 28), the only clock output on its header. `txengine devices` lists the
+transmitters found, and `txengine probe -f 87.6` shows what will be used,
+without transmitting.
 
 ## Building
 
@@ -102,6 +117,26 @@ kernel driver owns, even to root. On those kernels add `iomem=relaxed` to the
 kernel command line (on NixOS: `boot.kernelParams = [ "iomem=relaxed" ];`).
 `txengine probe` reports when it is missing.
 
+### Pico firmware
+
+The firmware (`firmware/pico`, a cargo workspace of its own) is built for
+the Pico or the Pico 2 and loaded with
+[picotool](https://github.com/raspberrypi/picotool):
+
+```sh
+rustup target add thumbv6m-none-eabi thumbv8m.main-none-eabihf
+cd firmware/pico
+cargo rp2040 && picotool load -x -t elf target/thumbv6m-none-eabi/release/txengine-pico         # Pico
+cargo rp2350 && picotool load -x -t elf target/thumbv8m.main-none-eabihf/release/txengine-pico  # Pico 2
+```
+
+The first time, hold the BOOTSEL button while connecting the Pico; after
+that `picotool reboot -u -f` (with `--ser SERIAL` if several are connected)
+puts it back into its bootloader, and a firmware fault does so by itself.
+The firmware uses the Pico SDK's USB IDs (2e8a:000a and 2e8a:0009), to which
+picotool's udev rules already give the logged-in user access: txengine needs
+no root for a Pico.
+
 ## Usage
 
 Commands are grouped by transmission mode: `txengine wfm tx` transmits wide-band
@@ -124,7 +159,15 @@ sudo txengine wfm tx -f 87.6 --ps STATION --af 87.6 --af 99.5 --pty "Pop music"
 sudo txengine wfm tx -f 87.6 -a music.mp3 --ctl /tmp/rds &
 echo "RT Live from the studio" > /tmp/rds
 echo "PS ONAIR" > /tmp/rds
+
+# Through a Pico on USB, from any Linux computer
+txengine devices
+txengine wfm tx -f 87.6 -d pico:5054316550E3291C -a music.flac
 ```
+
+`-d`/`--device` picks the transmitter: `pi` (the Raspberry Pi txengine runs
+on), `pico` (the only Pico connected), `pico:SERIAL` or `pico:PORT` (its USB
+port, such as `3-1.2`). Without it, txengine uses the only one it finds.
 
 ### Control commands
 
@@ -331,6 +374,81 @@ Hardware-specific findings that txengine handles:
 * A weak power supply throttles the CPU; txengine reports the firmware's
   under-voltage and throttling flags at start-up (`txengine probe` shows
   them too).
+
+### Raspberry Pi Pico and Pico 2
+
+Measured through a coaxial cable with the USRP B210 at 87.6 MHz, 12 mA
+drive. PLL method: 6 MHz reference (crystal / 2), 3 MHz updates, 166.7 kS/s
+(18 updates per sample). PIO method: 249.6 Mbit/s, 190.2 kS/s (41 words per
+sample). Both interpolate linearly between samples.
+
+| | Pico, PLL | Pico, PIO | Pico 2, PLL | Pico 2, PIO |
+|---|---|---|---|---|
+| Pilot | 9.0 % | 9.0 % | 9.0 % | 9.0 % |
+| 38 kHz carrier residual | 0.004 % | 0.008 % | 0.018 % | 0.021 % |
+| Stereo separation (left only, 1 kHz) | 72–89 dB | 72–73 dB | 62–66 dB | 61–73 dB |
+| RDS block errors (stereo music) | 0 % | 0 % | 0 % | 0 % |
+| FM noise of an unmodulated carrier, audio / stereo band (rms re 75 kHz peak, unweighted, no de-emphasis) | −69 / −49 dB | −72 / −55 dB | −59 / −48 dB | −71 / −53 dB |
+| Phase noise at 100 / 300 / 600 kHz / 1 MHz (dBc/Hz) | −91 / −78 / −77 / −99 | −95 / −86 / −95 / −104 | −90 / −84 / −78 / −99 | −93 / −90 / −94 / −99 |
+| Strongest line more than 1 MHz from the carrier (unmodulated, 82–112 MHz) | −41 dBc (±1.2 MHz) | −18 dBc (97.2 MHz) | −40 dBc (±1.2 MHz) | −15 dBc (97.2 MHz) |
+
+The crystal is corrected as on a Raspberry Pi (`--ppm auto`; the Pico's is
++11 ppm, and with the correction the carrier stays within 10 Hz).
+
+**PLL method.** What the RP2's PLLs (VCO 750–1600 MHz, integer feedback
+divider) require:
+
+* **A divider value must stay for at least four crystal cycles.** With a
+  new one every two (6 MHz) or three (4 MHz) cycles the carrier dissolves
+  into noise at any write timing, on both chips; every four (3 MHz) it is
+  clean. The value apparently crosses into the PLL's reference clock domain
+  through a synchroniser that needs that long.
+* **Writes must avoid a narrow window of the reference cycle**, about three
+  system clock cycles (21 ns at 144 MHz) wide: a write there smears the
+  carrier, its neighbours degrade it. The firmware therefore synchronises its
+  PIO state machine to a crystal edge once at start (the crystal clock is put
+  on GPIO 25, the LED, for that moment) and writes in the middle of the
+  good range. The phase was measured on both chips: 1–4 cycles after the
+  edge is bad, 5–11 and 0 are clean.
+* **A lower comparison frequency is quieter.** With the crystal divided by
+  two (6 MHz) a divider step moves the carrier half as far as with 12 MHz,
+  and the modulator's noise next to the carrier drops by 7–12 dB; every FM
+  channel can be planned with it.
+* **The PLL's loop is wide**: it hardly filters the modulator's noise,
+  which spreads up to ±1.5 MHz around the carrier and peaks near 300 kHz,
+  where the loop amplifies it. On an exact raster frequency it also forms
+  tones, e.g. at multiples of 600 kHz at 87.6 MHz (about −32 dBc on an
+  unmodulated carrier; with modulation they become noise). Emissions into
+  neighbouring channels are much higher than from a Raspberry Pi. A
+  one-bit second-order modulator, which moves the divider by one step at
+  most, and a MASH 1-1-1 were both worse.
+* **The loop lifts the multiplex band** slightly, as f²: +0.12 dB at 38 kHz
+  on the RP2040, +0.15 dB on the RP2350, half that with a 12 MHz reference,
+  the same over the band. Uncorrected that limits the separation to
+  41–44 dB; txengine pre-compensates it.
+* **RP2350: the DMA may not access `PLL_USB`** until ACCESSCTRL allows it;
+  the firmware does.
+
+**PIO method** (`--synthesis pio`). The system clock runs from `PLL_USB` at
+the bit rate, 240–264 MHz, while it transmits, at 1.20 V core voltage
+(both are restored afterwards); USB stays on `PLL_SYS`. Each bit is the
+square wave's sign at that instant, so the carrier has no dithering noise
+and the PLL's loop is out of the modulation path (the response is exact).
+But a square wave whose edges are rounded to 4 ns bits contains its
+harmonics folded back by multiples of the bit rate, and some land in the
+FM band: txengine chooses, per carrier, the bit rate whose strongest such
+alias is weakest (about −25 dBc at worst for an ideal bit stream). The
+pin's output measures 6–17 dB stronger on many of these lines, up to about
+−15 dBc, on both chips, at 4 and 12 mA and at 240 as well as 249.6 Mbit/s;
+the cause is not known yet. The method is therefore only for a dummy load
+or a cable to a receiver. On the RP2350 the double-rate HSTX output could
+make the same stream without the higher clock and voltage (not done).
+
+**Safety.** If txengine dies, the firmware switches the carrier off after
+one second without samples. A watchdog (one second) reboots a hung
+firmware, which also stops the carrier; `txengine probe` then shows where
+it had stopped. Panics and hard faults reboot into the USB bootloader.
+Over USB a status request takes 0.1–0.15 ms.
 
 ## Documentation
 

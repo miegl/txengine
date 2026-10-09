@@ -6,6 +6,8 @@ use clap::{Args, Subcommand, ValueEnum};
 
 use crate::cli::{Render, Tx};
 
+// Parsed once at start-up: the size of the variants does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Transmit.

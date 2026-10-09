@@ -71,7 +71,8 @@ pub fn make_realtime(priority: i32) {
 
 /// Exclusive instance lock: two transmitters fighting over the same PLL and
 /// DMA tick would corrupt each other's output.
-/// `name` tells transmitters apart (`txengine` for the Pi's own hardware).
+/// `name` tells transmitters apart (`txengine` for the Pi's own hardware,
+/// one per Pico).
 pub fn instance_lock(name: &str) -> anyhow::Result<OwnedFd> {
     use std::ffi::CString;
     use std::os::fd::FromRawFd;

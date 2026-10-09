@@ -617,7 +617,12 @@ dependencies = [
  "log",
  "thiserror",
  "txengine-core",
+ "txengine-pico-protocol",
 ]
+
+[[package]]
+name = "txengine-pico-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "txengine-rds"

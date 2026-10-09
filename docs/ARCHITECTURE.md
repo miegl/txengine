@@ -29,8 +29,10 @@ transmission mode or a hardware platform means implementing one side.
 | `txengine-rds` | EN 50067: group coding and CRC, character set, scheduler/encoder, the physical layer (`RdsModulator`), and an independent decoder used by tests and `analyze`. |
 | `txengine-fm` | The wide-band FM mode: `MpxGenerator` (stereo multiplex) and `WfmModulator` (the `Modulator` implementation, control commands). |
 | `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input. |
-| `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backend, the RP1 (Pi 5) backend, the shutdown guardian. |
-| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, and per mode its options, set-up and tools (WFM: programme set-up, `analyze`). |
+| `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backend, the RP1 (Pi 5) backend, the shutdown guardian; usbfs (USB without libusb) and the Pico backend (planning, `RfSink`). |
+| `txengine-pico-protocol` | The USB protocol between txengine and the Pico firmware, and the sigma-delta arithmetic both sides share. `no_std`, no dependencies. |
+| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, `devices`, the hardware backends and their selection (`hw/`), and per mode its options, set-up and tools (WFM: programme set-up, `analyze`). |
+| `firmware/pico` | The RP2040/RP2350 firmware (embassy-rp), a cargo workspace of its own for the bare-metal targets. |
 
 ## The two interfaces
 
@@ -146,7 +148,15 @@ level is normalised to the all-zero reference sine (EN 50067 1.3).
 
 ## Hardware backends
 
-Both backends share the same structure: plan the clocks, snapshot every
+`--device BACKEND[:ARGS]` picks one (`txengine/src/hw/`): every backend
+implements `hw::Backend` (its name, the devices of its kind present now,
+a check of the options that apply to it, the name of its instance lock,
+`open` returning an `RfSink`, and `probe`) and is listed in `hw::BACKENDS`.
+Without `--device`, txengine uses the only device any backend finds.
+Options that only some backends use stay flags and are rejected by the
+others (`--pll` on a Pico, for example).
+
+The two Raspberry Pi backends share the same structure: plan the clocks, snapshot every
 register they will touch, start a **guardian** (a process forked before any
 thread exists; when the transmitter's pipe closes, for whatever reason
 including `kill -9`, it stops the DMA and restores the snapshot), then run a
@@ -271,12 +281,83 @@ divider register, paced by hardware.
 * Memory comes from the VideoCore mailbox (uncached `DIRECT` alias), freed
   by the guardian if the process dies.
 
+### Raspberry Pi Pico and Pico 2 (USB)
+
+The Pico is a front end: txengine renders the samples on the computer, the
+firmware turns them into a modulated carrier.
+
+* **Link** (`txengine-pico-protocol`): one vendor interface with a bulk OUT
+  endpoint for the samples (`i16` in units of the plan's resolution, about
+  3 Hz) and control requests for the rest: `Info`, `Configure` or
+  `ConfigurePio` (the whole clock plan of either method, computed by
+  txengine: `txengine-hal/src/pico/plan.rs`),
+  `Start`, `Stop`, `Status` (the count of samples whose emission has
+  started, underruns, faults), `Retune` (crystal correction) and `Bootsel`.
+  A second interface is the Pico SDK's reset interface, for `picotool reboot
+  -f`. On the host, `usbfs.rs` talks to `/dev/bus/usb` directly
+  (asynchronous URBs for the samples, synchronous control transfers).
+* **Carrier (PLL method)**: `PLL_USB` (the system and USB clocks both run
+  from `PLL_SYS` at 144 MHz, USB at 144 / 3), its post dividers and
+  `clk_gpout0` onto GP21. The PLL compares at the crystal / 2 (6 MHz: a
+  divider step moves the carrier half as far as at 12 MHz). The divider from
+  the VCO is chosen as large as the VCO range allows (the smallest steps),
+  14–18 in the FM band.
+* **Modulation (PLL method)**: the feedback divider is integer only, so a
+  MASH 1-1 (`sigma_delta::Mash11`, input in 30-bit fixed point over 0–2
+  steps) dithers it over `base … base + 4` at 3 MHz, interpolating linearly
+  between the samples (the samples last 18 updates, 166.7 kS/s). The sink
+  reports the extra `sinc` of the interpolation and the PLL loop's measured
+  lift of the multiplex band (as f², per chip and reference divider) in
+  `SinkInfo::response_db`. An odd input keeps a steady carrier from
+  repeating a short pattern. Core 1 runs the modulator alone, in assembly
+  from RAM (15 cycles per update on the Cortex-M0+, 11 on the M33, checked
+  against the Rust version at boot), and writes 5-bit codes, six to a word,
+  into a 4 KB ring. DMA feeds them to a PIO state machine, which prepends
+  `FBDIV[11:5]` and pushes the 12-bit value; a second DMA channel writes it
+  to `FBDIV_INT`. The state machine paces the writes (one every four crystal
+  cycles, from `clk_sys`, which is locked to the same crystal), and once at
+  start it waits for an edge of the crystal clock (put on GPIO 25 for that
+  moment) so that every write lands at the same point of the reference
+  cycle. Both rules, the four cycles and the write phase, are measured
+  requirements of the PLL (README). On the RP2040 the DMA channels are
+  ping-pong pairs (transfer counts run out); on the RP2350 they run in
+  `ENDLESS` mode, and ACCESSCTRL must let the DMA at `PLL_USB`.
+* **PIO method** (`--synthesis pio`, `PioConfig`, firmware `direct.rs`): the
+  system clock switches to `PLL_USB` at the bit rate B (240–264 MHz, chosen
+  per carrier by `plan::pio_plan` to keep the bit stream's aliases out of
+  the FM band), with the core voltage at 1.20 V and the flash interface's
+  divider scaled up to keep the flash clock where boot put it (on the
+  RP2040, whose SSI must be disabled for that, core 0 makes the change from
+  RAM while core 1 waits). Core 1 looks up one 32-bit word per 32 bits in a
+  table of 4096 square-wave patterns indexed by the phase at the word's
+  start, advances the phase by the sample's increment (interpolated per
+  word), and DMA feeds a 32 KB ring of words to a state machine that runs
+  `out pins, 1` every cycle. The M0+ word loop is assembly (11 of the 32
+  cycles a word lasts; the compiled one took about 25, too many with the
+  per-sample work on top).
+  A starved state machine is `Fault::Stall`, a ring overtaken by the DMA
+  `Fault::Late`. Stopping restores the clock, divider and voltage.
+* **Buffering**: core 0 (embassy, USB) puts the samples into a 32768-sample
+  ring; core 1 takes one per sample period and counts underruns (a missing
+  sample holds the carrier at its centre). Without samples for one second
+  the firmware assumes the host is gone and switches the carrier off.
+* **Faults**: core 0 feeds a one-second watchdog, so a hung firmware
+  reboots (and the carrier stops); the firmware leaves breadcrumbs in a
+  watchdog scratch register, reported after such a reset in `Info` (shown
+  by `txengine probe`). Panics and hard faults reboot into the USB
+  bootloader.
+* **Timing**: `poll` reads the status with one control transfer (0.1–0.15
+  ms), which `ClockDiscipline` brackets like a register read, so the crystal
+  error is measured and corrected as on the Raspberry Pi
+  (`set_clock_error_ppm` sends a new centre with `Retune`).
+
 ### Adding a hardware target
 
 Implement `RfSink` in `txengine-hal` (plan the clocks, provide DMA memory,
 build a paced ring, implement `poll`/`write`, fill `SinkInfo` with the exact
-rate and the measured response), add detection in `platform.rs` and a
-branch in `txengine/src/hw.rs`. Measure the modulation response with
+rate and the measured response) and a `Backend` in `txengine/src/hw/`
+(discovery, the options it accepts, opening the sink), and list it in
+`hw::BACKENDS`. Measure the modulation response with
 `txengine tone` and an SDR, and record it in `SinkInfo::response_db` if it
 deviates from a pure sample-and-hold. Plan the clocks from the nominal
 crystal frequency, leave room for a correction of ±`MAX_CLOCK_ERROR_PPM`,

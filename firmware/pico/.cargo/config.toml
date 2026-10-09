@@ -1,0 +1,12 @@
+# Build and flash with picotool (the Pico must be in BOOTSEL mode, or
+# running this firmware: `picotool reboot -f -u` puts it there):
+#
+#   cargo rp2040 && picotool load -x -t elf target/thumbv6m-none-eabi/release/txengine-pico
+#   cargo rp2350 && picotool load -x -t elf target/thumbv8m.main-none-eabihf/release/txengine-pico
+
+[alias]
+rp2040 = "build --release --target thumbv6m-none-eabi --features rp2040"
+rp2350 = "build --release --target thumbv8m.main-none-eabihf --features rp2350"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = ["-C", "target-cpu=cortex-m33"]
