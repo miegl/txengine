@@ -39,13 +39,15 @@ pub fn transmit(hw: &HardwareArgs, ctl: &ControlArgs, mode: &dyn Mode) -> anyhow
     m.configure(sink.info()).map_err(anyhow::Error::msg)?;
     let mut clock = clock::ClockDiscipline::new(hw.ppm, Box::new(clock::SystemClock::default()));
 
+    // The control channels' files live as long as the transmission.
+    let mut _endpoints = Vec::new();
     let control = if ctl.ctl.is_some() || ctl.ctl_socket.is_some() {
         let (tx, rx) = control::channel_pair();
         if let Some(p) = &ctl.ctl {
-            control::spawn_fifo(p, tx.clone())?;
+            _endpoints.push(control::spawn_fifo(p, tx.clone())?);
         }
         if let Some(p) = &ctl.ctl_socket {
-            control::spawn_socket(p, tx)?;
+            _endpoints.push(control::spawn_socket(p, tx)?);
         }
         Some(rx)
     } else {

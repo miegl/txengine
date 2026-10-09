@@ -172,7 +172,8 @@ port, such as `3-1.2`). Without it, txengine uses the only one it finds.
 ### Control commands
 
 One command per line on `--ctl` (FIFO) or `--ctl-socket` (Unix socket, which
-answers with `OK ...` or `ERR ...`):
+answers with `OK ...` or `ERR ...`). txengine removes the socket, and a FIFO
+it created, when it stops:
 
 | Command | Effect |
 |---|---|

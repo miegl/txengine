@@ -43,10 +43,23 @@ fn read_line(r: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<Option<
     Ok(Some(String::from_utf8_lossy(buf).trim_end_matches(['\n', '\r']).to_string()))
 }
 
+/// A control channel's file, removed when the transmission ends if
+/// txengine created it.
+#[derive(Debug)]
+pub struct Endpoint(Option<PathBuf>);
+
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Read commands from a FIFO, creating it if needed.
-pub fn spawn_fifo(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<()> {
-    match std::fs::metadata(path) {
-        Ok(m) if m.file_type().is_fifo() => {}
+pub fn spawn_fifo(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<Endpoint> {
+    let endpoint = match std::fs::metadata(path) {
+        Ok(m) if m.file_type().is_fifo() => Endpoint(None),
         Ok(_) => bail!("{} exists and is not a named pipe", path.display()),
         Err(_) => {
             let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?;
@@ -55,8 +68,9 @@ pub fn spawn_fifo(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<()> {
                 bail!("cannot create FIFO {}: {}", path.display(), std::io::Error::last_os_error());
             }
             info!("created control FIFO {}", path.display());
+            Endpoint(Some(path.to_path_buf()))
         }
-    }
+    };
     // Opening read-write keeps a writer attached, so the reader never sees
     // EOF when a client (e.g. `echo ... > fifo`) closes its end.
     let f = std::fs::OpenOptions::new()
@@ -85,12 +99,12 @@ pub fn spawn_fifo(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<()> {
         }
     })?;
     info!("reading commands from {}", path.display());
-    Ok(())
+    Ok(endpoint)
 }
 
 /// Accept connections on a Unix socket; every command gets one reply line
 /// (`OK ...` or `ERR ...`).
-pub fn spawn_socket(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<()> {
+pub fn spawn_socket(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<Endpoint> {
     if let Ok(m) = std::fs::symlink_metadata(path) {
         if m.file_type().is_socket() {
             std::fs::remove_file(path).ok();
@@ -99,7 +113,7 @@ pub fn spawn_socket(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<()> {
         }
     }
     let listener = UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
-    let p: PathBuf = path.to_path_buf();
+    let endpoint = Endpoint(Some(path.to_path_buf()));
     std::thread::Builder::new().name("txengine-sock".into()).spawn(move || {
         for conn in listener.incoming() {
             let Ok(stream) = conn else { continue };
@@ -123,10 +137,9 @@ pub fn spawn_socket(path: &Path, tx: Sender<ControlMsg>) -> anyhow::Result<()> {
                 }
             });
         }
-        let _ = std::fs::remove_file(&p);
     })?;
     info!("control socket listening on {}", path.display());
-    Ok(())
+    Ok(endpoint)
 }
 
 /// Control channel endpoints for the engine.
