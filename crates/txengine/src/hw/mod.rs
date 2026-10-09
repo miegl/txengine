@@ -11,6 +11,7 @@ mod pi;
 mod pico;
 
 use anyhow::bail;
+use log::info;
 use txengine_core::RfSink;
 
 use crate::cli::HardwareArgs;
@@ -103,6 +104,7 @@ impl Selected {
     }
 
     pub fn open(&self, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
+        info!("txengine {}", crate::VERSION);
         self.backend.open(&self.args, hw, max_offset_hz)
     }
 

@@ -18,6 +18,9 @@ use log::{error, info};
 
 use cli::{Cli, Command};
 
+/// This build's version: `git describe` of its source tree (build.rs).
+pub const VERSION: &str = env!("TXENGINE_VERSION");
+
 fn main() {
     let cli = Cli::parse();
     logger::init(cli.verbose, cli.quiet);

@@ -99,7 +99,7 @@ impl Control {
                 REBOOT_BOOTSEL.store(true, Ordering::Release);
                 true
             }
-            Request::Info | Request::Status => false,
+            Request::Info | Request::Status | Request::Version => false,
         }
     }
 
@@ -136,6 +136,7 @@ impl Control {
                 status.encode(b);
                 Some(&self.buf[..Status::LEN])
             }
+            Request::Version => Some(crate::VERSION.as_bytes()),
             _ => None,
         }
     }

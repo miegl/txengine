@@ -56,6 +56,8 @@ pub struct Pico {
     interface: u16,
     pub usb: DeviceInfo,
     pub info: Info,
+    /// The firmware's version.
+    pub version: String,
 }
 
 fn io_err(what: &str, e: io::Error) -> HalError {
@@ -82,6 +84,7 @@ impl Pico {
                 pio_max_hz: 0,
                 watchdog_note: 0,
             },
+            version: String::new(),
         };
         let mut b = [0u8; Info::LEN];
         let n = pico.request_in(Request::Info, &mut b).map_err(|e| io_err("reading its description", e))?;
@@ -93,6 +96,9 @@ impl Pico {
                 proto::PROTOCOL_VERSION
             )));
         }
+        let mut b = [0u8; proto::VERSION_MAX];
+        let n = pico.request_in(Request::Version, &mut b).map_err(|e| io_err("reading its version", e))?;
+        pico.version = String::from_utf8_lossy(&b[..n]).into_owned();
         Ok(pico)
     }
 
@@ -172,11 +178,12 @@ impl Pico {
 
     pub fn describe(&self) -> String {
         format!(
-            "Raspberry Pi {} ({}, serial {}, port {})",
+            "Raspberry Pi {} ({}, serial {}, port {}, firmware {})",
             self.info.chip.board(),
             self.info.chip.name(),
             self.usb.serial,
-            self.usb.port()
+            self.usb.port(),
+            self.version
         )
     }
 }

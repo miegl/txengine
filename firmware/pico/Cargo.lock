@@ -407,6 +407,7 @@ dependencies = [
  "pio",
  "rand_core 0.6.4",
  "rand_core 0.9.5",
+ "rp-binary-info",
  "rp-pac",
  "rp2040-boot2",
  "sha2-const-stable",
@@ -1097,6 +1098,12 @@ name = "rgb"
 version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+
+[[package]]
+name = "rp-binary-info"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f582261945fa215d40e2988b4df595d11c0908c0fff97a0fe23df766d117b790"
 
 [[package]]
 name = "rp-pac"

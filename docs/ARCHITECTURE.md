@@ -288,7 +288,9 @@ firmware turns them into a modulated carrier.
 
 * **Link** (`txengine-pico-protocol`): one vendor interface with a bulk OUT
   endpoint for the samples (`i16` in units of the plan's resolution, about
-  3 Hz) and control requests for the rest: `Info`, `Configure` or
+  3 Hz) and control requests for the rest: `Info` (whose protocol version
+  must match txengine's), `Version` (the firmware's `git describe`),
+  `Configure` or
   `ConfigurePio` (the whole clock plan of either method, computed by
   txengine: `txengine-hal/src/pico/plan.rs`),
   `Start`, `Stop`, `Status` (the count of samples whose emission has

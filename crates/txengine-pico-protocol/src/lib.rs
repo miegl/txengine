@@ -30,7 +30,10 @@
 pub mod sigma_delta;
 
 /// Version of this protocol; [`Info::protocol`] must match.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
+
+/// Longest firmware version string ([`Request::Version`]), in bytes.
+pub const VERSION_MAX: usize = 64;
 
 /// USB vendor ID (Raspberry Pi).
 pub const VID: u16 = 0x2e8a;
@@ -85,6 +88,9 @@ pub enum Request {
     Bootsel = 0x07,
     /// OUT: [`PioConfig`]. Only while idle.
     ConfigurePio = 0x08,
+    /// IN: the firmware's version, UTF-8, at most [`VERSION_MAX`] bytes:
+    /// `git describe` of its source tree, like txengine's.
+    Version = 0x09,
 }
 
 impl Request {
@@ -98,6 +104,7 @@ impl Request {
             0x06 => Request::Retune,
             0x07 => Request::Bootsel,
             0x08 => Request::ConfigurePio,
+            0x09 => Request::Version,
             _ => return None,
         })
     }

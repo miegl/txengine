@@ -16,7 +16,7 @@ rp2350 = ["embassy-rp/rp235xa", "embassy-rp/imagedef-secure-exe"]
 
 [dependencies]
 txengine-pico-protocol = { path = "../../crates/txengine-pico-protocol" }
-embassy-rp = { version = "0.10", features = ["unstable-pac", "time-driver", "critical-section-impl"] }
+embassy-rp = { version = "0.10", features = ["unstable-pac", "time-driver", "critical-section-impl", "binary-info"] }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
 embassy-usb = { version = "0.6", default-features = false }
 embassy-time = "0.5"

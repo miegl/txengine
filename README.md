@@ -117,6 +117,14 @@ kernel driver owns, even to root. On those kernels add `iomem=relaxed` to the
 kernel command line (on NixOS: `boot.kernelParams = [ "iomem=relaxed" ];`).
 `txengine probe` reports when it is missing.
 
+`txengine -V` prints the version: `git describe --tags --always --dirty` of
+the source tree it was built from, that is the latest tag, the number of
+commits since it and the commit (before the first tag the commit alone),
+with `-dirty` for uncommitted changes. Without `-dirty`, git accepts it as
+a revision. Transmissions log it at start-up. A build without git (a
+source archive, a sandboxed package build) can be given it in
+`TXENGINE_VERSION`; otherwise it is the version in Cargo.toml.
+
 ### Pico firmware
 
 The firmware (`firmware/pico`, a cargo workspace of its own) is built for
@@ -136,6 +144,11 @@ puts it back into its bootloader, and a firmware fault does so by itself.
 The firmware uses the Pico SDK's USB IDs (2e8a:000a and 2e8a:0009), to which
 picotool's udev rules already give the logged-in user access: txengine needs
 no root for a Pico.
+
+The firmware's version has the same form as txengine's. `txengine probe`
+shows it, and `picotool info` reads it from the board even in its
+bootloader. A txengine refuses firmware that speaks another version of the
+USB protocol and asks for an update.
 
 ## Usage
 

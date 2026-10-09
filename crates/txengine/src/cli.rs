@@ -14,7 +14,7 @@ use crate::wfm;
 #[derive(Debug, Parser)]
 #[command(
     name = "txengine",
-    version,
+    version = crate::VERSION,
     about = "FM/RDS transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB",
     long_about = "FM/RDS transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB.\n\n\
         Transmitting without a licence is illegal in most countries. Connect the output to a \

@@ -36,6 +36,22 @@ pub const WATCHDOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::fro
 /// The breadcrumb left in watchdog scratch 0 before the last watchdog reset.
 pub static WATCHDOG_NOTE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// The firmware's version: `git describe` of its source tree (build.rs).
+pub const VERSION: &str = env!("TXENGINE_VERSION");
+const _: () = assert!(VERSION.len() <= txengine_pico_protocol::VERSION_MAX);
+
+/// What `picotool info` shows about the firmware, also in BOOTSEL mode.
+#[unsafe(link_section = ".bi_entries")]
+#[used]
+static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 3] = {
+    use embassy_rp::binary_info::{self as bi, consts};
+    [
+        bi::rp_cargo_bin_name!(),
+        bi::env!(consts::TAG_RASPBERRY_PI, consts::ID_RP_PROGRAM_VERSION_STRING, "TXENGINE_VERSION"),
+        bi::rp_program_description!(c"txengine RF front end: an FM transmitter on USB"),
+    ]
+};
+
 fn clock_config() -> ClockConfig {
     let mut c = ClockConfig::crystal(rf::XOSC_HZ);
     let xosc = c.xosc.as_mut().unwrap();
