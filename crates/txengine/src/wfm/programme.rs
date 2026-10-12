@@ -1,18 +1,15 @@
 //! Building the WFM modulator from command line options.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
 use anyhow::{Context, bail};
-use txengine_audio::{AudioInput, AudioOptions, EndOfInput, InputSpec};
 use txengine_core::Modulator;
-use txengine_fm::{MpxConfig, Programme, StereoMode, WfmModulator};
+use txengine_fm::{MpxConfig, StereoMode, WfmModulator};
 use txengine_rds::encoder::{af_code, encode_rt, encode8};
 use txengine_rds::{DecoderInfo, RdsParams};
 
 use super::MAX_OFFSET_HZ;
-use super::args::{OnEnd, StereoArg, WfmArgs};
+use super::args::{StereoArg, WfmArgs};
 use crate::mode::Mode;
+use crate::programme;
 
 fn flag(v: u8, name: &str) -> anyhow::Result<bool> {
     match v {
@@ -127,43 +124,6 @@ fn rds_params(p: &WfmArgs) -> anyhow::Result<RdsParams> {
     })
 }
 
-fn end_policy(p: &WfmArgs, stdin: bool, realtime: bool) -> EndOfInput {
-    if let Some(e) = p.on_end {
-        return match e {
-            OnEnd::Repeat => EndOfInput::Repeat,
-            OnEnd::Wait => EndOfInput::Wait,
-            OnEnd::Stop => EndOfInput::Stop,
-        };
-    }
-    // A rendered file ends with the input.
-    if !realtime {
-        EndOfInput::Stop
-    } else if stdin {
-        EndOfInput::Wait
-    } else {
-        EndOfInput::Repeat
-    }
-}
-
-/// Open the programme input at the modulator's audio rate. `realtime`:
-/// for a transmitter, whose crystal error is corrected while running.
-fn open_programme(p: &WfmArgs, audio_rate: f64, realtime: bool) -> anyhow::Result<Programme> {
-    let (spec, stdin) = match (&p.audio, p.tone) {
-        (_, Some(f)) => (InputSpec::Tone { freq: f, amplitude: 0.5, stereo: false }, false),
-        (None, None) => return Ok(Programme::None),
-        (Some(a), None) if a == "-" => match (p.raw_rate, p.raw_channels) {
-            (Some(rate), Some(channels)) => (InputSpec::RawStdin { rate, channels }, true),
-            _ => (InputSpec::Stdin, true),
-        },
-        (Some(a), None) => (InputSpec::File(PathBuf::from(a)), false),
-    };
-    let end = end_policy(p, stdin, realtime);
-    let opts =
-        AudioOptions { end, buffer: Duration::from_millis(500), adjustable_rate: realtime, ..Default::default() };
-    let input = AudioInput::open(&spec, audio_rate, &opts)?;
-    Ok(Programme::Audio(input, end))
-}
-
 impl Mode for WfmArgs {
     fn max_offset_hz(&self) -> f64 {
         MAX_OFFSET_HZ
@@ -183,7 +143,7 @@ impl Mode for WfmArgs {
     fn modulator(&self, sample_rate: f64, realtime: bool) -> anyhow::Result<Box<dyn Modulator>> {
         let cfg = mpx_config(self)?;
         let rds = rds_params(self)?;
-        let programme = open_programme(self, WfmModulator::audio_rate_for(sample_rate), realtime)?;
+        let programme = programme::open(&self.programme, WfmModulator::audio_rate_for(sample_rate), realtime)?;
         let mut m = WfmModulator::new(cfg, programme, rds, self.rds != 0).map_err(anyhow::Error::msg)?;
         m.set_local_offset_fn(Box::new(crate::rt::local_offset));
         Ok(Box::new(m))

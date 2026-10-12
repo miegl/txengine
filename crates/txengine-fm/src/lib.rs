@@ -3,18 +3,12 @@
 pub mod mpx;
 
 use log::info;
-use txengine_audio::{AudioInput, EndOfInput};
+use txengine_audio::{EndOfInput, NoAudio, Programme};
 use txengine_core::{CommandError, CommandOutput, Modulator, ModulatorStatus, RenderContext, SampleFormat, SinkInfo};
 use txengine_rds::encoder::{LocalOffsetFn, af_code, encode_rt, encode8};
 use txengine_rds::{RdsEncoder, RdsParams};
 
-pub use mpx::{MpxConfig, MpxGenerator, MpxStats, NoAudio, StereoMode};
-
-/// Programme audio for the modulator.
-pub enum Programme {
-    Audio(AudioInput, EndOfInput),
-    None,
-}
+pub use mpx::{MpxConfig, MpxGenerator, MpxStats, StereoMode};
 
 /// The wide FM modulator.
 pub struct WfmModulator {

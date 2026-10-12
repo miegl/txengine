@@ -40,6 +40,7 @@
 //! positive-going pilot zero crossing, `sin 2φ` crosses zero with a positive
 //! slope there too, as BS.450 §2.2.2.5 requires.
 
+use txengine_audio::AudioFeed;
 use txengine_dsp::{
     FirDesign, LinearPhaseFir, PhaseAccumulator, PolyphaseInterpolator, Preemphasis, PreemphasisLimiter, SineTable,
 };
@@ -129,39 +130,6 @@ pub struct MpxStats {
     pub clipped: u64,
     /// Audio frames that had to be substituted with silence since start.
     pub audio_underruns: u64,
-}
-
-/// Audio supplier for the generator (non-blocking).
-pub trait AudioFeed {
-    /// Fill `out` with as many frames as are available; return the count.
-    fn read(&mut self, out: &mut [[f32; 2]]) -> usize;
-    /// The input has ended for good (missing frames are then not underruns).
-    fn ended(&self) -> bool {
-        false
-    }
-}
-
-impl AudioFeed for txengine_audio::AudioInput {
-    fn read(&mut self, out: &mut [[f32; 2]]) -> usize {
-        txengine_audio::AudioInput::read(self, out)
-    }
-    fn ended(&self) -> bool {
-        self.finished()
-    }
-}
-
-/// Silence.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoAudio;
-
-impl AudioFeed for NoAudio {
-    fn read(&mut self, out: &mut [[f32; 2]]) -> usize {
-        out.fill([0.0; 2]);
-        out.len()
-    }
-    fn ended(&self) -> bool {
-        true
-    }
 }
 
 /// Multiplex power over the last 60 s (ITU-R BS.412), kept in buckets of

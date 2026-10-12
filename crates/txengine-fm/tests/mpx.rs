@@ -1,7 +1,8 @@
 //! Multiplex conformance tests (ITU-R BS.450-4, EN 50067).
 
+use txengine_audio::AudioFeed;
 use txengine_dsp::{FirDesign, Preemphasis, sinc};
-use txengine_fm::mpx::{AudioFeed, MpxConfig, MpxGenerator, StereoMode};
+use txengine_fm::mpx::{MpxConfig, MpxGenerator, StereoMode};
 use txengine_rds::decoder::decode_mpx;
 use txengine_rds::encoder::{encode_rt, encode8};
 use txengine_rds::{RdsEncoder, RdsParams};
@@ -229,8 +230,9 @@ fn measured_output_response_is_equalised() {
 
 #[test]
 fn subcarriers_follow_the_actual_sample_rate() {
+    use txengine_audio::Programme;
     use txengine_core::{Modulator, RenderContext, SampleFormat, SinkInfo};
-    use txengine_fm::{Programme, WfmModulator};
+    use txengine_fm::WfmModulator;
     let fs = 250_000.0;
     let sink = SinkInfo {
         description: "test".into(),

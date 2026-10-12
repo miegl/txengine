@@ -7,6 +7,7 @@ mod engine;
 mod hw;
 mod logger;
 mod mode;
+mod programme;
 mod rt;
 mod sinks;
 mod wfm;

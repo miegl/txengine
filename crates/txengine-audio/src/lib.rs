@@ -229,6 +229,47 @@ impl Drop for AudioInput {
     }
 }
 
+/// Audio supplier for a mode's signal generator (non-blocking).
+pub trait AudioFeed {
+    /// Fill `out` with as many frames as are available; return the count.
+    fn read(&mut self, out: &mut [[f32; 2]]) -> usize;
+    /// The input has ended for good (missing frames are then not underruns).
+    fn ended(&self) -> bool {
+        false
+    }
+}
+
+impl AudioFeed for AudioInput {
+    fn read(&mut self, out: &mut [[f32; 2]]) -> usize {
+        AudioInput::read(self, out)
+    }
+    fn ended(&self) -> bool {
+        self.finished()
+    }
+}
+
+/// Silence.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoAudio;
+
+impl AudioFeed for NoAudio {
+    fn read(&mut self, out: &mut [[f32; 2]]) -> usize {
+        out.fill([0.0; 2]);
+        out.len()
+    }
+    fn ended(&self) -> bool {
+        true
+    }
+}
+
+/// A transmission mode's programme: an audio input and what to do when it
+/// ends, or none (the carrier alone).
+#[derive(Debug)]
+pub enum Programme {
+    Audio(AudioInput, EndOfInput),
+    None,
+}
+
 /// Decode a whole file into interleaved `f32` samples (for offline tools).
 /// Returns `(sample_rate, channels, samples)`.
 pub fn read_file(path: &std::path::Path) -> Result<(u32, usize, Vec<f32>), AudioError> {

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand, ValueEnum};
 
 use crate::cli::{Render, Tx};
+use crate::programme::ProgrammeArgs;
 
 // Parsed once at start-up: the size of the variants does not matter.
 #[allow(clippy::large_enum_variant)]
@@ -19,16 +20,6 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum OnEnd {
-    /// Start the file again from the beginning.
-    Repeat,
-    /// Keep transmitting (silence, RDS) after the input ends.
-    Wait,
-    /// Stop transmitting when the input ends.
-    Stop,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum StereoArg {
     Auto,
     Mono,
@@ -38,23 +29,8 @@ pub enum StereoArg {
 // Programme, RDS and modulation options of `wfm tx` and `wfm render`.
 #[derive(Debug, Clone, Args)]
 pub struct WfmArgs {
-    /// Audio to transmit: a file (WAV, FLAC, MP3, OGG, AAC, ...) or '-' for
-    /// standard input. Without it only the carrier and RDS are transmitted.
-    #[arg(short, long, value_name = "FILE")]
-    pub audio: Option<String>,
-    /// Standard input is headerless S16LE PCM at this sample rate.
-    #[arg(long, value_name = "HZ", requires = "raw_channels")]
-    pub raw_rate: Option<u32>,
-    /// Channels of the headerless PCM on standard input.
-    #[arg(long, value_name = "N", requires = "raw_rate")]
-    pub raw_channels: Option<u16>,
-    /// What to do when the audio ends [default: repeat for files, wait for
-    /// stdin; stop when rendering].
-    #[arg(long, value_enum)]
-    pub on_end: Option<OnEnd>,
-    /// Test tone instead of audio input (Hz).
-    #[arg(long, value_name = "HZ", conflicts_with = "audio")]
-    pub tone: Option<f64>,
+    #[command(flatten)]
+    pub programme: ProgrammeArgs,
 
     // RDS ------------------------------------------------------------------
     /// RDS on (1) or off (0).

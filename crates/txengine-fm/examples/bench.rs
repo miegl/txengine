@@ -3,8 +3,9 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use txengine_audio::AudioFeed;
 use txengine_dsp::{PhaseAccumulator, SineTable};
-use txengine_fm::mpx::{AudioFeed, MpxConfig, MpxGenerator};
+use txengine_fm::mpx::{MpxConfig, MpxGenerator};
 use txengine_rds::{RdsEncoder, RdsModulator, RdsParams};
 
 struct Noise(u32);
