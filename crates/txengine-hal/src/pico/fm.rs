@@ -203,6 +203,7 @@ impl PicoFmTransmitter {
             max_offset_hz: i16::MAX as f64 * resolution_hz,
             resolution_hz,
             max_clock_error_ppm: MAX_CLOCK_ERROR_PPM,
+            paced_by_carrier: false,
             buffer_len,
             format: SampleFormat::FrequencyOffset,
             realtime: true,

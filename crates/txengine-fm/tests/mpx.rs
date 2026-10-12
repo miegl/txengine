@@ -239,6 +239,7 @@ fn subcarriers_follow_the_actual_sample_rate() {
         max_offset_hz: 100e3,
         resolution_hz: 1.0,
         max_clock_error_ppm: 200.0,
+        paced_by_carrier: false,
         buffer_len: 4096,
         format: SampleFormat::FrequencyOffset,
         realtime: true,

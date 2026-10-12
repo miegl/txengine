@@ -889,6 +889,7 @@ impl BcmFmTransmitter {
             max_offset_hz: plan.max_offset_hz,
             resolution_hz: plan.step_hz,
             max_clock_error_ppm: MAX_CLOCK_ERROR_PPM,
+            paced_by_carrier: false,
             buffer_len: n - 128,
             format: SampleFormat::FrequencyOffset,
             realtime: true,

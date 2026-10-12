@@ -1,15 +1,17 @@
 use std::fmt;
 
-/// Kind of RF control samples a sink consumes.
-///
-/// Only frequency modulation is implemented today. Amplitude capable sinks
-/// (e.g. pad drive-strength modulation for AM/SSB) would add variants here and
-/// modulators would negotiate the format with [`RfSink::info`].
+/// Kind of RF control samples a sink consumes ([`SinkInfo::format`]); a
+/// modulator checks that its sink takes the kind it renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleFormat {
     /// Each sample is the instantaneous carrier frequency offset in Hz
     /// (positive = above the nominal carrier), held for one sample period.
     FrequencyOffset,
+    /// Each sample is the amplitude of the carrier (its envelope) at the
+    /// sample's instant, from 0 (no carrier) to 1 (the strongest carrier
+    /// the transmitter makes); between samples the sink interpolates (see
+    /// [`SinkInfo::zero_order_hold`] and [`SinkInfo::response_db`]).
+    Amplitude,
 }
 
 /// Static description of an RF sink, valid after construction.
@@ -22,13 +24,20 @@ pub struct SinkInfo {
     /// Carrier frequency actually synthesised by the hardware, in Hz.
     pub carrier_hz: f64,
     /// Largest frequency offset (in Hz, symmetric) the sink can represent.
-    /// Samples beyond this are clamped by the sink.
+    /// Samples beyond this are clamped by the sink. 0 for an
+    /// [`SampleFormat::Amplitude`] sink.
     pub max_offset_hz: f64,
-    /// Smallest frequency step the sink can produce at the carrier, in Hz.
+    /// Smallest frequency step the sink can produce at the carrier, in Hz
+    /// (0 for an [`SampleFormat::Amplitude`] sink).
     pub resolution_hz: f64,
     /// Largest error of the sink's reference oscillator (± ppm) that
     /// [`RfSink::set_clock_error_ppm`] can correct; 0 if it cannot.
     pub max_clock_error_ppm: f64,
+    /// The carrier itself paces the samples (each lasts a whole number of
+    /// carrier cycles), so [`RfSink::set_clock_error_ppm`] corrects the
+    /// sample clock together with the carrier: the samples then leave at
+    /// [`SinkInfo::sample_rate`] in true time.
+    pub paced_by_carrier: bool,
     /// Total buffer capacity in samples (the transmit latency when full).
     pub buffer_len: usize,
     /// Sample format the sink consumes.
@@ -143,9 +152,10 @@ pub trait RfSink: Send {
     /// samples, are right in true frequency, starting with the next samples
     /// written. The sample clock is not changed: samples are emitted at
     /// [`SinkInfo::sample_rate`]` · (1 + ppm · 10⁻⁶)`, which modulators learn
-    /// from [`RenderContext::sample_rate`](crate::RenderContext::sample_rate). May be
-    /// called at any time, also before [`RfSink::start`]; fails beyond
-    /// ±[`SinkInfo::max_clock_error_ppm`].
+    /// from [`RenderContext::sample_rate`](crate::RenderContext::sample_rate);
+    /// unless the carrier paces them ([`SinkInfo::paced_by_carrier`]), when
+    /// they are corrected with it. May be called at any time, also before
+    /// [`RfSink::start`]; fails beyond ±[`SinkInfo::max_clock_error_ppm`].
     fn set_clock_error_ppm(&mut self, ppm: f64) -> Result<(), SinkError> {
         if ppm == 0.0 { Ok(()) } else { Err(SinkError::config("this output cannot correct a clock error")) }
     }

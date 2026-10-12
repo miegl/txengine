@@ -56,6 +56,7 @@ impl FileSink {
                 max_offset_hz: f64::INFINITY,
                 resolution_hz: 0.0,
                 max_clock_error_ppm: 0.0,
+                paced_by_carrier: false,
                 buffer_len: CHUNK,
                 format: SampleFormat::FrequencyOffset,
                 realtime: false,

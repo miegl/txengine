@@ -2,9 +2,9 @@
 //!
 //! txengine is split into three independent layers which only meet here:
 //!
-//! * **Modulators** ([`Modulator`]) implement a transmission mode (wide FM with
-//!   RDS today). They turn programme input into a stream of RF control samples
-//!   at the rate dictated by the output.
+//! * **Modulators** ([`Modulator`]) implement a transmission mode (wide FM
+//!   with RDS, AM). They turn programme input into a stream of RF control
+//!   samples ([`SampleFormat`]) at the rate dictated by the output.
 //! * **RF sinks** ([`RfSink`]) consume those samples. Hardware backends
 //!   (BCM283x/BCM2711 clock manager, RP1 on the Raspberry Pi 5) and software
 //!   sinks (file output used for testing) implement this trait.

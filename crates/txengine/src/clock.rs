@@ -18,6 +18,13 @@
 //! clock: its drift steering keeps its buffer centred and absorbs whatever
 //! difference remains between the source's clock and true time.
 //!
+//! Sinks whose carrier paces the samples ([`SinkInfo::paced_by_carrier`],
+//! AM) are the exception: correcting their carrier corrects their sample
+//! clock too, so the samples leave at the nominal rate in true time and the
+//! modulator has nothing to correct. The estimator must not see those
+//! corrections: the hardware position is mapped back to the position the
+//! sink would have reached uncorrected (`Uncorrected`).
+//!
 //! Measurement: every poll of the sink reads the hardware position (the
 //! index of the sample being emitted), bracketed by readings of the raw
 //! monotonic clock. A [`TimeReference`] turns these readings into
@@ -36,6 +43,7 @@
 //! emitted at the edge between the readings around it.
 //!
 //! [`RenderContext::sample_rate`]: txengine_core::RenderContext::sample_rate
+//! [`SinkInfo::paced_by_carrier`]: txengine_core::SinkInfo::paced_by_carrier
 
 use std::collections::VecDeque;
 
@@ -58,10 +66,11 @@ const MAX_STDERR_PPM: f64 = 0.2;
 const SETTLE: f64 = 2.0;
 
 /// "Sample `sample` was emitted at `time`" (seconds on the reference's
-/// time scale), known to ±`uncertainty` seconds.
+/// time scale), known to ±`uncertainty` seconds. The sample index may be
+/// fractional (a position between samples).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Observation {
-    pub sample: u64,
+    pub sample: f64,
     pub time: f64,
     pub uncertainty: f64,
 }
@@ -75,7 +84,7 @@ pub trait TimeReference: Send {
     /// emitted at some moment between the raw monotonic times `t0` and `t1`
     /// ([`rt::monotonic_raw`]). Returns the observation it yields on the
     /// reference's time scale, if any.
-    fn observe(&mut self, sample: u64, t0: f64, t1: f64) -> Option<Observation>;
+    fn observe(&mut self, sample: f64, t0: f64, t1: f64) -> Option<Observation>;
 
     /// Whether the reference keeps true time at the moment (an NTP daemon
     /// has synchronised the system clock, a GPS receiver has a fix).
@@ -88,7 +97,7 @@ const MAX_BRACKET: f64 = 500e-6;
 
 /// The observation of a reading at its middle, unless it was interrupted;
 /// times as given.
-fn bracket(sample: u64, t0: f64, t1: f64) -> Option<Observation> {
+fn bracket(sample: f64, t0: f64, t1: f64) -> Option<Observation> {
     (t1 - t0 <= MAX_BRACKET).then_some(Observation { sample, time: 0.5 * (t0 + t1), uncertainty: 0.5 * (t1 - t0) })
 }
 
@@ -138,7 +147,7 @@ impl TimeReference for SystemClock {
         "the system clock"
     }
 
-    fn observe(&mut self, sample: u64, t0: f64, t1: f64) -> Option<Observation> {
+    fn observe(&mut self, sample: f64, t0: f64, t1: f64) -> Option<Observation> {
         self.refresh(t1);
         let o = bracket(sample, t0, t1)?;
         Some(Observation { time: self.time_at(o.time), ..o })
@@ -234,7 +243,7 @@ impl RateEstimator {
     fn push(&mut self, o: Observation) -> Option<Fit> {
         let origin = *self.origin.get_or_insert(o);
         let x = o.time - origin.time;
-        let z = (o.sample as f64 - origin.sample as f64) / self.fs - x;
+        let z = (o.sample - origin.sample) / self.fs - x;
         if let Some(l) = self.line
             && self.points.len() >= 10
         {
@@ -288,6 +297,29 @@ impl RateEstimator {
     }
 }
 
+/// The position a sink paced by its carrier would have reached without
+/// the corrections, which change its sample clock: every correction `c`
+/// (ppm) slows the samples by `1 + c · 10⁻⁶`, so each sample emitted under
+/// it counts as that many uncorrected ones.
+#[derive(Debug, Clone, Copy, Default)]
+struct Uncorrected {
+    /// The sample from which `ppm` is in effect, and the position there.
+    since: u64,
+    position: f64,
+    ppm: f64,
+}
+
+impl Uncorrected {
+    fn at(&self, sample: u64) -> f64 {
+        self.position + sample.saturating_sub(self.since) as f64 * (1.0 + self.ppm * 1e-6)
+    }
+
+    /// The correction changes to `ppm` at `sample`.
+    fn change(&mut self, sample: u64, ppm: f64) {
+        *self = Uncorrected { since: sample, position: self.at(sample), ppm };
+    }
+}
+
 /// Keeps a sink and the timeline corrected for the sink's crystal error:
 /// fixed, or measured continuously against a [`TimeReference`] (see the
 /// module documentation).
@@ -299,6 +331,13 @@ pub struct ClockDiscipline {
     carrier_hz: f64,
     /// Correction in effect (ppm).
     ppm: f64,
+    /// The sink's samples are paced by its carrier
+    /// ([`SinkInfo::paced_by_carrier`](txengine_core::SinkInfo::paced_by_carrier)),
+    /// and its position as it would be uncorrected.
+    paced: bool,
+    uncorrected: Uncorrected,
+    /// The sink's position at the latest poll.
+    position: u64,
     /// Latest usable measurement.
     measured: Option<Fit>,
     synchronised: Option<bool>,
@@ -318,6 +357,9 @@ impl ClockDiscipline {
             estimator: None,
             carrier_hz: 0.0,
             ppm: 0.0,
+            paced: false,
+            uncorrected: Uncorrected::default(),
+            position: 0,
             measured: None,
             synchronised: None,
             underruns: 0,
@@ -332,11 +374,11 @@ impl ClockDiscipline {
     pub fn attach(&mut self, sink: &mut dyn RfSink) -> Result<(), SinkError> {
         let info = sink.info();
         self.carrier_hz = info.carrier_hz;
+        self.paced = info.paced_by_carrier;
         self.estimator = Some(RateEstimator::new(info.sample_rate));
         match self.mode {
             Ppm::Fixed(v) => {
-                sink.set_clock_error_ppm(v)?;
-                self.ppm = v;
+                self.correct(sink, v)?;
                 if v != 0.0 {
                     info!("correcting a crystal error of {v:+.2} ppm (carrier {:+.0} Hz)", -v * 1e-6 * self.carrier_hz);
                 }
@@ -356,9 +398,20 @@ impl ClockDiscipline {
         }
     }
 
-    /// Actual sample rate relative to the sink's nominal rate.
+    /// Actual sample rate relative to the sink's nominal rate: the
+    /// crystal error, corrected for a sink paced by its carrier.
     pub fn rate_ratio(&self) -> f64 {
-        1.0 + self.ppm * 1e-6
+        if self.paced { 1.0 } else { 1.0 + self.ppm * 1e-6 }
+    }
+
+    /// Put the correction `ppm` into effect.
+    fn correct(&mut self, sink: &mut dyn RfSink, ppm: f64) -> Result<(), SinkError> {
+        sink.set_clock_error_ppm(ppm)?;
+        if self.paced {
+            self.uncorrected.change(self.position, ppm);
+        }
+        self.ppm = ppm;
+        Ok(())
     }
 
     /// Poll the sink, timing its position against the reference, and
@@ -372,6 +425,7 @@ impl ClockDiscipline {
     }
 
     fn observe(&mut self, sink: &mut dyn RfSink, p: &SinkPoll, t0: f64, t1: f64) -> Result<(), SinkError> {
+        self.position = p.consumed;
         if p.underruns != self.underruns {
             // The hardware waited for data: the timeline has a gap.
             self.underruns = p.underruns;
@@ -387,7 +441,7 @@ impl ClockDiscipline {
         if !self.reference_synchronised() {
             return Ok(());
         }
-        let Some(o) = self.reference.observe(p.consumed, t0, t1) else { return Ok(()) };
+        let Some(o) = self.reference.observe(self.uncorrected.at(p.consumed), t0, t1) else { return Ok(()) };
         if o.time < *self.stretch_start.get_or_insert(o.time) + SETTLE {
             return Ok(());
         }
@@ -447,8 +501,7 @@ impl ClockDiscipline {
     }
 
     fn apply(&mut self, sink: &mut dyn RfSink, ppm: f64) -> Result<(), SinkError> {
-        sink.set_clock_error_ppm(ppm)?;
-        self.ppm = ppm;
+        self.correct(sink, ppm)?;
         match self.logged_ppm {
             None => info!(
                 "crystal error {ppm:+.2} ppm (measured against {}): correcting the carrier by {:+.0} Hz and the sample rate",
@@ -469,18 +522,14 @@ impl ClockDiscipline {
         if !arg.is_empty() {
             let mode = cli::parse_ppm(arg)?;
             match mode {
-                Ppm::Fixed(v) => {
-                    sink.set_clock_error_ppm(v).map_err(|e| e.to_string())?;
-                    self.ppm = v;
-                }
+                Ppm::Fixed(v) => self.correct(sink, v).map_err(|e| e.to_string())?,
                 Ppm::Auto => {
                     if let Some(f) = self.measured {
                         self.apply(sink, f.ppm).map_err(|e| e.to_string())?;
                     }
                 }
                 Ppm::Off => {
-                    sink.set_clock_error_ppm(0.0).map_err(|e| e.to_string())?;
-                    self.ppm = 0.0;
+                    self.correct(sink, 0.0).map_err(|e| e.to_string())?;
                     self.measured = None;
                 }
             }
@@ -583,7 +632,7 @@ mod tests {
             60.0,
             |_| 12.3,
             |_, n, t0, t1| {
-                if let Some(o) = bracket(n, t0, t1) {
+                if let Some(o) = bracket(n as f64, t0, t1) {
                     last = est.add(o).or(last);
                 }
             },
@@ -601,7 +650,7 @@ mod tests {
         // Warming up: +1 ppm per minute.
         let ppm = |t: f64| -5.0 + t / 60.0;
         readings(900.0, ppm, |_, n, t0, t1| {
-            if let Some(o) = bracket(n, t0, t1) {
+            if let Some(o) = bracket(n as f64, t0, t1) {
                 last = est.add(o).or(last);
             }
         });
@@ -616,7 +665,7 @@ mod tests {
         let mut est = RateEstimator::new(FS);
         let mut fits = Vec::new();
         let o = |time: f64, offset: f64| Observation {
-            sample: ((time - offset) * FS * (1.0 + 8e-6)) as u64,
+            sample: ((time - offset) * FS * (1.0 + 8e-6)).floor(),
             time,
             uncertainty: 1e-6,
         };
@@ -653,6 +702,7 @@ mod tests {
                     max_offset_hz: 100e3,
                     resolution_hz: 1.0,
                     max_clock_error_ppm: 200.0,
+                    paced_by_carrier: false,
                     buffer_len: 1024,
                     format: SampleFormat::FrequencyOffset,
                     realtime: true,
@@ -699,7 +749,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "the fake clock"
         }
-        fn observe(&mut self, sample: u64, _: f64, _: f64) -> Option<Observation> {
+        fn observe(&mut self, sample: f64, _: f64, _: f64) -> Option<Observation> {
             Some(Observation { sample, time: f64::from_bits(self.time.load(Ordering::Relaxed)), uncertainty: 1e-6 })
         }
         fn synchronised(&mut self) -> bool {
@@ -717,10 +767,13 @@ mod tests {
 
     impl Rig {
         fn new(mode: Ppm) -> Rig {
+            Self::with_sink(mode, FakeSink::new())
+        }
+
+        fn with_sink(mode: Ppm, mut sink: FakeSink) -> Rig {
             let reference =
                 FakeReference { time: Arc::new(AtomicU64::new(0)), synced: Arc::new(AtomicBool::new(true)) };
             let mut clock = ClockDiscipline::new(mode, Box::new(reference.clone()));
-            let mut sink = FakeSink::new();
             clock.attach(&mut sink).unwrap();
             Rig { clock, sink, reference, t: 0.0, phase: 0.0 }
         }
@@ -735,11 +788,13 @@ mod tests {
             let end = self.t + seconds;
             while self.t < end {
                 self.t += 0.01;
-                self.phase += FS * (1.0 + ppm * 1e-6) * 0.01;
+                // A sink paced by its carrier is slowed by its correction.
+                let corrected = if self.sink.info.paced_by_carrier { 1.0 + self.sink.ppm * 1e-6 } else { 1.0 };
+                self.phase += FS * (1.0 + ppm * 1e-6) / corrected * 0.01;
                 self.sink.poll.consumed = self.phase as u64;
                 self.reference.time.store(self.t.to_bits(), Ordering::Relaxed);
                 self.clock.poll(&mut self.sink).unwrap();
-                assert!(self.clock.ppm.abs() < 30.0, "never a wild correction");
+                assert!(self.clock.ppm.abs() < 100.0, "never a wild correction");
             }
         }
     }
@@ -761,6 +816,29 @@ mod tests {
         assert!((r.clock.ppm - 15.0).abs() < 0.05);
         r.run(60.0, 16.0, 0.0);
         assert!((r.clock.ppm - 16.0).abs() < 0.1, "{}", r.clock.describe());
+    }
+
+    #[test]
+    fn corrects_a_sink_paced_by_its_carrier_without_chasing_itself() {
+        let mut sink = FakeSink::new();
+        sink.info.paced_by_carrier = true;
+        let mut r = Rig::with_sink(Ppm::Auto, sink);
+        r.run(40.0, -54.0, 0.0);
+        assert!((r.clock.ppm + 54.0).abs() < 0.1, "{}", r.clock.describe());
+        // The samples now leave at the nominal rate: nothing for the
+        // modulator to correct.
+        assert_eq!(r.clock.rate_ratio(), 1.0);
+        // The correction holds although the sink now runs on time, and a
+        // change of the crystal is followed.
+        r.run(120.0, -54.0, 0.0);
+        assert!((r.clock.ppm + 54.0).abs() < 0.05, "{}", r.clock.describe());
+        r.run(5.0, -54.0, 0.05);
+        r.run(300.0, -50.0, 0.0);
+        assert!((r.clock.ppm + 50.0).abs() < 0.2, "{}", r.clock.describe());
+        // A fixed correction set at run time does not upset the estimate.
+        r.clock.command(&mut r.sink, "-20").unwrap();
+        r.run(60.0, -50.0, 0.0);
+        assert!((r.clock.measured.unwrap().ppm + 50.0).abs() < 0.2, "{}", r.clock.describe());
     }
 
     #[test]
