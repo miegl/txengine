@@ -1,18 +1,25 @@
-//! Holding the CPU clock steady while a BCM283x/BCM2711 PLL is modulated.
+//! Holding the CPU clock steady while a BCM283x/BCM2711 transmitter runs.
 //!
 //! The VideoCore firmware changes the ARM clock (on every cpufreq step) by
-//! reprogramming PLLB through the A2W interface, the same slow register bus
-//! the DMA engine keeps busy writing the carrier PLL's fraction (one write
-//! every ~5 µs, each taking ~4.3 µs). When the two collide, the carrier
-//! PLL's configuration is destroyed. Observed on a Raspberry Pi Zero 2 W
+//! reprogramming PLLB through the A2W interface. In FM that is the slow
+//! register bus the DMA engine keeps busy writing the carrier PLL's
+//! fraction (one write every ~5 µs, each taking ~4.3 µs). When the two
+//! collide, the carrier PLL's configuration is destroyed. Observed on a Raspberry Pi Zero 2 W
 //! (BCM2837) with the `schedutil` governor at 185 kS/s: PLLA's control
 //! register read 0, its PER divider 4 and it lost lock, after anywhere
 //! between a few and ~200 ARM clock changes; the carrier vanished. Never
 //! with the clock fixed (90 s), and not at 120 kS/s (23 changes), nor
 //! without the DMA engine running.
 //!
-//! The transmitter therefore selects the `performance` governor while it
-//! runs (no cpufreq steps) and restores the previous governor afterwards
+//! The AM transmitter (PWM fed by DMA) needs the same for another reason:
+//! during the clock changes the DMA engine stalls for longer than the words
+//! in the PWM's FIFO last (8 to 11: 4 µs at 1 MHz), and every stall drops
+//! carrier cycles, which shifts the carrier's phase. On a Zero 2 W with the
+//! `schedutil` governor the PWM missed 0.4 % (500 kHz) to 1 % (3 MHz) of
+//! its words; with the clock fixed, none.
+//!
+//! The transmitters therefore select the `performance` governor while they
+//! run (no cpufreq steps) and restore the previous governor afterwards
 //! (also from the shutdown guardian).
 
 use std::path::{Path, PathBuf};

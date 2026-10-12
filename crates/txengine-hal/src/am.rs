@@ -93,6 +93,12 @@ impl PulseWidths {
         w0 + (((w1 - w0) as i64 * f) >> FRAC) as i32
     }
 
+    /// The width that holds the amplitude `a` (0-1; clamped) steady,
+    /// rounded and without noise shaping.
+    pub fn steady(&self, a: f32) -> u32 {
+        ((self.width(Self::position(a)) + ONE / 2) >> FRAC).clamp(0, self.max) as u32
+    }
+
     /// Write the widths of the carrier cycles of one amplitude sample `a`
     /// (0-1; clamped) to `out` (`cycles` of them).
     #[inline]

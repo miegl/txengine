@@ -1,5 +1,6 @@
 //! BCM2835/6/7 and BCM2711 support (Raspberry Pi 2, 3, 4, Zero 2 W).
 
+pub mod am;
 pub mod cprman;
 pub mod dma;
 pub mod fm;
@@ -82,6 +83,15 @@ pub const GPCLK_PINS: &[(u32, usize, u32)] = &[
 
 pub fn gpclk_for_pin(gpio: u32) -> Option<(usize, u32)> {
     GPCLK_PINS.iter().find(|p| p.0 == gpio).map(|p| (p.1, p.2))
+}
+
+/// GPIOs on the header with a PWM output: (gpio, PWM channel, ALT function).
+pub const PWM_PINS: &[(u32, usize, u32)] =
+    &[(12, 0, regs::gpio::ALT0), (13, 1, regs::gpio::ALT0), (18, 0, regs::gpio::ALT5), (19, 1, regs::gpio::ALT5)];
+
+/// The PWM channel (0 or 1, PWM0 or PWM1) and ALT function of `gpio`.
+pub fn pwm_for_pin(gpio: u32) -> Option<(usize, u32)> {
+    PWM_PINS.iter().find(|p| p.0 == gpio).map(|p| (p.1, p.2))
 }
 
 /// Pad control register of the bank `gpio` is in.

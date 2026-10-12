@@ -116,8 +116,9 @@ pub struct HardwareArgs {
     /// [default: 4; Pico: 21; AM: 18].
     #[arg(short, long = "gpio", value_name = "N", help_heading = "Hardware")]
     pub gpio: Vec<u32>,
-    /// WFM carrier synthesis: PLL to modulate (Pi 1-4: a, c, d; Pi 5: audio,
-    /// video) or "clkdiv" to modulate the clock divider instead of a PLL.
+    /// PLL that makes the carrier: in WFM the one to modulate (Pi 1-4: a, c,
+    /// d, or "clkdiv" to modulate the clock divider instead; Pi 5: audio,
+    /// video); in AM on the Pi 1-4 the one that clocks the PWM (a, c, d).
     #[arg(long, help_heading = "Raspberry Pi")]
     pub pll: Option<String>,
     /// Output drive strength 0-7 (2-16 mA; the Pi 5 and the Pico have 4

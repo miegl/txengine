@@ -30,7 +30,7 @@ transmission mode or a hardware platform means implementing one side.
 | `txengine-fm` | The wide-band FM mode: `MpxGenerator` (stereo multiplex) and `WfmModulator` (the `Modulator` implementation, control commands). |
 | `txengine-am` | The AM broadcast mode: `EnvelopeGenerator` (programme to carrier envelope) and `AmModulator`. |
 | `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input; the programme the modes share (`Programme`, `AudioFeed`). |
-| `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backend, the RP1 (Pi 5) backends (FM and AM), amplitude by pulse width (`am`), the shutdown guardian; usbfs (USB without libusb) and the Pico backend (planning, `RfSink`). |
+| `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backends and the RP1 (Pi 5) backends (FM and AM each), amplitude by pulse width (`am`), the shutdown guardian; usbfs (USB without libusb) and the Pico backend (planning, `RfSink`). |
 | `txengine-pico-protocol` | The USB protocol between txengine and the Pico firmware, and the sigma-delta arithmetic both sides share. `no_std`, no dependencies. |
 | `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, `devices`, the hardware backends and their selection (`hw/`), the programme input options every mode shares, and per mode its options, set-up and tools (WFM: `analyze`). |
 | `firmware/pico` | The RP2040/RP2350 firmware (embassy-rp), a cargo workspace of its own for the bare-metal targets. |
@@ -198,12 +198,13 @@ Without `--device`, txengine uses the only device any backend finds.
 Options that only some backends use stay flags and are rejected by the
 others (`--pll` on a Pico, for example).
 
-The two Raspberry Pi backends share the same structure: plan the clocks, snapshot every
-register they will touch, start a **guardian** (a process forked before any
-thread exists; when the transmitter's pipe closes, for whatever reason
-including `kill -9`, it stops the DMA and restores the snapshot), then run a
-DMA ring that writes one frequency word per sample into a PLL or clock
-divider register, paced by hardware.
+The Raspberry Pi backends share the same structure: plan the clocks,
+snapshot every register they will touch, start a **guardian** (a process
+forked before any thread exists; when the transmitter's pipe closes, for
+whatever reason including `kill -9`, it stops the DMA and restores the
+snapshot), then run a DMA ring, paced by hardware, that writes one
+frequency word per sample into a PLL or clock divider register (FM) or a
+pulse width per carrier cycle into a PWM (AM).
 
 ### Raspberry Pi 5 (RP1)
 
@@ -346,6 +347,64 @@ divider register, paced by hardware.
   parked engine is redirected into the ring.
 * Memory comes from the VideoCore mailbox (uncached `DIRECT` alias), freed
   by the guardian if the process dies.
+
+### Raspberry Pi 1-4 (BCM283x, BCM2711), AM
+
+* This PWM (PWM0 on GPIO 12 or 18, PWM1 on 13 or 19) has no phase-correct
+  mode. In mark-space mode each FIFO word is one range period, high for
+  the word's number of clocks from the period's start. With the range at
+  half the carrier period (`R` clocks, even) and two words per cycle,
+  `R/2 − u` and `R/2 + u`, the cycle's two pulses have a fundamental of
+  `sin(π u / R)` with a constant phase: `u` takes the place of the width
+  in `hal::am` (a period of `R` steps, `R/2` steps to the full square
+  wave). At `u = 0` the pulses are equal and half a period apart, all
+  second harmonic, which at amplitude `a` is `(1 − a²) / a` of the
+  carrier: +2.8 dB at the carrier of 90 % depth. A word missing on the way
+  swaps the pulses, which shifts the carrier by half a period.
+* The PWM clock divides a PLL's PER channel by an integer (a fractional
+  divider would jitter by a whole source cycle), at most 250 MHz (500 MHz
+  does not run; measured on a Zero 2 W). The planner (`am::plan`) takes
+  the finest steps (`R = 2k`, the largest `k` with `4k · fc` ≤ 250 MHz)
+  that the PLL can make within the limits its users allow
+  (`cprman::PllRoom`, as for FM) with room for the crystal correction in
+  its fraction, and for those the least change of its VCO; the PLLs are
+  tried in FM's order (`cprman::pll_preference`). 999 kHz: PLLA from 2250
+  to 2229.8 MHz (−0.9 %), PER /3, PWM clock /3 = 247.75 MHz, `R` = 124.
+  The crystal correction writes the PLL's fraction, only when it has moved
+  by most of a unit (each write is a slow A2W transaction). The PWM clock
+  is verified with the frequency counter and watched in the background
+  like FM's carrier; a changed PLL is repaired.
+* DMA: blocks of up to 512 cycles (1024 words, a page) from VideoCore
+  memory into the FIFO, in bursts of four words requested while the FIFO
+  holds fewer than 8, with panic priority. On a Zero 2 W a lite channel
+  kept the PWM supplied up to 10 M words/s (5 MHz) and missed 1.7 % at
+  12; 8.4 (4.2 MHz) is allowed. After each block a marker control block
+  writes the block's sequence number to a progress word: exact
+  bookkeeping, as the RP1's VALID bits give, and within a block the
+  engine's source address. The newest block links to an idle loop of 16
+  cycles at the mean amplitude of the samples (an unmodulated carrier: an
+  underrun is silent). A parked engine is sent on through a jump control
+  block, which first closes the idle loop again (a DMA write to the idle
+  block's `next`) and then continues at the first unplayed block, so the
+  idle loop never points into the ring when the engine comes back to it.
+  The jump is armed only when the idle loop is found closed and the engine
+  then seen in it: an armed jump stays armed until the engine takes it,
+  and arming it again before the engine has been seen back in the ring
+  would send it into a block already played.
+* The CPU clock is held (`cpufreq`) here too: the firmware's ARM clock
+  changes stall the DMA engine for longer than the words in the FIFO last
+  (8 to 11 of them: 4 µs at 1 MHz), and a PWM without a word holds its
+  output low for the range period. With `schedutil` on a Zero 2 W, 0.4 % (500 kHz) to 1 % (3 MHz)
+  of the carrier's cycles went missing, and the phase shifts spread the
+  carrier into a cluster of lines; with the clock held, none. The PWM's gap
+  flag (`STA.GAPO1`) never showed them in mark-space mode, so the
+  transmitter counts the cycles taken against the time (5 s windows) and
+  warns from 0.2 % missing.
+* The producer writes each cycle's two words with one 64-bit store
+  (`mmio::store64`, from general-purpose registers, 8-byte aligned): an
+  uncached store costs ~10 ns on a Cortex-A53, 32 or 64 bits alike.
+* The guardian restores the PLL, the PWM clock and registers, the pin and
+  its pads and the cpufreq governor, and frees the memory.
 
 ### Raspberry Pi Pico and Pico 2 (USB)
 

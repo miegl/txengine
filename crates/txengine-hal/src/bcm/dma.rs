@@ -118,6 +118,11 @@ impl DmaChannel {
         self.regs.read(CONBLK_AD)
     }
 
+    /// Bus address the current control block reads next.
+    pub fn source(&self) -> u32 {
+        self.regs.read(SOURCE_AD)
+    }
+
     pub fn debug(&self) -> u32 {
         self.regs.read(DEBUG)
     }

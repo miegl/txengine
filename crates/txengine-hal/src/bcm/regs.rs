@@ -77,6 +77,7 @@ pub mod cm {
     pub const TCNTCNT: usize = 0x0c4;
     pub const TCNT_SRC1_SHIFT: u32 = 12;
     pub const TCNT_GP0: u32 = 20;
+    pub const TCNT_PWM: u32 = 24;
 
     // PLLs.
     pub const PLLA: usize = 0x104;
@@ -153,12 +154,23 @@ pub mod pwm {
     pub const CTL_MODE1: u32 = 1 << 1;
     pub const CTL_USEF1: u32 = 1 << 5;
     pub const CTL_CLRF1: u32 = 1 << 6;
+    pub const CTL_MSEN1: u32 = 1 << 7;
+    /// The control bits of channel 2 are channel 1's shifted by this.
+    pub const CTL_CHAN2_SHIFT: u32 = 8;
     pub const DMAC_ENAB: u32 = 1 << 31;
+    pub const DMAC_PANIC_SHIFT: u32 = 8;
     pub const STA_EMPT1: u32 = 1 << 1;
     pub const STA_BERR: u32 = 1 << 8;
     pub const STA_STA1: u32 = 1 << 9;
     pub const STA_ERRORS: u32 = 0x1fc;
+    /// Words in the FIFO, shared by both channels.
+    pub const FIFO_LEN: u32 = 16;
     pub const DREQ: u32 = 5;
+
+    /// Range register of channel `chan` (0 or 1).
+    pub const fn rng(chan: usize) -> usize {
+        RNG1 + 0x10 * chan
+    }
 }
 
 /// PCM/I2S controller.
@@ -186,6 +198,7 @@ pub mod dma {
     pub const CS: usize = 0x00;
     pub const CONBLK_AD: usize = 0x04;
     pub const TI: usize = 0x08;
+    pub const SOURCE_AD: usize = 0x0c;
     pub const DEBUG: usize = 0x20;
     pub const INT_STATUS: usize = 0xfe0;
     pub const ENABLE: usize = 0xff0;
@@ -204,6 +217,9 @@ pub mod dma {
 
     pub const TI_WAIT_RESP: u32 = 1 << 3;
     pub const TI_DEST_DREQ: u32 = 1 << 6;
+    pub const TI_SRC_INC: u32 = 1 << 8;
+    /// Burst length (BURST_LENGTH; 0: single transfers).
+    pub const TI_BURST_LENGTH_SHIFT: u32 = 12;
     pub const TI_PERMAP_SHIFT: u32 = 16;
     pub const TI_NO_WIDE_BURSTS: u32 = 1 << 26;
 

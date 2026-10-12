@@ -16,18 +16,22 @@ use crate::cli::HardwareArgs;
 /// cycles that comes closest.
 const AM_SAMPLE_RATE: f64 = 100e3;
 
-fn rp1_am_config(hw: &HardwareArgs) -> anyhow::Result<rp1::am::Rp1AmConfig> {
-    if hw.pll.is_some() || hw.pacer.is_some() {
-        bail!("--pll and --pacer do not apply to AM");
-    }
-    let gpio = match hw.gpio.as_slice() {
+/// The AM output pin (GPIO 18 unless given).
+fn am_gpio(hw: &HardwareArgs) -> anyhow::Result<u32> {
+    Ok(match hw.gpio.as_slice() {
         [] => 18,
         &[g] => g,
         _ => bail!("AM is transmitted on one GPIO"),
-    };
+    })
+}
+
+fn rp1_am_config(hw: &HardwareArgs) -> anyhow::Result<rp1::am::Rp1AmConfig> {
+    if hw.pll.is_some() || hw.pacer.is_some() {
+        bail!("--pll and --pacer do not apply to AM on the Raspberry Pi 5");
+    }
     Ok(rp1::am::Rp1AmConfig {
         carrier_hz: hw.freq_hz,
-        gpio,
+        gpio: am_gpio(hw)?,
         drive: rp1::gpio::Drive::from_level(hw.power),
         sample_rate: hw.sample_rate.unwrap_or(AM_SAMPLE_RATE),
         buffer: Duration::from_millis(hw.buffer_ms),
@@ -130,8 +134,36 @@ fn open_transmitter(hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn
             Ok(Box::new(rp1::am::Rp1AmTransmitter::new(&cfg, plat.osc_hz).context("RP1 AM transmitter")?))
         }
         (_, Output::Frequency { max_offset_hz }) => bcm_transmitter(&plat, hw, max_offset_hz),
-        (_, Output::Amplitude) => bail!("AM needs a Raspberry Pi 5 so far"),
+        (_, Output::Amplitude) => {
+            let cfg = bcm_am_config(hw)?;
+            let b = Bcm::open(&plat)?;
+            Ok(Box::new(bcm::am::BcmAmTransmitter::new(&cfg, &b).context("BCM AM transmitter")?))
+        }
     }
+}
+
+fn bcm_am_config(hw: &HardwareArgs) -> anyhow::Result<bcm::am::BcmAmConfig> {
+    use bcm::cprman::PllId;
+    if hw.pacer.is_some() {
+        bail!("--pacer does not apply to AM");
+    }
+    let pll = match hw.pll.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("auto") => None,
+        Some("a") => Some(PllId::A),
+        Some("c") => Some(PllId::C),
+        Some("d") => Some(PllId::D),
+        Some(other) => bail!("--pll {other}: AM uses a, c or d"),
+    };
+    Ok(bcm::am::BcmAmConfig {
+        carrier_hz: hw.freq_hz,
+        gpio: am_gpio(hw)?,
+        pll,
+        drive: hw.power,
+        sample_rate: hw.sample_rate.unwrap_or(AM_SAMPLE_RATE),
+        buffer: Duration::from_millis(hw.buffer_ms),
+        dma_channel: hw.dma_channel,
+        max_vco_change: 0.03,
+    })
 }
 
 fn bcm_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<bcm::fm::BcmFmConfig> {
@@ -195,7 +227,7 @@ fn probe(hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
     let max_offset_hz = match output {
         Output::Frequency { max_offset_hz } => max_offset_hz,
         Output::Amplitude if plat.soc == Soc::Bcm2712 => return rp1_am_probe(&plat, hw),
-        Output::Amplitude => bail!("AM needs a Raspberry Pi 5 so far"),
+        Output::Amplitude => return bcm_am_probe(&plat, hw),
     };
     match plat.soc {
         Soc::Bcm2712 => {
@@ -276,6 +308,68 @@ fn rp1_am_probe(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn bcm_am_probe(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<()> {
+    use bcm::cprman::{Cprman, Pll, PllId};
+    let cfg = bcm_am_config(hw)?;
+    let (chan, _) = bcm::pwm_for_pin(cfg.gpio).context("AM needs GPIO 12, 13, 18 or 19")?;
+    let b = Bcm::open(plat)?;
+    let cm = Cprman::new(b.cm.clone());
+    println!(
+        "Output:   GPIO{} via PWM{chan} (two pulses per carrier period, their widths' difference sets the amplitude)",
+        cfg.gpio
+    );
+    for id in [PllId::A, PllId::C, PllId::D] {
+        let p = Pll::new(&cm, id, plat.osc_hz, b.bcm2711);
+        print_pll(&p, bcm::regs::cm::PWM);
+        match bcm::am::plan(&p, cfg.carrier_hz, plat.osc_hz, cfg.sample_rate, cfg.max_vco_change) {
+            Ok(plan) => println!(
+                "          plan: VCO {:.3} MHz{}, PER /{}, PWM clock /{} = {:.3} MHz, {} clocks per period, carrier \
+                 {:.4} kHz, {} width steps",
+                plan.vco_new / 1e6,
+                if plan.vco_old > 0.0 {
+                    format!(" ({:+.2} %)", (plan.vco_new / plan.vco_old - 1.0) * 100.0)
+                } else {
+                    String::new()
+                },
+                plan.per_div,
+                plan.clk_div,
+                plan.clk_hz / 1e6,
+                2 * plan.range,
+                plan.carrier_hz / 1e3,
+                plan.steps()
+            ),
+            Err(e) => println!("          plan: {e}"),
+        }
+    }
+    let p = bcm::am::choose_plan(&cfg, &b)?;
+    println!(
+        "Chosen:   {}; {:.3} S/s ({} carrier cycles per sample)",
+        p.pll.name(),
+        p.sample_rate,
+        p.cycles_per_sample
+    );
+    Ok(())
+}
+
+/// One line about a PLL: its VCO, PER channel and other users (besides
+/// the clock generator at `own_ctl`).
+fn print_pll(p: &bcm::cprman::Pll, own_ctl: usize) {
+    if !(p.is_powered() && p.is_locked()) {
+        println!("{}:     idle (powered down or unlocked)", p.id.name());
+        return;
+    }
+    let u = p.users(own_ctl);
+    println!(
+        "{}:     VCO {:.3} MHz, PER {}, users: PER [{}], other channels [{}]{}",
+        p.id.name(),
+        p.vco_hz() / 1e6,
+        p.per_divider().map_or("off".into(), |d| format!("/{d} = {:.3} MHz", p.vco_hz() / d as f64 / 1e6)),
+        u.per.join(", "),
+        u.other.join(", "),
+        if u.gpu_only && !u.is_empty() { " (GPU only)" } else { "" }
+    );
+}
+
 fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
     use bcm::cprman::{Cprman, Pll, PllId};
     let cfg = bcm_config(hw, max_offset_hz)?;
@@ -287,21 +381,7 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::
     println!("Output:   GPIO{:?} via GPCLK{gpclk}", cfg.gpios);
     for id in [PllId::A, PllId::C, PllId::D] {
         let p = Pll::new(&cm, id, osc, b.bcm2711);
-        let running = p.is_powered() && p.is_locked();
-        if !running {
-            println!("{}:     idle (powered down or unlocked)", id.name());
-        } else {
-            let u = p.users(gp_ctl);
-            println!(
-                "{}:     VCO {:.3} MHz, PER {}, users: PER [{}], other channels [{}]{}",
-                id.name(),
-                p.vco_hz() / 1e6,
-                p.per_divider().map_or("off".into(), |d| format!("/{d} = {:.3} MHz", p.vco_hz() / d as f64 / 1e6)),
-                u.per.join(", "),
-                u.other.join(", "),
-                if u.gpu_only && !u.is_empty() { " (GPU only)" } else { "" }
-            );
-        }
+        print_pll(&p, gp_ctl);
         match bcm::fm::plan_pll(&p, gpclk, cfg.carrier_hz, osc, cfg.max_offset_hz, cfg.max_vco_change) {
             Ok(plan) => println!(
                 "          plan: VCO {:.3} MHz{}, PER /{}, GPCLK /{}, carrier {:.6} MHz, step {:.2} Hz{}",

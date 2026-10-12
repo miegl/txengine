@@ -162,6 +162,34 @@ pub unsafe fn store32(p: *mut u32, v: u32) {
     }
 }
 
+/// 64-bit store of two words to device memory from general-purpose
+/// registers, `lo` at `p` and `hi` after it: one bus write instead of two
+/// (an uncached 32-bit store costs ~10 ns on a Cortex-A53, as does a
+/// 64-bit one).
+///
+/// # Safety
+/// `p` must be valid for an 8-byte aligned write.
+#[inline(always)]
+pub unsafe fn store64(p: *mut u64, lo: u32, hi: u32) {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: the caller guarantees `p` is writable.
+    unsafe {
+        let v = lo as u64 | (hi as u64) << 32;
+        core::arch::asm!("str {v}, [{p}]", p = in(reg) p, v = in(reg) v, options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "arm")]
+    // SAFETY: the caller guarantees `p` is writable. (`strd` in ARM state
+    // needs an even register and the next one.)
+    unsafe {
+        core::arch::asm!("strd r2, r3, [{p}]", p = in(reg) p, in("r2") lo, in("r3") hi, options(nostack, preserves_flags));
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+    // SAFETY: the caller guarantees `p` is writable.
+    unsafe {
+        p.write_volatile(lo as u64 | (hi as u64) << 32)
+    }
+}
+
 /// Memory barriers for ordering CPU accesses against DMA engines.
 pub mod barrier {
     /// Full system data synchronisation barrier: all preceding memory
