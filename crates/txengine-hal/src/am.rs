@@ -29,20 +29,29 @@
 /// Entries of the arcsine table.
 const TABLE: usize = 4096;
 
+/// Fractional bits of the fixed-point widths, errors and table positions.
+/// The quantiser runs on integers: on an in-order core (Cortex-A53) the
+/// float version's feedback loop (rounding through an integer conversion
+/// and back, clamps) took ~60 ns per carrier cycle, mostly waiting for
+/// results; this one takes ~29 ns.
+const FRAC: u32 = 16;
+const ONE: i32 = 1 << FRAC;
+
 /// Converts amplitude samples into the pulse widths of their carrier
 /// cycles (see the module documentation).
 #[derive(Debug, Clone)]
 pub struct PulseWidths {
     cycles: usize,
-    /// `table[i]`: the width (in steps) for amplitude `i / TABLE`; one
-    /// extra entry for the interpolation at `a = 1`.
-    table: Vec<f32>,
-    max: f32,
-    /// The previous amplitude sample.
-    prev: f32,
-    /// The quantiser's last two errors.
-    e1: f32,
-    e2: f32,
+    /// `table[i]`: the width (in steps, fixed point) for amplitude
+    /// `i / TABLE`; one extra entry for the interpolation at `a = 1`.
+    table: Vec<i32>,
+    max: i32,
+    /// The previous amplitude sample, as a position in the table (fixed
+    /// point).
+    prev: i32,
+    /// The quantiser's last two errors (fixed point).
+    e1: i32,
+    e2: i32,
 }
 
 impl PulseWidths {
@@ -50,31 +59,21 @@ impl PulseWidths {
     /// period in width steps (the full square wave is `period / 2`);
     /// `max`: the largest width the hardware takes (at least `period / 2`).
     pub fn new(cycles: usize, period: f64, max: u32) -> PulseWidths {
-        assert!(cycles >= 1 && period >= 2.0 && max as f64 >= period / 2.0);
-        let mut table: Vec<f32> =
-            (0..=TABLE).map(|i| (period * (i as f64 / TABLE as f64).asin() / std::f64::consts::PI) as f32).collect();
+        assert!(cycles >= 1 && period >= 2.0 && max as f64 >= period / 2.0 && max < 1 << (30 - FRAC));
+        let mut table: Vec<i32> = (0..=TABLE)
+            .map(|i| (period * (i as f64 / TABLE as f64).asin() / std::f64::consts::PI * ONE as f64).round() as i32)
+            .collect();
         table.push(table[TABLE]);
-        PulseWidths { cycles, table, max: max as f32, prev: 0.0, e1: 0.0, e2: 0.0 }
+        PulseWidths { cycles, table, max: max as i32, prev: 0, e1: 0, e2: 0 }
     }
 
     pub fn cycles(&self) -> usize {
         self.cycles
     }
 
-    /// The width for amplitude `a` (0-1), unquantised.
+    /// The table position of amplitude `a` (0-1; clamped, NaN as 0).
     #[inline(always)]
-    fn width(&self, a: f32) -> f32 {
-        let x = a * TABLE as f32;
-        let i = x as usize;
-        let f = x - i as f32;
-        let (w0, w1) = (self.table[i], self.table[i + 1]);
-        w0 + (w1 - w0) * f
-    }
-
-    /// Write the widths of the carrier cycles of one amplitude sample `a`
-    /// (0-1; clamped) to `out` (`cycles` of them).
-    #[inline]
-    pub fn sample(&mut self, a: f32, out: &mut [u32]) {
+    fn position(a: f32) -> i32 {
         let a = if a > 1.0 {
             1.0
         } else if a > 0.0 {
@@ -82,21 +81,42 @@ impl PulseWidths {
         } else {
             0.0
         };
-        let step = (a - self.prev) / self.cycles as f32;
-        let mut x = self.prev;
-        for o in &mut out[..self.cycles] {
-            x += step;
-            let u = self.width(x);
-            let v = u - (2.0 * self.e1 - self.e2);
-            // Round to the nearest width (v + 0.5 >= 0 truncates like floor).
-            let q = ((v + 0.5) as i32 as f32).clamp(0.0, self.max);
-            self.e2 = self.e1;
-            // A clamped width leaves a large error; bounding it keeps the
-            // loop from winding up.
-            self.e1 = (q - v).clamp(-2.0, 2.0);
+        (a * (TABLE as i32 * ONE) as f32) as i32
+    }
+
+    /// The width (fixed point) at table position `x`, unquantised.
+    #[inline(always)]
+    fn width(&self, x: i32) -> i32 {
+        let i = (x >> FRAC) as usize;
+        let f = (x & (ONE - 1)) as i64;
+        let (w0, w1) = (self.table[i], self.table[i + 1]);
+        w0 + (((w1 - w0) as i64 * f) >> FRAC) as i32
+    }
+
+    /// Write the widths of the carrier cycles of one amplitude sample `a`
+    /// (0-1; clamped) to `out` (`cycles` of them).
+    #[inline]
+    pub fn sample(&mut self, a: f32, out: &mut [u32]) {
+        let target = Self::position(a);
+        let step = (target - self.prev) / self.cycles as i32;
+        let (mut x, mut e1, mut e2) = (self.prev, self.e1, self.e2);
+        let last = self.cycles - 1;
+        for (c, o) in out[..self.cycles].iter_mut().enumerate() {
+            x = if c < last { x + step } else { target };
+            let v = self.width(x) - (2 * e1 - e2);
+            // Round to the nearest width.
+            let mut q = (v + ONE / 2) >> FRAC;
+            e2 = e1;
+            e1 = (q << FRAC) - v;
+            if !(0..=self.max).contains(&q) {
+                // A clamped width leaves a large error; bounding it keeps
+                // the loop from winding up.
+                q = q.clamp(0, self.max);
+                e1 = ((q << FRAC) - v).clamp(-2 * ONE, 2 * ONE);
+            }
             *o = q as u32;
         }
-        self.prev = a;
+        (self.prev, self.e1, self.e2) = (target, e1, e2);
     }
 }
 

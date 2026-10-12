@@ -183,7 +183,10 @@ linearly across the cycles of each sample (response `sinc²(f / fs)`,
 reported in `response_db`), mapped through an arcsine table and quantised
 by a second-order error-feedback loop, which moves the quantisation error
 from the carrier towards ±fc/2 (in a simulation of 999 kHz from 400 MHz,
-89 dB below the carrier within ±5 kHz).
+89 dB below the carrier within ±5 kHz). The loop runs in fixed point: on
+an in-order Cortex-A53 its float version took ~60 ns per carrier cycle
+(of 1 µs at 1 MHz), mostly waiting for its own results, the integer one
+~29 ns.
 
 ## Hardware backends
 
