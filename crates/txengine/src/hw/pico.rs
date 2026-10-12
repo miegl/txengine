@@ -8,10 +8,18 @@ use txengine_core::RfSink;
 use txengine_hal::pico;
 use txengine_hal::pico::protocol as proto;
 
-use super::{Backend, Found};
+use super::{Backend, Found, Output};
 use crate::cli::HardwareArgs;
 
 pub struct Pico;
+
+/// The deviation the plan must allow; the Pico only does FM so far.
+fn frequency_range(output: Output) -> anyhow::Result<f64> {
+    match output {
+        Output::Frequency { max_offset_hz } => Ok(max_offset_hz),
+        Output::Amplitude => bail!("the Pico does not transmit AM yet"),
+    }
+}
 
 fn config(args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<pico::fm::PicoFmConfig> {
     if hw.pll.is_some() || hw.pacer.is_some() || hw.dma_channel.is_some() {
@@ -23,7 +31,7 @@ fn config(args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<p
         _ => bail!("the Pico transmits on one GPIO"),
     };
     Ok(pico::fm::PicoFmConfig {
-        carrier_hz: hw.freq * 1e6,
+        carrier_hz: hw.freq_hz,
         device: Some(args.to_string()).filter(|s| !s.is_empty()),
         gpio: u8::try_from(gpio)?,
         drive_ma: [2, 2, 4, 4, 8, 8, 12, 12][hw.power as usize],
@@ -74,13 +82,13 @@ impl Backend for Pico {
         Ok(format!("txengine-pico-{}", d.serial))
     }
 
-    fn open(&self, args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
-        let cfg = config(args, hw, max_offset_hz)?;
+    fn open(&self, args: &str, hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn RfSink>> {
+        let cfg = config(args, hw, frequency_range(output)?)?;
         Ok(Box::new(pico::fm::PicoFmTransmitter::new(&cfg).context("Pico transmitter")?))
     }
 
-    fn probe(&self, args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
-        let cfg = config(args, hw, max_offset_hz)?;
+    fn probe(&self, args: &str, hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
+        let cfg = config(args, hw, frequency_range(output)?)?;
         let usb = pico::find(cfg.device.as_deref())?;
         let p = pico::Pico::open(&usb)?;
         let i = &p.info;

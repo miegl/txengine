@@ -10,12 +10,13 @@ use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 pub const WAV_FULL_SCALE: f64 = 100_000.0;
 
 enum Out {
-    /// IEEE float WAV of deviation / 100 kHz.
+    /// IEEE float WAV of deviation / 100 kHz, or of the envelope.
     Wav {
         w: BufWriter<File>,
         frames: u64,
     },
-    /// Interleaved complex float baseband (FM modulated, unit amplitude).
+    /// Interleaved complex float baseband (FM modulated at unit amplitude,
+    /// or the envelope).
     Iq {
         w: BufWriter<File>,
         phase: f64,
@@ -33,21 +34,28 @@ pub struct FileSink {
 const CHUNK: usize = 16384;
 
 impl FileSink {
-    pub fn deviation_wav(path: &Path, fs: f64, hold: bool) -> anyhow::Result<FileSink> {
+    /// The samples as WAV: a frequency offset / [`WAV_FULL_SCALE`], an
+    /// amplitude as it is.
+    pub fn wav(path: &Path, fs: f64, format: SampleFormat, hold: bool) -> anyhow::Result<FileSink> {
         let mut w = BufWriter::new(File::create(path)?);
         write_wav_header(&mut w, fs as u32, 0)?;
-        Ok(Self::new(Out::Wav { w, frames: 0 }, fs, "deviation WAV file", hold))
+        let what = match format {
+            SampleFormat::FrequencyOffset => "deviation WAV file",
+            SampleFormat::Amplitude => "envelope WAV file",
+        };
+        Ok(Self::new(Out::Wav { w, frames: 0 }, fs, format, what, hold))
     }
 
-    pub fn iq(path: &Path, fs: f64, hold: bool) -> anyhow::Result<FileSink> {
-        Ok(Self::new(Out::Iq { w: BufWriter::new(File::create(path)?), phase: 0.0 }, fs, "I/Q file", hold))
+    pub fn iq(path: &Path, fs: f64, format: SampleFormat, hold: bool) -> anyhow::Result<FileSink> {
+        let out = Out::Iq { w: BufWriter::new(File::create(path)?), phase: 0.0 };
+        Ok(Self::new(out, fs, format, "I/Q file", hold))
     }
 
-    pub fn null(fs: f64) -> FileSink {
-        Self::new(Out::Null, fs, "null output", false)
+    pub fn null(fs: f64, format: SampleFormat) -> FileSink {
+        Self::new(Out::Null, fs, format, "null output", false)
     }
 
-    fn new(out: Out, fs: f64, what: &str, hold: bool) -> FileSink {
+    fn new(out: Out, fs: f64, format: SampleFormat, what: &str, hold: bool) -> FileSink {
         FileSink {
             info: SinkInfo {
                 description: format!("{what} at {fs} S/s"),
@@ -58,7 +66,7 @@ impl FileSink {
                 max_clock_error_ppm: 0.0,
                 paced_by_carrier: false,
                 buffer_len: CHUNK,
-                format: SampleFormat::FrequencyOffset,
+                format,
                 realtime: false,
                 zero_order_hold: hold,
                 response_db: Vec::new(),
@@ -105,12 +113,20 @@ impl RfSink for FileSink {
 
     fn write(&mut self, samples: &[f32]) -> Result<(), SinkError> {
         let fs = self.info.sample_rate;
+        let am = self.info.format == SampleFormat::Amplitude;
         match &mut self.out {
             Out::Wav { w, frames } => {
                 for &s in samples {
-                    w.write_all(&((s as f64 / WAV_FULL_SCALE) as f32).to_le_bytes())?;
+                    let v = if am { s } else { (s as f64 / WAV_FULL_SCALE) as f32 };
+                    w.write_all(&v.to_le_bytes())?;
                 }
                 *frames += samples.len() as u64;
+            }
+            Out::Iq { w, .. } if am => {
+                for &s in samples {
+                    w.write_all(&s.to_le_bytes())?;
+                    w.write_all(&0f32.to_le_bytes())?;
+                }
             }
             Out::Iq { w, phase } => {
                 let _ = self.hold_model;

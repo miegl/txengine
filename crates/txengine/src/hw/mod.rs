@@ -12,9 +12,29 @@ mod pico;
 
 use anyhow::bail;
 use log::info;
-use txengine_core::RfSink;
+use txengine_core::{RfSink, SampleFormat};
 
 use crate::cli::HardwareArgs;
+
+/// What a transmission mode needs from the transmitter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Output {
+    /// Frequency modulation (`SampleFormat::FrequencyOffset`), moving the
+    /// carrier by up to ±`max_offset_hz`.
+    Frequency { max_offset_hz: f64 },
+    /// Amplitude modulation (`SampleFormat::Amplitude`).
+    Amplitude,
+}
+
+impl Output {
+    /// The kind of samples the modulator renders.
+    pub fn format(self) -> SampleFormat {
+        match self {
+            Output::Frequency { .. } => SampleFormat::FrequencyOffset,
+            Output::Amplitude => SampleFormat::Amplitude,
+        }
+    }
+}
 
 /// A device that is present.
 pub struct Found {
@@ -35,11 +55,11 @@ pub trait Backend: Sync {
     fn check(&self, args: &str, hw: &HardwareArgs) -> anyhow::Result<()>;
     /// Name of the lock that keeps two txengine processes off one device.
     fn lock_name(&self, args: &str) -> anyhow::Result<String>;
-    /// Open the device for transmitting, able to move the carrier by up to
-    /// ±`max_offset_hz`. Called while the process is still single threaded.
-    fn open(&self, args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>>;
+    /// Open the device for transmitting the `output` a mode needs. Called
+    /// while the process is still single threaded.
+    fn open(&self, args: &str, hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn RfSink>>;
     /// Print the device and its frequency plan, without transmitting.
-    fn probe(&self, args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()>;
+    fn probe(&self, args: &str, hw: &HardwareArgs, output: Output) -> anyhow::Result<()>;
 }
 
 pub const BACKENDS: &[&dyn Backend] = &[&pi::Pi, &pico::Pico];
@@ -89,8 +109,8 @@ pub fn select(hw: &HardwareArgs) -> anyhow::Result<Selected> {
 }
 
 fn check_common(hw: &HardwareArgs) -> anyhow::Result<()> {
-    if !(1.0..=250.0).contains(&hw.freq) {
-        bail!("--freq must be given in MHz (e.g. 87.6)");
+    if !(100e3..=250e6).contains(&hw.freq_hz) {
+        bail!("--freq must be 100 kHz to 250 MHz (e.g. 87.6 in MHz, or 999k)");
     }
     if hw.power > 7 {
         bail!("--power must be 0-7");
@@ -103,13 +123,13 @@ impl Selected {
         self.backend.lock_name(&self.args)
     }
 
-    pub fn open(&self, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
+    pub fn open(&self, hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn RfSink>> {
         info!("txengine {}", crate::VERSION);
-        self.backend.open(&self.args, hw, max_offset_hz)
+        self.backend.open(&self.args, hw, output)
     }
 
-    pub fn probe(&self, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
-        self.backend.probe(&self.args, hw, max_offset_hz)
+    pub fn probe(&self, hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
+        self.backend.probe(&self.args, hw, output)
     }
 }
 

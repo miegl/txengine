@@ -567,12 +567,23 @@ dependencies = [
  "clap",
  "libc",
  "log",
+ "txengine-am",
  "txengine-audio",
  "txengine-core",
  "txengine-dsp",
  "txengine-fm",
  "txengine-hal",
  "txengine-rds",
+]
+
+[[package]]
+name = "txengine-am"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "txengine-audio",
+ "txengine-core",
+ "txengine-dsp",
 ]
 
 [[package]]

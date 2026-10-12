@@ -1,5 +1,6 @@
-//! txengine – FM/RDS transmitter for the Raspberry Pi.
+//! txengine – FM/RDS and AM transmitter for the Raspberry Pi.
 
+mod am;
 mod cli;
 mod clock;
 mod control;
@@ -31,7 +32,14 @@ fn main() {
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let result = match &cli.command {
         Command::Wfm(c) => wfm::run(c),
-        Command::Probe(a) => hw::select(&a.hw).and_then(|d| d.probe(&a.hw, wfm::MAX_OFFSET_HZ)),
+        Command::Am(c) => am::run(c),
+        Command::Probe(a) => {
+            let output = match a.mode {
+                cli::ModeName::Wfm => hw::Output::Frequency { max_offset_hz: wfm::MAX_OFFSET_HZ },
+                cli::ModeName::Am => hw::Output::Amplitude,
+            };
+            hw::select(&a.hw).and_then(|d| d.probe(&a.hw, output))
+        }
         Command::Devices => hw::list_devices(),
         Command::Tone(a) => tone(a),
     };
@@ -49,7 +57,7 @@ fn tone(a: &cli::ToneArgs) -> anyhow::Result<()> {
     let _lock = rt::instance_lock(&device.lock_name()?)?;
     rt::install_signal_handlers();
     // Planned as for WFM, so that the measured response applies to it.
-    let mut sink = device.open(&a.hw, wfm::MAX_OFFSET_HZ)?;
+    let mut sink = device.open(&a.hw, hw::Output::Frequency { max_offset_hz: wfm::MAX_OFFSET_HZ })?;
     let fs = sink.info().sample_rate;
     if a.tones.iter().any(|&f| f >= fs / 2.0) {
         anyhow::bail!("tones must be below half the sample rate ({:.0} Hz)", fs / 2.0);

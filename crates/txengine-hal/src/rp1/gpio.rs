@@ -14,6 +14,19 @@ pub const GPCLK_PINS: &[(u32, usize, u32)] = &[
     (21, 1, 3), // a3: GPCLK1
 ];
 
+/// GPIOs that can carry a PWM0 channel: (gpio, channel, function select).
+pub const PWM0_PINS: &[(u32, usize, u32)] = &[
+    (12, 0, 0), // a0: PWM0_CHAN0
+    (13, 1, 0), // a0: PWM0_CHAN1
+    (18, 2, 3), // a3: PWM0_CHAN2
+    (19, 3, 3), // a3: PWM0_CHAN3
+];
+
+/// Look up the PWM0 routing of a pin: (channel, function select).
+pub fn pwm0_for_pin(gpio: u32) -> Option<(usize, u32)> {
+    PWM0_PINS.iter().find(|p| p.0 == gpio).map(|p| (p.1, p.2))
+}
+
 /// Look up the GPCLK routing of a pin.
 pub fn gpclk_for_pin(gpio: u32) -> Option<(usize, u32)> {
     GPCLK_PINS.iter().find(|p| p.0 == gpio).map(|p| (p.1, p.2))

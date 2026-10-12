@@ -5,6 +5,7 @@ members = [
     "crates/txengine-dsp",
     "crates/txengine-rds",
     "crates/txengine-fm",
+    "crates/txengine-am",
     "crates/txengine-audio",
     "crates/txengine-hal",
     "crates/txengine-pico-protocol",
@@ -25,6 +26,7 @@ txengine-core = { path = "crates/txengine-core" }
 txengine-dsp = { path = "crates/txengine-dsp" }
 txengine-rds = { path = "crates/txengine-rds" }
 txengine-fm = { path = "crates/txengine-fm" }
+txengine-am = { path = "crates/txengine-am" }
 txengine-audio = { path = "crates/txengine-audio" }
 txengine-hal = { path = "crates/txengine-hal" }
 txengine-pico-protocol = { path = "crates/txengine-pico-protocol" }

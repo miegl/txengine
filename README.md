@@ -1,11 +1,12 @@
 # txengine
 
-An FM broadcast transmitter for the Raspberry Pi, written in Rust. It turns a
-GPIO pin into a wide-band FM transmitter with a standards-conformant stereo
-multiplex (ITU-R BS.450) and RDS (EN 50067), on the Raspberry Pi 2, 3, 4, 5 and
-Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries. A Raspberry
-Pi Pico or Pico 2 with txengine's firmware does the same on USB, for any Linux
-computer.
+An FM and AM broadcast transmitter for the Raspberry Pi, written in Rust. It
+turns a GPIO pin into a wide-band FM transmitter with a standards-conformant
+stereo multiplex (ITU-R BS.450) and RDS (EN 50067), on the Raspberry Pi 2, 3,
+4, 5 and Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries. A
+Raspberry Pi Pico or Pico 2 with txengine's firmware does the same on USB, for
+any Linux computer. On the Raspberry Pi 5 it also transmits AM on long,
+medium and short wave.
 
 > **Transmitting without a licence is illegal in most countries.** The output
 > is a square wave rich in harmonics. Connect it to a receiver with a shielded
@@ -66,6 +67,11 @@ computer.
   standard input, or a test tone; resampled with rubato; clock-drift
   compensation for live input. A WAV stream on standard input plays until
   it ends, whatever length its header declares.
+* **AM** (Raspberry Pi 5, 100 kHz to 6.2 MHz): double sideband with full
+  carrier, made by the width of one centred pulse per carrier period (PWM,
+  one noise-shaped width per cycle by DMA); programme low-pass at the
+  channel's audio bandwidth (4.5 kHz) and a look-ahead limiter on the true
+  peaks. See [AM](#am).
 * **Run-time control** through a FIFO or a Unix socket (PS, RT, PTY, TA, AF,
   gain, ...), status reporting, clean shutdown and a guardian process that
   restores every touched register even after `kill -9`.
@@ -87,7 +93,8 @@ computer.
 | Raspberry Pi Pico 2 (on USB) | RP2350A | tested over the air |
 
 The default output is GPIO4 (pin 7); on the Pico GP21 (pin 27, ground on
-pin 28), the only clock output on its header. `txengine devices` lists the
+pin 28), the only clock output on its header. AM works on the Raspberry Pi 5
+so far, on GPIO18 (pin 12, ground on pin 14). `txengine devices` lists the
 transmitters found, and `txengine probe -f 87.6` shows what will be used,
 without transmitting.
 
@@ -154,8 +161,10 @@ USB protocol and asks for an update.
 
 Commands are grouped by transmission mode: `txengine wfm tx` transmits wide-band
 FM, `txengine wfm render` renders it to a file and `txengine wfm analyze`
-measures a multiplex recording. `txengine probe` and `txengine tone` need no
-mode. Every command lists its options with `--help`.
+measures a multiplex recording; `txengine am tx` and `txengine am render` do
+the same for AM. `txengine probe` and `txengine tone` need no mode. Every
+command lists its options with `--help`. Frequencies are in MHz, or carry a
+unit: `-f 87.6`, `-f 999k`, `-f 6.1M`.
 
 ```sh
 # Stereo file with RDS on 87.6 MHz
@@ -197,6 +206,7 @@ it created, when it stops:
 | `AF 87.6,99.5 \| OFF` | alternative frequencies |
 | `RDS 0\|1`, `RDSLEVEL hz` | RDS on/off, injection level |
 | `GAIN db` | programme gain |
+| `DEPTH percent` | AM: modulation depth of the peaks |
 | `PPM`, `PPM auto\|ppm\|off` | report the crystal error correction; measure, fix or turn it off |
 | `STATUS` | current settings and counters |
 | `QUIT` | stop transmitting |
@@ -215,7 +225,10 @@ corrects both: the carrier synthesiser is retuned, and the multiplex is
 rendered for the actual sample rate (pilot, subcarriers, RDS bit rate and
 the programme's playback speed). The hardware sample clock itself is never
 changed, so the correction cannot fill or drain any buffer; a live input
-keeps following its own clock through its drift compensation.
+keeps following its own clock through its drift compensation. In AM the
+carrier itself paces the samples (each lasts whole carrier cycles), so
+correcting the carrier corrects the sample rate as well; txengine measures
+the crystal through the corrections.
 
 The system clock has to be synchronised by an NTP daemon (chrony,
 systemd-timesyncd, ...); until it is, txengine transmits uncorrected and
@@ -249,6 +262,57 @@ txengine wfm analyze mpx.wav                                 # levels, pilot pha
 
 `analyze` accepts any multiplex recording (for example from an SDR; see
 `tools/`) and decodes RDS with an independent decoder.
+
+### AM
+
+```sh
+sudo txengine am tx -f 999k -a music.flac                      # medium wave
+sudo txengine am tx -f 6.1M -a talk.mp3 --bandwidth 10000      # short wave (49 m), 10 kHz audio
+sudo txengine am tx -f 999k --tone 1000 --gain 6               # 1 kHz at the full depth (90 %)
+sudo txengine probe --mode am -f 999k                          # the clock plan
+txengine am render -a music.flac --duration 10 -o envelope.wav # the envelope as WAV
+```
+
+A GPIO can only switch, so the carrier's amplitude comes from the shape of
+the waveform: once per carrier period the PWM puts out one pulse, centred
+on the same instant of every period. Its fundamental is `sin(π w / P)` of
+the full square wave's (width `w`, period `P`), and its phase does not move
+with the width (a pulse starting at the period's start would move it by
+up to 90°). On the Raspberry Pi 5, PWM0 runs in phase-correct mode from
+`pll_audio` at up to 400 MHz, beyond the datasheet's 150 MHz (the counter
+and the pin follow), and the DMA engine gives it one width per carrier
+cycle, in steps of two clocks: 100 steps up to the full square wave at
+999 kHz, 16 at 6.1 MHz. Far too coarse by themselves, the widths are
+noise-shaped (second-order error feedback), which moves the quantisation
+error from the carrier towards ±fc/2: within ±5 kHz of a 999 kHz carrier
+it is 89 dB below the carrier (simulated). The carriers run from 100 kHz
+to 6.2 MHz (the DMA engine moves at most 6.25 million words per second
+into the PWM); outputs are GPIO18 (default), 12, 13 and 19.
+
+The programme is mixed to mono, low-passed at the audio bandwidth
+(`--bandwidth`, 4.5 kHz for the 9 kHz channels of Europe, Africa and Asia,
+up to 10 kHz; 60 dB from 10 % above it) and peak-limited with look-ahead on
+the true (interpolated) peaks. The carrier is `1 / (1 + m)` of the full
+output (−5.6 dB at the default depth `--depth 90`), so that the positive
+peaks reach the full output and the negative ones never cut the carrier
+off, which would splatter into the neighbouring channels.
+
+The output is a pulse train, rich in harmonics: at full output the third
+is 9.5 dB below the carrier, and narrower pulses carry even harmonics as
+well. The noise-shaped quantisation error is strongest half the carrier
+frequency away (simulated −40 to −56 dBc in 9 kHz at 999 kHz). Put a
+band-pass, at least a low-pass, at the carrier between the pin and anything
+that can radiate.
+
+Measured on a Raspberry Pi 5 through an RC tap into a LimeSDR Mini: the
+carrier is on frequency (with `--ppm auto` within the receiver's own
+0.6 ppm; −54 ppm uncorrected), 99.9 kS/s at 999 kHz without underruns, and
+txengine takes 3 % of a core at 999 kHz, 15 % at 6.1 MHz (playing a FLAC
+file). The audio quality could not be measured yet: below 30 MHz the
+Lime's input favours the pulse train's harmonics at 10–60 MHz, which
+intermodulate onto the carrier and distort what it receives (the error
+grows with its gain); at its lowest gain a 1 kHz tone at 90 % reads
+93–96 %, with harmonics at −37 dB, the noise floor of that measurement.
 
 ## Signal quality
 

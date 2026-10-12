@@ -8,6 +8,7 @@ use txengine_rds::{DecoderInfo, RdsParams};
 
 use super::MAX_OFFSET_HZ;
 use super::args::{StereoArg, WfmArgs};
+use crate::hw::Output;
 use crate::mode::Mode;
 use crate::programme;
 
@@ -125,17 +126,17 @@ fn rds_params(p: &WfmArgs) -> anyhow::Result<RdsParams> {
 }
 
 impl Mode for WfmArgs {
-    fn max_offset_hz(&self) -> f64 {
-        MAX_OFFSET_HZ
+    fn output(&self) -> Output {
+        Output::Frequency { max_offset_hz: MAX_OFFSET_HZ }
     }
 
-    fn check(&self, carrier_mhz: Option<f64>) -> anyhow::Result<()> {
+    fn check(&self, carrier_hz: Option<f64>) -> anyhow::Result<()> {
         mpx_config(self)?;
         rds_params(self)?;
-        if let Some(f) = carrier_mhz
-            && !(65.0..=108.0).contains(&f)
+        if let Some(f) = carrier_hz
+            && !(65e6..=108e6).contains(&f)
         {
-            log::warn!("{f} MHz is outside the FM broadcast bands (65.8-108 MHz)");
+            log::warn!("{} MHz is outside the FM broadcast bands (65.8-108 MHz)", f / 1e6);
         }
         Ok(())
     }

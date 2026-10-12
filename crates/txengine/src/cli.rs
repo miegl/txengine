@@ -9,14 +9,14 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::wfm;
+use crate::{am, wfm};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "txengine",
     version = crate::VERSION,
-    about = "FM/RDS transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB",
-    long_about = "FM/RDS transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB.\n\n\
+    about = "FM/RDS and AM transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB",
+    long_about = "FM/RDS and AM transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB.\n\n\
         Transmitting without a licence is illegal in most countries. Connect the output to a \
         receiver with a shielded cable and attenuator, or use a dummy load, and always low-pass \
         filter the square-wave output before it reaches an antenna."
@@ -37,6 +37,10 @@ pub enum Command {
     /// Wide-band FM broadcast: stereo multiplex and RDS.
     #[command(subcommand)]
     Wfm(Box<wfm::Command>),
+    /// AM broadcast (double sideband, full carrier) on long, medium and
+    /// short wave.
+    #[command(subcommand)]
+    Am(Box<am::Command>),
     /// Show the detected hardware and the frequency plan, without transmitting.
     Probe(ProbeArgs),
     /// Transmit test tones as raw frequency deviation (no audio processing,
@@ -58,6 +62,30 @@ pub enum Ppm {
     Off,
 }
 
+/// A frequency in MHz, or with a unit: `87.6`, `87.6M`, `999k`, `999kHz`,
+/// `6100000Hz`. Returns Hz.
+pub(crate) fn parse_frequency(s: &str) -> Result<f64, String> {
+    let t = s.trim();
+    let lower = t.to_ascii_lowercase();
+    let (num, scale) = if let Some(n) = lower.strip_suffix("mhz").or_else(|| lower.strip_suffix('m')) {
+        (n, 1e6)
+    } else if let Some(n) = lower.strip_suffix("khz").or_else(|| lower.strip_suffix('k')) {
+        (n, 1e3)
+    } else if let Some(n) = lower.strip_suffix("hz") {
+        (n, 1.0)
+    } else {
+        (lower.as_str(), 1e6)
+    };
+    let v: f64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("expected a frequency in MHz or with a unit (87.6, 999k, 6.1M), got '{s}'"))?;
+    if !(v.is_finite() && v > 0.0) {
+        return Err(format!("the frequency must be positive, got '{s}'"));
+    }
+    Ok(v * scale)
+}
+
 pub(crate) fn parse_ppm(s: &str) -> Result<Ppm, String> {
     if s.eq_ignore_ascii_case("auto") {
         return Ok(Ppm::Auto);
@@ -75,9 +103,9 @@ pub(crate) fn parse_ppm(s: &str) -> Result<Ppm, String> {
 
 #[derive(Debug, Clone, Args)]
 pub struct HardwareArgs {
-    /// Carrier frequency in MHz.
-    #[arg(short, long, value_name = "MHZ")]
-    pub freq: f64,
+    /// Carrier frequency: MHz, or with a unit (87.6, 999k, 6.1M).
+    #[arg(short = 'f', long = "freq", value_name = "FREQ", value_parser = parse_frequency)]
+    pub freq_hz: f64,
     /// Transmitter: "pi" (this Raspberry Pi's GPIOs), "pico" (a Raspberry
     /// Pi Pico or Pico 2 on USB with the txengine firmware; pico:SERIAL or
     /// pico:PORT picks one of several), or "auto": the only one found.
@@ -85,11 +113,11 @@ pub struct HardwareArgs {
     #[arg(short, long, value_name = "DEVICE", help_heading = "Hardware")]
     pub device: Option<String>,
     /// Output GPIO (repeat for several pins on the same clock generator)
-    /// [default: 4; Pico: 21].
+    /// [default: 4; Pico: 21; AM: 18].
     #[arg(short, long = "gpio", value_name = "N", help_heading = "Hardware")]
     pub gpio: Vec<u32>,
-    /// Carrier synthesis: PLL to modulate (Pi 1-4: a, c, d; Pi 5: audio, video)
-    /// or "clkdiv" to modulate the clock divider instead of a PLL.
+    /// WFM carrier synthesis: PLL to modulate (Pi 1-4: a, c, d; Pi 5: audio,
+    /// video) or "clkdiv" to modulate the clock divider instead of a PLL.
     #[arg(long, help_heading = "Raspberry Pi")]
     pub pll: Option<String>,
     /// Output drive strength 0-7 (2-16 mA; the Pi 5 and the Pico have 4
@@ -122,7 +150,8 @@ pub struct HardwareArgs {
     /// used). Default: 250000 on the Pi 5; on the Pi 1-4 the highest multiple
     /// of 38000 the DMA engine sustains on the board (measured at start-up),
     /// at most 250000: 190000 on the Pi 2, 3 and Zero 2 W; 166667 on the
-    /// Pico (about 190000 with --synthesis pio).
+    /// Pico (about 190000 with --synthesis pio). AM: 100000 (each sample a
+    /// whole number of carrier cycles).
     #[arg(long, value_name = "HZ", help_heading = "Hardware")]
     pub sample_rate: Option<f64>,
     /// Pico: when the feedback divider is written, in system clock cycles
@@ -182,10 +211,10 @@ pub struct Render<M: Args> {
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum RenderFormat {
-    /// Instantaneous frequency deviation / 100 kHz as 32-bit float WAV (in
-    /// WFM, the multiplex).
-    #[value(alias = "mpx")]
-    Deviation,
+    /// The modulation as 32-bit float WAV: in WFM the frequency deviation /
+    /// 100 kHz (the multiplex), in AM the envelope (1 = the transmitter's
+    /// full output).
+    Wav,
     /// Complex baseband signal, interleaved 32-bit float I/Q (.cf32).
     Iq,
     /// Discard (benchmark).
@@ -197,7 +226,7 @@ pub struct OutputArgs {
     /// Output file.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-    #[arg(long, value_enum, default_value = "deviation")]
+    #[arg(long, value_enum, default_value = "wav")]
     pub format: RenderFormat,
     /// Sample rate in Hz.
     #[arg(long, default_value_t = 250_000.0)]
@@ -213,10 +242,20 @@ pub struct OutputArgs {
     pub start_time: Option<f64>,
 }
 
+/// A transmission mode, for commands that need no mode's options.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum ModeName {
+    Wfm,
+    Am,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct ProbeArgs {
     #[command(flatten)]
     pub hw: HardwareArgs,
+    /// The transmission mode to plan for.
+    #[arg(long, value_enum, default_value = "wfm")]
+    pub mode: ModeName,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -245,5 +284,17 @@ mod tests {
     #[test]
     fn commands_are_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn frequencies() {
+        assert_eq!(parse_frequency("87.6"), Ok(87.6e6));
+        assert_eq!(parse_frequency("87.6M"), Ok(87.6e6));
+        assert_eq!(parse_frequency("999k"), Ok(999e3));
+        assert_eq!(parse_frequency("999 kHz"), Ok(999e3));
+        assert_eq!(parse_frequency("6.1MHz"), Ok(6.1e6));
+        assert_eq!(parse_frequency("153000Hz"), Ok(153e3));
+        assert!(parse_frequency("fast").is_err());
+        assert!(parse_frequency("-1").is_err());
     }
 }

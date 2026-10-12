@@ -17,6 +17,7 @@ txengine-core.workspace = true
 txengine-dsp.workspace = true
 txengine-rds.workspace = true
 txengine-fm.workspace = true
+txengine-am.workspace = true
 txengine-audio.workspace = true
 txengine-hal.workspace = true
 libc.workspace = true

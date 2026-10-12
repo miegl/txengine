@@ -12,13 +12,12 @@ use crate::{clock, control, engine, hw, rt, sinks};
 
 /// A transmission mode, set up from its command line options.
 pub trait Mode {
-    /// Largest carrier frequency offset the mode needs from the
-    /// transmitter, in Hz.
-    fn max_offset_hz(&self) -> f64;
+    /// What the mode needs from the transmitter.
+    fn output(&self) -> hw::Output;
 
-    /// Check the options before anything is opened. `carrier_mhz`: the
+    /// Check the options before anything is opened. `carrier_hz`: the
     /// carrier frequency, when transmitting.
-    fn check(&self, carrier_mhz: Option<f64>) -> anyhow::Result<()>;
+    fn check(&self, carrier_hz: Option<f64>) -> anyhow::Result<()>;
 
     /// Create the modulator for the output `sink` (a transmitter, or a file).
     fn modulator(&self, sink: &SinkInfo) -> anyhow::Result<Box<dyn Modulator>>;
@@ -26,14 +25,14 @@ pub trait Mode {
 
 pub fn transmit(hw: &HardwareArgs, ctl: &ControlArgs, mode: &dyn Mode) -> anyhow::Result<()> {
     // Validate everything that does not need the hardware first.
-    mode.check(Some(hw.freq))?;
+    mode.check(Some(hw.freq_hz))?;
     let device = hw::select(hw)?;
     let _lock = rt::instance_lock(&device.lock_name()?)?;
     rt::install_signal_handlers();
 
     // The hardware is opened while still single threaded: it forks the
     // shutdown guardian.
-    let mut sink = device.open(hw, mode.max_offset_hz())?;
+    let mut sink = device.open(hw, mode.output())?;
     let mut m = mode.modulator(sink.info())?;
     m.configure(sink.info()).map_err(anyhow::Error::msg)?;
     let mut clock = clock::ClockDiscipline::new(hw.ppm, Box::new(clock::SystemClock::default()));
@@ -73,16 +72,17 @@ pub fn transmit(hw: &HardwareArgs, ctl: &ControlArgs, mode: &dyn Mode) -> anyhow
 pub fn render(out: &OutputArgs, mode: &dyn Mode) -> anyhow::Result<()> {
     mode.check(None)?;
     let fs = out.sample_rate;
+    let format = mode.output().format();
     let mut sink: Box<dyn RfSink> = match out.format {
-        RenderFormat::Deviation => {
+        RenderFormat::Wav => {
             let p = out.output.as_ref().context("--output is required")?;
-            Box::new(sinks::FileSink::deviation_wav(p, fs, out.hold)?)
+            Box::new(sinks::FileSink::wav(p, fs, format, out.hold)?)
         }
         RenderFormat::Iq => {
             let p = out.output.as_ref().context("--output is required")?;
-            Box::new(sinks::FileSink::iq(p, fs, out.hold)?)
+            Box::new(sinks::FileSink::iq(p, fs, format, out.hold)?)
         }
-        RenderFormat::Null => Box::new(sinks::FileSink::null(fs)),
+        RenderFormat::Null => Box::new(sinks::FileSink::null(fs, format)),
     };
     let mut m = mode.modulator(sink.info())?;
     m.configure(sink.info()).map_err(anyhow::Error::msg)?;

@@ -46,6 +46,9 @@ pub mod clk {
         gp_ctrl(n) + 0xc
     }
 
+    /// Control register of clk_pwm0 (DIV_INT, DIV_FRAC and SEL follow).
+    pub const CLK_PWM0_CTRL: usize = 0x74;
+
     pub const CTRL_ENABLE: u32 = 1 << 11;
     /// Read-only status: the generator is running.
     pub const CTRL_ENABLED: u32 = 1 << 28;
@@ -141,6 +144,45 @@ pub mod ticks {
     pub const CTRL_DWELL_MASK: u32 = 0x1f << 4;
 }
 
+/// PWM0 (offsets within PWM0): four channels; a channel can take its
+/// duty values from a 16-word FIFO, which the DMA engine refills.
+pub mod pwm {
+    pub const GLOBAL_CTRL: usize = 0x00;
+    pub const FIFO_CTRL: usize = 0x04;
+    pub const COMMON_RANGE: usize = 0x08;
+    pub const DUTY_FIFO: usize = 0x10;
+    /// Control register of channel `n` (RANGE, PHASE and DUTY follow).
+    pub const fn chan_ctrl(n: usize) -> usize {
+        0x14 + 0x10 * n
+    }
+    /// End of the register block (for snapshots).
+    pub const END: usize = 0x54;
+
+    /// GLOBAL_CTRL: channel enables (bits 3:0), and the bit that makes
+    /// register changes take effect.
+    pub const fn global_chan_en(n: usize) -> u32 {
+        1 << n
+    }
+    pub const GLOBAL_SET_UPDATE: u32 = 1 << 31;
+
+    /// FIFO_CTRL: fill level (read only), flush, the level below which the
+    /// DMA request is raised, the dwell time between requests, and the
+    /// request enable.
+    pub const FIFO_LEVEL_MASK: u32 = 0x1f;
+    pub const FIFO_FLUSH: u32 = 1 << 5;
+    pub const FIFO_THRESHOLD_SHIFT: u32 = 11;
+    pub const FIFO_DWELL_SHIFT: u32 = 16;
+    pub const FIFO_DREQ_EN: u32 = 1 << 31;
+    pub const FIFO_LEN: u32 = 16;
+
+    /// CHANn_CTRL: the mode, bind to COMMON_RANGE, duty from the FIFO, and
+    /// pop the FIFO only for this channel.
+    pub const CHAN_MODE_PHASE_CORRECT: u32 = 2;
+    pub const CHAN_BIND: u32 = 1 << 4;
+    pub const CHAN_USEFIFO: u32 = 1 << 5;
+    pub const CHAN_FIFO_POP_MASK: u32 = 1 << 8;
+}
+
 /// DMA handshake (DREQ) numbers, `RP1_DMA_*` in the device tree bindings.
 pub mod dreq {
     pub const PWM0: u32 = 0x18;
@@ -215,6 +257,7 @@ pub mod dmac {
     /// MSIZE encoding: 0 = 1 item, 1 = 4, 2 = 8, 3 = 16 ...
     pub const MSIZE_1: u64 = 0;
     pub const MSIZE_4: u64 = 1;
+    pub const MSIZE_8: u64 = 2;
 
     // CFG (64-bit), "CFG2" layout used when there are more than 16 handshakes.
     pub const CFG_SRC_MULTBLK_SHIFT: u32 = 0;

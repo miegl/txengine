@@ -9,8 +9,31 @@ use txengine_hal::bcm::{self, Bcm};
 use txengine_hal::platform::{self, Platform, Soc};
 use txengine_hal::rp1;
 
-use super::{Backend, Found};
+use super::{Backend, Found, Output};
 use crate::cli::HardwareArgs;
+
+/// Default sample rate of AM: each sample lasts the whole number of carrier
+/// cycles that comes closest.
+const AM_SAMPLE_RATE: f64 = 100e3;
+
+fn rp1_am_config(hw: &HardwareArgs) -> anyhow::Result<rp1::am::Rp1AmConfig> {
+    if hw.pll.is_some() || hw.pacer.is_some() {
+        bail!("--pll and --pacer do not apply to AM");
+    }
+    let gpio = match hw.gpio.as_slice() {
+        [] => 18,
+        &[g] => g,
+        _ => bail!("AM is transmitted on one GPIO"),
+    };
+    Ok(rp1::am::Rp1AmConfig {
+        carrier_hz: hw.freq_hz,
+        gpio,
+        drive: rp1::gpio::Drive::from_level(hw.power),
+        sample_rate: hw.sample_rate.unwrap_or(AM_SAMPLE_RATE),
+        buffer: Duration::from_millis(hw.buffer_ms),
+        dma_channel: hw.dma_channel,
+    })
+}
 
 fn rp1_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<rp1::fm::Rp1FmConfig> {
     let pll = match hw.pll.as_deref().map(str::to_ascii_lowercase).as_deref() {
@@ -20,7 +43,7 @@ fn rp1_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<rp1::fm::
     };
     let default_gpio = if pll == rp1::fm::Rp1Pll::Video { 6 } else { 4 };
     Ok(rp1::fm::Rp1FmConfig {
-        carrier_hz: hw.freq * 1e6,
+        carrier_hz: hw.freq_hz,
         gpios: if hw.gpio.is_empty() { vec![default_gpio] } else { hw.gpio.clone() },
         pll,
         drive: rp1::gpio::Drive::from_level(hw.power),
@@ -81,29 +104,33 @@ impl Backend for Pi {
         Ok("txengine".into())
     }
 
-    fn open(&self, _args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
-        open_transmitter(hw, max_offset_hz)
+    fn open(&self, _args: &str, hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn RfSink>> {
+        open_transmitter(hw, output)
     }
 
-    fn probe(&self, _args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
-        probe(hw, max_offset_hz)
+    fn probe(&self, _args: &str, hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
+        probe(hw, output)
     }
 }
 
-/// Open the transmitter for the detected platform, able to move the carrier
-/// by up to ±`max_offset_hz`. Must be called while the process is still
-/// single threaded (it forks the shutdown guardian).
-fn open_transmitter(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<Box<dyn RfSink>> {
+/// Open the transmitter for the detected platform. Must be called while
+/// the process is still single threaded (it forks the shutdown guardian).
+fn open_transmitter(hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn RfSink>> {
     let plat = platform::detect()?;
     info!("{} ({}), crystal {:.3} MHz", plat.model, plat.soc, plat.osc_hz / 1e6);
     warn_power();
-    match plat.soc {
-        Soc::Bcm2712 => {
+    match (plat.soc, output) {
+        (Soc::Bcm2835, _) => bail!("the original Raspberry Pi 1/Zero (ARMv6) is not supported"),
+        (Soc::Bcm2712, Output::Frequency { max_offset_hz }) => {
             let cfg = rp1_config(hw, max_offset_hz)?;
             Ok(Box::new(rp1::fm::Rp1FmTransmitter::new(&cfg, plat.osc_hz).context("RP1 transmitter")?))
         }
-        Soc::Bcm2835 => bail!("the original Raspberry Pi 1/Zero (ARMv6) is not supported"),
-        _ => bcm_transmitter(&plat, hw, max_offset_hz),
+        (Soc::Bcm2712, Output::Amplitude) => {
+            let cfg = rp1_am_config(hw)?;
+            Ok(Box::new(rp1::am::Rp1AmTransmitter::new(&cfg, plat.osc_hz).context("RP1 AM transmitter")?))
+        }
+        (_, Output::Frequency { max_offset_hz }) => bcm_transmitter(&plat, hw, max_offset_hz),
+        (_, Output::Amplitude) => bail!("AM needs a Raspberry Pi 5 so far"),
     }
 }
 
@@ -124,7 +151,7 @@ fn bcm_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<bcm::fm::
         Some(other) => bail!("--pacer {other}: use pwm or pcm"),
     };
     Ok(bcm::fm::BcmFmConfig {
-        carrier_hz: hw.freq * 1e6,
+        carrier_hz: hw.freq_hz,
         gpios: if hw.gpio.is_empty() { vec![4] } else { hw.gpio.clone() },
         method,
         pacer,
@@ -143,9 +170,9 @@ fn bcm_transmitter(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> an
     Ok(Box::new(bcm::fm::BcmFmTransmitter::new(&cfg, &b).context("BCM transmitter")?))
 }
 
-/// Print the detected platform and the frequency plan for a carrier
-/// offset of up to ±`max_offset_hz`, without touching the hardware.
-fn probe(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
+/// Print the detected platform and the frequency plan for `output`,
+/// without touching the hardware.
+fn probe(hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
     let plat = platform::detect()?;
     println!("Board:    {}", plat.model);
     println!("SoC:      {}", plat.soc);
@@ -165,6 +192,11 @@ fn probe(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
         Some(_) => println!("Time:     system clock not synchronised; --ppm auto cannot measure the crystal error"),
         None => {}
     }
+    let max_offset_hz = match output {
+        Output::Frequency { max_offset_hz } => max_offset_hz,
+        Output::Amplitude if plat.soc == Soc::Bcm2712 => return rp1_am_probe(&plat, hw),
+        Output::Amplitude => bail!("AM needs a Raspberry Pi 5 so far"),
+    };
     match plat.soc {
         Soc::Bcm2712 => {
             let cfg = rp1_config(hw, max_offset_hz)?;
@@ -209,6 +241,38 @@ fn probe(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<()> {
         }
         _ => bcm_probe(&plat, hw, max_offset_hz)?,
     }
+    Ok(())
+}
+
+fn rp1_am_probe(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<()> {
+    let cfg = rp1_am_config(hw)?;
+    let (chan, _) =
+        rp1::gpio::pwm0_for_pin(cfg.gpio).context("AM needs GPIO 12, 13, 18 or 19 on the Raspberry Pi 5")?;
+    let p = rp1::am::plan(cfg.carrier_hz, plat.osc_hz, cfg.sample_rate)?;
+    println!("RP1:      {}", rp1::find_pci_device()?.display());
+    println!(
+        "Carrier:  {:.4} kHz (AM) on GPIO{} via PWM0 channel {chan}: one centred pulse per period of {} clocks, \
+         {} width steps to full output",
+        p.carrier_hz / 1e3,
+        cfg.gpio,
+        2 * p.n,
+        p.n / 2
+    );
+    println!(
+        "Clocks:   pll_audio VCO {:.4} MHz = {:.0} MHz x ({} + {:#08x}/2^24), post /{}x{}, pri_ph /2, \
+         clk_pwm0 /{} = {:.3} MHz",
+        p.vco_hz / 1e6,
+        p.ref_hz / 1e6,
+        p.fbdiv_int,
+        p.frac as u32,
+        p.div1,
+        p.div2,
+        p.clk_div,
+        p.clk_hz / 1e6
+    );
+    println!("Sampling: {:.3} S/s ({} carrier cycles per sample)", p.sample_rate, p.cycles_per_sample);
+    let busy = rp1::dma::Dmac::kernel_channels_in_use();
+    println!("DMA:      kernel channels in use {busy:#04x}");
     Ok(())
 }
 

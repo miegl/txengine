@@ -8,7 +8,7 @@ transmission mode or a hardware platform means implementing one side.
 ```text
  audio file / stdin                                         GPIO pin
         │                                                      ▲
- ┌──────▼───────┐  ring   ┌──────────────┐  f32 Hz   ┌────────┴───────┐
+ ┌──────▼───────┐  ring   ┌──────────────┐    f32    ┌────────┴───────┐
  │ txengine-    │ ──────► │  Modulator   │ ────────► │    RfSink      │
  │ audio thread │ (rtrb)  │ (WFM: MPX +  │  samples  │ (RP1, BCM, or  │
  │ decode+resamp│         │  RDS)        │           │  file)         │
@@ -28,19 +28,22 @@ transmission mode or a hardware platform means implementing one side.
 | `txengine-dsp` | Allocation-free DSP blocks: Kaiser FIR design, linear-phase block FIRs, polyphase interpolator, pre-emphasis, pre-emphasis-aware look-ahead limiter, phase accumulator and sine table, small optimiser. |
 | `txengine-rds` | EN 50067: group coding and CRC, character set, scheduler/encoder, the physical layer (`RdsModulator`), and an independent decoder used by tests and `analyze`. |
 | `txengine-fm` | The wide-band FM mode: `MpxGenerator` (stereo multiplex) and `WfmModulator` (the `Modulator` implementation, control commands). |
-| `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input. |
-| `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backend, the RP1 (Pi 5) backend, the shutdown guardian; usbfs (USB without libusb) and the Pico backend (planning, `RfSink`). |
+| `txengine-am` | The AM broadcast mode: `EnvelopeGenerator` (programme to carrier envelope) and `AmModulator`. |
+| `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input; the programme the modes share (`Programme`, `AudioFeed`). |
+| `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backend, the RP1 (Pi 5) backends (FM and AM), amplitude by pulse width (`am`), the shutdown guardian; usbfs (USB without libusb) and the Pico backend (planning, `RfSink`). |
 | `txengine-pico-protocol` | The USB protocol between txengine and the Pico firmware, and the sigma-delta arithmetic both sides share. `no_std`, no dependencies. |
-| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, `devices`, the hardware backends and their selection (`hw/`), and per mode its options, set-up and tools (WFM: programme set-up, `analyze`). |
+| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, `devices`, the hardware backends and their selection (`hw/`), the programme input options every mode shares, and per mode its options, set-up and tools (WFM: `analyze`). |
 | `firmware/pico` | The RP2040/RP2350 firmware (embassy-rp), a cargo workspace of its own for the bare-metal targets. |
 
 ## The two interfaces
 
 ### `RfSink`
 
-A sink accepts a stream of `f32` samples, each the instantaneous carrier
-frequency offset in Hz (`SampleFormat::FrequencyOffset`), held for one
-sample period. It describes itself once in `SinkInfo`:
+A sink accepts a stream of `f32` samples of one kind (`SampleFormat`): the
+instantaneous carrier frequency offset in Hz, held for one sample period
+(`FrequencyOffset`, FM), or the carrier's amplitude, 0 to 1 of the
+strongest carrier it makes, interpolated between samples (`Amplitude`,
+AM). It describes itself once in `SinkInfo`:
 
 * `sample_rate`: the exact nominal rate the hardware runs at (derived from
   its dividers and the nominal crystal frequency, e.g. 50 MHz / 200 on the
@@ -52,6 +55,9 @@ sample period. It describes itself once in `SinkInfo`:
   Modulators may equalise it.
 * `max_offset_hz`, `resolution_hz`, `carrier_hz`.
 * `max_clock_error_ppm`: how large a crystal error the sink can correct.
+* `paced_by_carrier`: the carrier itself paces the samples (each lasts a
+  whole number of carrier cycles: AM), so correcting the carrier corrects
+  the sample clock too (see "Crystal error").
 
 `poll()` reports how many samples can be written, how many the hardware has
 consumed (`consumed`, an absolute sample index) and the underrun count;
@@ -74,19 +80,23 @@ so that it *ends* at the minute edge of the emission time, not the render
 time, and the WFM modulator keeps its subcarriers and the programme's
 playback speed true to the actual rate.
 
-A new transmission mode (e.g. narrow-band FM, AM via pad drive strength, a
-digital mode) implements `Modulator`. A mode that needs a different kind of
-sample (amplitude, I/Q) adds a `SampleFormat` variant, and sinks that can
-produce it advertise it.
+A new transmission mode (e.g. narrow-band FM, a digital mode) implements
+`Modulator`. A mode that needs a different kind of sample (I/Q, say) adds a
+`SampleFormat` variant, and sinks that can produce it advertise it.
 
 On the command line every mode is a command with its own subcommands
-(`txengine wfm tx | render | analyze`); `probe` and `tone` need no mode. A
-mode's options are a clap `Args` struct that implements `Mode`
-(`txengine/src/mode.rs`): the frequency range it needs from the transmitter,
-a check of the options, and building its modulator. The generic `Tx<M>` and
-`Render<M>` (`txengine/src/cli.rs`) add the options every mode shares
-(hardware, control, file output), and `mode::transmit` and `mode::render`
-run any mode. The WFM mode lives in `txengine/src/wfm/`.
+(`txengine wfm tx | render | analyze`, `txengine am tx | render`); `probe`
+and `tone` need no mode. A mode's options are a clap `Args` struct that
+implements `Mode` (`txengine/src/mode.rs`): what it needs from the
+transmitter (`hw::Output`: frequency modulation over a range, or
+amplitude), a check of the options, and building its modulator for the
+opened output (its `SinkInfo`: rate, real time or not, and the buffer the
+programme must fill at the start). The generic `Tx<M>` and `Render<M>`
+(`txengine/src/cli.rs`) add the options every mode shares (hardware,
+control, file output), the programme input options are one flattened
+struct (`txengine/src/programme.rs`), and `mode::transmit` and
+`mode::render` run any mode. The modes live in `txengine/src/wfm/` and
+`txengine/src/am/`.
 
 ## Signal processing (wide-band FM)
 
@@ -146,6 +156,35 @@ patterns each). Once per bit the waveform of that bit is assembled from
 three table rows, and each output sample is one interpolated look-up. The
 level is normalised to the all-zero reference sine (EN 50067 1.3).
 
+## Signal processing (AM)
+
+Double sideband with full carrier (A3E), as on long, medium and short wave
+(`txengine-am`). The envelope generator works like the multiplex: blocks of
+up to 512 output samples, one stage at a time.
+
+1. **Audio rate** `fa = fs / floor(fs / 24 kHz)` (25 kHz at 100 kS/s): mono
+   mix, DC blocker (10 Hz), gain, low-pass at the audio bandwidth (4.5 kHz
+   for the 9 kHz channels of ITU regions 1 and 3, up to 10 kHz; 60 dB from
+   10 % above it).
+2. **Interpolation** to `fs` (polyphase, 80 dB).
+3. **Limiter** (`PeakLimiter`): the multiplex's construction for one
+   channel, on the interpolated samples, so the true peaks stay within
+   ±1; look-ahead 1.5 ms, release 80 ms.
+4. **Envelope** `c·(1 + m·x)` with the carrier `c = 1 / (1 + m)`: the
+   positive peaks reach the transmitter's full output, the negative ones
+   never cut the carrier off.
+
+The sink turns the envelope into the transmitter's waveform; for a PWM
+output, `txengine-hal/src/am.rs`: one pulse per carrier period, centred on
+the same instant of every period, so that the fundamental's amplitude is
+`sin(π w / P)` (width `w`, period `P`) and its phase does not depend on the
+width. Every carrier cycle gets its own width: the envelope is interpolated
+linearly across the cycles of each sample (response `sinc²(f / fs)`,
+reported in `response_db`), mapped through an arcsine table and quantised
+by a second-order error-feedback loop, which moves the quantisation error
+from the carrier towards ±fc/2 (in a simulation of 999 kHz from 400 MHz,
+89 dB below the carrier within ±5 kHz).
+
 ## Hardware backends
 
 `--device BACKEND[:ARGS]` picks one (`txengine/src/hw/`): every backend
@@ -187,6 +226,30 @@ divider register, paced by hardware.
   kernel's handler never sees our channel.
 * PCIe ASPM is disabled on the RP1 link while transmitting: waking the link
   from L1 at a block boundary can take long enough to lose a tick.
+
+### Raspberry Pi 5 (RP1), AM
+
+* The carrier is a PWM0 channel in phase-correct mode (GPIO 12, 13, 18 or
+  19) from `pll_audio` → `pll_audio_pri_ph` → `clk_pwm0`, at up to 400 MHz
+  (RP1's datasheet gives 150 MHz; the counter and the pin follow at 400).
+  The channel counts up and down over `2n` clocks, one carrier period, and
+  its output is high while the count is below the duty value: one pulse of
+  `2·duty` clocks centred on the count's turning point. The planner picks
+  the largest `n` whose clock `2n · fc` the PLL reaches with room for the
+  crystal correction in its fraction (999 kHz: `n` = 200, 399.6 MHz).
+* The duty values come from the channel's 16-word FIFO, one per period,
+  which an AXI DMA channel refills on the PWM's request: the carrier paces
+  the samples. The ring and its bookkeeping are the FM backend's (LLIs in
+  pinned memory, VALID bits, stall detection and re-arming), with one word
+  per carrier cycle; the blocks are pages or fractions of a page so that
+  the buffer comes close to the length asked for. Channels 0 and 1 (8-beat
+  FIFO, bursts of 8 words) sustain 6.25 M words/s, the others 3.8 (both
+  measured), which limits the carrier to 6.2 MHz. A sample lasts the
+  whole number of carrier cycles that comes closest to 10 µs.
+* The crystal correction scales the PLL's feedback divider, which moves the
+  carrier and the sample clock together (`paced_by_carrier`).
+* The guardian restores the PLL, `clk_pwm0`, the PWM block, the pin and
+  the link power states, as in the FM backend.
 
 ### Raspberry Pi 1-4 (BCM283x, BCM2711)
 
@@ -392,6 +455,15 @@ half full by its drift loop, which absorbs whatever difference remains
 between the source's clock and true time. (Changing the hardware rate
 instead, as PiFmAdv's `--ppm` does, makes a live input over- or underrun
 unless the input follows.)
+
+Except where the carrier paces the samples (`SinkInfo::paced_by_carrier`,
+AM): there the carrier correction corrects the sample clock as well, the
+samples leave at the nominal rate in true time, and the engine passes the
+nominal rate to the modulator. The estimator must not see those
+corrections, or it would measure an error that the correction already
+removed and undo it: every poll's position is mapped to the position the
+sink would have reached uncorrected (each sample emitted under a
+correction `c` counts as `1 + c` samples), and the fit runs on that.
 
 The error is measured by `ClockDiscipline`, which wraps `RfSink::poll`:
 each poll reads the hardware position bracketed by two readings of

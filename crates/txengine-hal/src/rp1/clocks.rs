@@ -171,13 +171,20 @@ impl Pll {
     }
 }
 
-/// General purpose clock generator (`clk_gp0` .. `clk_gp5`).
+/// A clock generator of the clock manager: a general purpose one
+/// (`clk_gp0` .. `clk_gp5`, which can drive GPIO pads) or a peripheral's
+/// (`clk_pwm0`). They share the register layout: CTRL, DIV_INT, DIV_FRAC,
+/// SEL.
 #[derive(Debug, Clone)]
 pub struct ClockGen {
     clk: Mmio,
     clk_set: Mmio,
     clk_clr: Mmio,
-    pub n: usize,
+    name: &'static str,
+    /// Offset of the CTRL register.
+    ctrl: usize,
+    /// Its bit in GPCLK_OE_CTRL (pad output enable), if it has one.
+    oe: Option<u32>,
 }
 
 /// Raw snapshot of a clock generator.
@@ -190,33 +197,67 @@ pub struct ClockGenRegs {
 }
 
 impl ClockGen {
+    /// General purpose clock generator `n` (0..=5).
     pub fn new(clocks: &Mmio, clocks_set: &Mmio, clocks_clr: &Mmio, n: usize) -> ClockGen {
-        assert!(n <= 5);
-        ClockGen { clk: clocks.clone(), clk_set: clocks_set.clone(), clk_clr: clocks_clr.clone(), n }
+        const NAMES: [&str; 6] = ["clk_gp0", "clk_gp1", "clk_gp2", "clk_gp3", "clk_gp4", "clk_gp5"];
+        ClockGen {
+            clk: clocks.clone(),
+            clk_set: clocks_set.clone(),
+            clk_clr: clocks_clr.clone(),
+            name: NAMES[n],
+            ctrl: gp_ctrl(n),
+            oe: Some(1 << n),
+        }
+    }
+
+    /// The clock of the PWM0 block.
+    pub fn pwm0(clocks: &Mmio, clocks_set: &Mmio, clocks_clr: &Mmio) -> ClockGen {
+        ClockGen {
+            clk: clocks.clone(),
+            clk_set: clocks_set.clone(),
+            clk_clr: clocks_clr.clone(),
+            name: "clk_pwm0",
+            ctrl: CLK_PWM0_CTRL,
+            oe: None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn div_int(&self) -> usize {
+        self.ctrl + 0x4
+    }
+
+    fn div_frac(&self) -> usize {
+        self.ctrl + 0x8
     }
 
     pub fn snapshot(&self) -> ClockGenRegs {
         ClockGenRegs {
-            ctrl: self.clk.read(gp_ctrl(self.n)),
-            div_int: self.clk.read(gp_div_int(self.n)),
-            div_frac: self.clk.read(gp_div_frac(self.n)),
-            oe: self.clk.read(GPCLK_OE_CTRL) & (1 << self.n) != 0,
+            ctrl: self.clk.read(self.ctrl),
+            div_int: self.clk.read(self.div_int()),
+            div_frac: self.clk.read(self.div_frac()),
+            oe: self.oe.is_some_and(|b| self.clk.read(GPCLK_OE_CTRL) & b != 0),
         }
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.clk.read(gp_ctrl(self.n)) & CTRL_ENABLE != 0
+        self.clk.read(self.ctrl) & CTRL_ENABLE != 0
     }
 
     /// The one-hot source selection status register.
     pub fn selected(&self) -> u32 {
-        self.clk.read(gp_sel(self.n))
+        self.clk.read(self.ctrl + 0xc)
     }
 
     /// Stop the clock and disable its pad output.
     pub fn disable(&self) {
-        self.clk_clr.write(GPCLK_OE_CTRL, 1 << self.n);
-        self.clk_clr.write(gp_ctrl(self.n), CTRL_ENABLE);
+        if let Some(b) = self.oe {
+            self.clk_clr.write(GPCLK_OE_CTRL, b);
+        }
+        self.clk_clr.write(self.ctrl, CTRL_ENABLE);
     }
 
     /// Select auxiliary source `auxsrc`, program an integer (+ 16 bit
@@ -224,37 +265,39 @@ impl ClockGen {
     /// glitchless mux has switched to the requested source.
     pub fn configure(&self, auxsrc: u32, div_int: u32, div_frac16: u32) -> Result<()> {
         if div_int == 0 || div_int > 0xffff || div_frac16 > 0xffff {
-            return Err(HalError::Config(format!("clk_gp{}: invalid divider {div_int}.{div_frac16}", self.n)));
+            return Err(HalError::Config(format!("{}: invalid divider {div_int}.{div_frac16}", self.name)));
         }
         self.disable();
-        let ctrl = (self.clk.read(gp_ctrl(self.n)) & !(CTRL_AUXSRC_MASK | CTRL_ENABLE))
+        let ctrl = (self.clk.read(self.ctrl) & !(CTRL_AUXSRC_MASK | CTRL_ENABLE))
             | ((auxsrc << CTRL_AUXSRC_SHIFT) & CTRL_AUXSRC_MASK);
-        self.clk.write(gp_ctrl(self.n), ctrl);
-        self.clk.write(gp_div_int(self.n), div_int);
-        self.clk.write(gp_div_frac(self.n), div_frac16 << DIV_FRAC_SHIFT);
-        self.clk_set.write(gp_ctrl(self.n), CTRL_ENABLE);
-        wait_until(Duration::from_millis(10), &format!("clk_gp{} start", self.n), || {
-            self.clk.read(gp_ctrl(self.n)) & CTRL_ENABLED != 0
+        self.clk.write(self.ctrl, ctrl);
+        self.clk.write(self.div_int(), div_int);
+        self.clk.write(self.div_frac(), div_frac16 << DIV_FRAC_SHIFT);
+        self.clk_set.write(self.ctrl, CTRL_ENABLE);
+        wait_until(Duration::from_millis(10), &format!("{} start", self.name), || {
+            self.clk.read(self.ctrl) & CTRL_ENABLED != 0
         })?;
-        let ctrl_rb = self.clk.read(gp_ctrl(self.n));
+        let ctrl_rb = self.clk.read(self.ctrl);
         if (ctrl_rb & CTRL_AUXSRC_MASK) >> CTRL_AUXSRC_SHIFT != auxsrc || ctrl_rb & CTRL_ENABLE == 0 {
-            return Err(HalError::Hardware(format!("clk_gp{}: control read-back {ctrl_rb:#x}", self.n)));
+            return Err(HalError::Hardware(format!("{}: control read-back {ctrl_rb:#x}", self.name)));
         }
         Ok(())
     }
 
     /// Enable the clock's output to the GPIO pads.
     pub fn enable_output(&self) {
-        self.clk_set.write(GPCLK_OE_CTRL, 1 << self.n);
+        if let Some(b) = self.oe {
+            self.clk_set.write(GPCLK_OE_CTRL, b);
+        }
     }
 
     pub fn restore(&self, s: &ClockGenRegs) {
         self.disable();
-        self.clk.write(gp_div_int(self.n), s.div_int);
-        self.clk.write(gp_div_frac(self.n), s.div_frac);
-        self.clk.write(gp_ctrl(self.n), s.ctrl);
+        self.clk.write(self.div_int(), s.div_int);
+        self.clk.write(self.div_frac(), s.div_frac);
+        self.clk.write(self.ctrl, s.ctrl);
         if s.oe {
-            self.clk_set.write(GPCLK_OE_CTRL, 1 << self.n);
+            self.enable_output();
         }
     }
 }
@@ -273,6 +316,7 @@ impl FcSource {
     pub const PLL_SYS: FcSource = FcSource { idx: 0, src: 2 };
     pub const PLL_AUDIO: FcSource = FcSource { idx: 4, src: 2 };
     pub const PLL_AUDIO_PRI_PH: FcSource = FcSource { idx: 5, src: 1 };
+    pub const PWM0: FcSource = FcSource { idx: 0, src: 5 };
     pub const PLL_VIDEO: FcSource = FcSource { idx: 3, src: 2 };
 }
 

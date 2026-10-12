@@ -1,5 +1,6 @@
 //! Raspberry Pi hardware backends for txengine.
 
+pub mod am;
 pub mod bcm;
 pub mod cpufreq;
 pub mod error;

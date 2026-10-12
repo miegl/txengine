@@ -1,5 +1,6 @@
 //! RP1 south bridge (Raspberry Pi 5) support.
 
+pub mod am;
 pub mod clocks;
 pub mod dma;
 pub mod fm;
