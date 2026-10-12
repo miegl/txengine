@@ -6,6 +6,11 @@ use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use txengine_audio::{AudioInput, AudioOptions, EndOfInput, InputSpec, Programme};
+use txengine_core::SinkInfo;
+
+/// Programme the input must hold beyond the output's first fill before
+/// the transmitter starts (s): the next few render chunks (4 ms each).
+const START_MARGIN: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum OnEnd {
@@ -57,9 +62,13 @@ fn end_policy(p: &ProgrammeArgs, stdin: bool, realtime: bool) -> EndOfInput {
     }
 }
 
-/// Open the programme input at the modulator's audio rate. `realtime`:
-/// for a transmitter, whose crystal error is corrected while running.
-pub fn open(p: &ProgrammeArgs, audio_rate: f64, realtime: bool) -> anyhow::Result<Programme> {
+/// Open the programme input at the modulator's audio rate, for `sink`.
+/// For a transmitter (in real time), whose crystal error is corrected while
+/// running, the input is given the time to buffer what the transmitter
+/// takes at once when it starts (its output buffer), and a live input the
+/// level it is kept at ([`AudioInput::wait_ready`]).
+pub fn open(p: &ProgrammeArgs, audio_rate: f64, sink: &SinkInfo) -> anyhow::Result<Programme> {
+    let realtime = sink.realtime;
     let (spec, stdin) = match (&p.audio, p.tone) {
         (_, Some(f)) => (InputSpec::Tone { freq: f, amplitude: 0.5, stereo: false }, false),
         (None, None) => return Ok(Programme::None),
@@ -73,5 +82,11 @@ pub fn open(p: &ProgrammeArgs, audio_rate: f64, realtime: bool) -> anyhow::Resul
     let opts =
         AudioOptions { end, buffer: Duration::from_millis(500), adjustable_rate: realtime, ..Default::default() };
     let input = AudioInput::open(&spec, audio_rate, &opts)?;
+    if realtime {
+        let start = sink.buffer_len as f64 / sink.sample_rate + START_MARGIN;
+        if !input.wait_ready((start * audio_rate).ceil() as usize, Duration::from_secs(1)) {
+            log::debug!("audio input: not ready after 1 s; starting anyway");
+        }
+    }
     Ok(Programme::Audio(input, end))
 }

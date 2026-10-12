@@ -103,6 +103,8 @@ pub struct AudioInput {
     thread: Option<JoinHandle<()>>,
     /// Wait for the decoder instead of returning short (rendering to files).
     blocking: bool,
+    /// The decoder's drift loop holds the buffer half full (a live input).
+    drift: bool,
     pub info: SourceInfo,
     pub rate: f64,
 }
@@ -138,7 +140,7 @@ impl AudioInput {
             .name("txengine-audio".into())
             .spawn(move || worker.run())
             .map_err(|e| AudioError::Io("spawn audio thread".into(), e))?;
-        Ok(AudioInput { rx, shared, capacity, thread: Some(thread), blocking: false, info, rate })
+        Ok(AudioInput { rx, shared, capacity, thread: Some(thread), blocking: false, drift, info, rate })
     }
 
     /// In blocking mode [`AudioInput::read`] waits until `out` can be filled
@@ -186,6 +188,27 @@ impl AudioInput {
     /// [`AudioOptions::adjustable_rate`] unless the input is resampled anyway.
     pub fn set_rate_correction_ppm(&self, ppm: f64) {
         self.shared.rate_ppm.store(ppm.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Wait until a transmitter can start, for at most `timeout`: the
+    /// decoder thread has only just begun, and the transmitter takes
+    /// `frames` at once when it starts (its output buffer). A live input
+    /// also fills up to the half its drift loop keeps the buffer at, so
+    /// that it starts with the margin against delivery jitter it runs with
+    /// (the latency it settles at anyway). Returns whether it got there
+    /// before the timeout or the end of the input.
+    pub fn wait_ready(&self, frames: usize, timeout: std::time::Duration) -> bool {
+        let frames = (if self.drift { frames.max(self.capacity / 2) } else { frames }).min(self.capacity);
+        let t = std::time::Instant::now();
+        loop {
+            if self.rx.slots() >= frames || self.shared.eof.load(Ordering::Acquire) {
+                return true;
+            }
+            if t.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// Frames currently buffered.

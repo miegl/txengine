@@ -1,7 +1,7 @@
 //! Building the WFM modulator from command line options.
 
 use anyhow::{Context, bail};
-use txengine_core::Modulator;
+use txengine_core::{Modulator, SinkInfo};
 use txengine_fm::{MpxConfig, StereoMode, WfmModulator};
 use txengine_rds::encoder::{af_code, encode_rt, encode8};
 use txengine_rds::{DecoderInfo, RdsParams};
@@ -140,10 +140,10 @@ impl Mode for WfmArgs {
         Ok(())
     }
 
-    fn modulator(&self, sample_rate: f64, realtime: bool) -> anyhow::Result<Box<dyn Modulator>> {
+    fn modulator(&self, sink: &SinkInfo) -> anyhow::Result<Box<dyn Modulator>> {
         let cfg = mpx_config(self)?;
         let rds = rds_params(self)?;
-        let programme = programme::open(&self.programme, WfmModulator::audio_rate_for(sample_rate), realtime)?;
+        let programme = programme::open(&self.programme, WfmModulator::audio_rate_for(sink.sample_rate), sink)?;
         let mut m = WfmModulator::new(cfg, programme, rds, self.rds != 0).map_err(anyhow::Error::msg)?;
         m.set_local_offset_fn(Box::new(crate::rt::local_offset));
         Ok(Box::new(m))

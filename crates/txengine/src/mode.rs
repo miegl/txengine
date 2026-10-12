@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use log::info;
-use txengine_core::{Modulator, RfSink};
+use txengine_core::{Modulator, RfSink, SinkInfo};
 
 use crate::cli::{ControlArgs, HardwareArgs, OutputArgs, RenderFormat};
 use crate::{clock, control, engine, hw, rt, sinks};
@@ -20,9 +20,8 @@ pub trait Mode {
     /// carrier frequency, when transmitting.
     fn check(&self, carrier_mhz: Option<f64>) -> anyhow::Result<()>;
 
-    /// Create the modulator for an output running at `sample_rate` (in real
-    /// time for a transmitter).
-    fn modulator(&self, sample_rate: f64, realtime: bool) -> anyhow::Result<Box<dyn Modulator>>;
+    /// Create the modulator for the output `sink` (a transmitter, or a file).
+    fn modulator(&self, sink: &SinkInfo) -> anyhow::Result<Box<dyn Modulator>>;
 }
 
 pub fn transmit(hw: &HardwareArgs, ctl: &ControlArgs, mode: &dyn Mode) -> anyhow::Result<()> {
@@ -35,7 +34,7 @@ pub fn transmit(hw: &HardwareArgs, ctl: &ControlArgs, mode: &dyn Mode) -> anyhow
     // The hardware is opened while still single threaded: it forks the
     // shutdown guardian.
     let mut sink = device.open(hw, mode.max_offset_hz())?;
-    let mut m = mode.modulator(sink.info().sample_rate, true)?;
+    let mut m = mode.modulator(sink.info())?;
     m.configure(sink.info()).map_err(anyhow::Error::msg)?;
     let mut clock = clock::ClockDiscipline::new(hw.ppm, Box::new(clock::SystemClock::default()));
 
@@ -85,7 +84,7 @@ pub fn render(out: &OutputArgs, mode: &dyn Mode) -> anyhow::Result<()> {
         }
         RenderFormat::Null => Box::new(sinks::FileSink::null(fs)),
     };
-    let mut m = mode.modulator(fs, false)?;
+    let mut m = mode.modulator(sink.info())?;
     m.configure(sink.info()).map_err(anyhow::Error::msg)?;
     let start = out.start_time.unwrap_or_else(rt::unix_now);
     let opts = engine::EngineOptions { duration: None, status_interval: None, start_time: Some(start) };
