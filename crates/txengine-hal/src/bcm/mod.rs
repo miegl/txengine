@@ -5,6 +5,8 @@ pub mod dma;
 pub mod fm;
 pub mod regs;
 
+use std::time::Duration;
+
 use crate::error::{HalError, Result};
 use crate::mmio::Mmio;
 use crate::platform::{Platform, Soc};
@@ -80,4 +82,54 @@ pub const GPCLK_PINS: &[(u32, usize, u32)] = &[
 
 pub fn gpclk_for_pin(gpio: u32) -> Option<(usize, u32)> {
     GPCLK_PINS.iter().find(|p| p.0 == gpio).map(|p| (p.1, p.2))
+}
+
+/// Pad control register of the bank `gpio` is in.
+fn pads_reg(gpio: u32) -> usize {
+    if gpio < 28 { regs::pads::GPIO_0_27 } else { regs::pads::GPIO_28_45 }
+}
+
+/// A GPIO's function and its bank's pad control, as found before use.
+#[derive(Debug, Clone, Copy)]
+pub struct PinState {
+    gpio: u32,
+    fsel: u32,
+    pads: u32,
+}
+
+impl PinState {
+    pub fn save(bcm: &Bcm, gpio: u32) -> PinState {
+        PinState {
+            gpio,
+            fsel: (bcm.gpio.read(regs::gpio::fsel(gpio)) >> regs::gpio::fsel_shift(gpio)) & 7,
+            pads: bcm.pads.read(pads_reg(gpio)),
+        }
+    }
+
+    /// Put the function and the pad control back (`gpio`, `pads`: the
+    /// register blocks).
+    pub fn restore(&self, gpio: &Mmio, pads: &Mmio) {
+        let sh = regs::gpio::fsel_shift(self.gpio);
+        gpio.modify(regs::gpio::fsel(self.gpio), 7 << sh, self.fsel << sh);
+        pads.write(pads_reg(self.gpio), regs::pads::PASSWORD | (self.pads & 0xff_ffff));
+    }
+}
+
+/// Switch `pin` to the function `alt`, after setting its bank's pads to
+/// the drive strength `drive` (0-7: 2-16 mA) with unlimited slew rate
+/// (`gpio`, `pads`: the register blocks).
+pub fn set_pin_function(gpio: &Mmio, pads: &Mmio, pin: u32, alt: u32, drive: u8) {
+    use regs::pads::{HYST, PASSWORD, SLEW_UNLIMITED};
+    pads.write(pads_reg(pin), PASSWORD | SLEW_UNLIMITED | HYST | drive as u32);
+    let sh = regs::gpio::fsel_shift(pin);
+    gpio.modify(regs::gpio::fsel(pin), 7 << sh, alt << sh);
+}
+
+/// Write a PWM register and wait until it reads back: every write must pass
+/// the PWM's clock-domain synchroniser before the next one, and with a slow
+/// PWM clock successive writes get lost (`STA.BERR`).
+pub fn pwm_write_confirmed(pwm: &Mmio, reg: usize, v: u32) -> Result<()> {
+    pwm.write(reg, v);
+    crate::sys::wait_until(Duration::from_millis(5), "PWM register write", || pwm.read(reg) == v)?;
+    Ok(())
 }

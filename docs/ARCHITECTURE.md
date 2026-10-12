@@ -263,7 +263,7 @@ divider register, paced by hardware.
   SDIO buses run at their 50 MHz maximum. A PLL whose only users are the
   GPU's video and 3D blocks (`h264`, `isp`, `v3d` on its CORE channel:
   normally PLLA) may move down by up to 15 % on the BCM2836/7
-  (`fm::GPU_PLL_MAX_DECREASE`): from 2250 MHz that reaches every carrier
+  (`cprman::GPU_PLL_MAX_DECREASE`): from 2250 MHz that reaches every carrier
   in 87.5–108 MHz, where ±3 % reaches 76 % of the band (PLLC at ±3 %:
   50 %). Idle PLLs are preferred and powered up with the kernel's loop
   settings; otherwise, on the BCM2836/7, PLLA, then PLLC (the BCM2711, not

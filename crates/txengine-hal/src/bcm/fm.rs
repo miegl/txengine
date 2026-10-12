@@ -28,12 +28,12 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
-use super::cprman::{Cprman, Pll, PllConfig, PllId, PllState, PllUsers};
+use super::cprman::{ClockWatch, Cprman, Pll, PllConfig, PllId, PllRoom, PllState, PllUsers, pll_preference};
 use super::dma::{ControlBlock, DmaChannel};
-use super::regs::{self, cm, dma as dmar, pads, pcm, pwm};
-use super::{Bcm, gpclk_for_pin};
+use super::regs::{self, cm, dma as dmar, pcm, pwm};
+use super::{Bcm, PinState, gpclk_for_pin, pwm_write_confirmed, set_pin_function};
 use crate::MAX_CLOCK_ERROR_PPM;
-use crate::cpufreq::CpuClockPin;
+use crate::cpufreq::{CpuClockPin, CpuPinGuard};
 use crate::error::{HalError, Result};
 use crate::guardian::Guardian;
 use crate::mem::mailbox::VcMemory;
@@ -77,6 +77,8 @@ pub struct BcmFmConfig {
     /// clocks, and EMMC (the WiFi's SDIO host); PLLD the PL011 UART and
     /// HDMI. The UARTs tolerate a baud rate error of about ±3 %, and the
     /// SD and SDIO buses already run at their 50 MHz maximum.
+    ///
+    /// [`GPU_PLL_MAX_DECREASE`]: super::cprman::GPU_PLL_MAX_DECREASE
     pub max_vco_change: f64,
 }
 
@@ -170,57 +172,21 @@ pub fn modulation_ki(pll: &Pll) -> Option<u32> {
     (matches!(pll.id, PllId::A | PllId::C) && !pll.is_bcm2711()).then_some(MODULATION_KI)
 }
 
-/// How far down the VCO of a PLL whose only users are the GPU's video and
-/// 3D blocks (normally PLLA) may be moved on the BCM2836/7: those blocks
-/// then run up to this much slower, and nothing else depends on them. From
-/// PLLA's 2250 MHz this reaches every carrier in 87.5–108 MHz (at most
-/// −12 % is needed; ±3 % reaches 76 % of the band). The loop's response
-/// and noise measure the same from 1927 to 2365 MHz (−14 % to +5 %).
-/// Upwards, which would overclock the blocks, the general limit applies.
-pub const GPU_PLL_MAX_DECREASE: f64 = 0.15;
-
 /// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
 pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64, max_change: f64) -> Result<BcmPlan> {
-    let gp_ctl = cm::gp(gpclk);
-    let running = pll.is_powered() && pll.is_locked();
-    let users = if running { pll.users(gp_ctl) } else { PllUsers::default() };
-    let shared = !users.is_empty();
-    let max_decrease =
-        if users.gpu_only && !pll.is_bcm2711() { max_change.max(GPU_PLL_MAX_DECREASE) } else { max_change };
-    let fb = if running { pll.fb_mult() } else { 1.0 };
-    let unit_hz = osc * fb / (1u64 << cm::A2W_FRAC_BITS) as f64;
-    let vco_old = if running { pll.vco_hz() } else { 0.0 };
-    let cur_per = pll.per_divider();
-    // A PER channel used by another clock must keep its divider.
-    let per_choices: Vec<u32> = match (cur_per, users.per.is_empty()) {
-        (Some(d), false) => vec![d],
-        _ => (1..=8).collect(),
-    };
+    let room = PllRoom::of(pll, cm::gp(gpclk), max_change);
+    let unit_hz = osc * room.fb / (1u64 << cm::A2W_FRAC_BITS) as f64;
     // Room for correcting the crystal error at run time.
     let reserve_hz = carrier * MAX_CLOCK_ERROR_PPM * 1e-6;
     let mut best: Option<(f64, BcmPlan)> = None;
-    for &per in &per_choices {
+    for &per in &room.per_choices {
         for gp in 1..=4095u32 {
             let n = per * gp;
             let vco = carrier * n as f64;
             if vco > 2.4e9 {
                 break;
             }
-            // VCO limits; BCM2835/6/7 switch the feedback pre-divider above
-            // 1.75 GHz, which we never change on a running PLL.
-            let (lo, hi) = if running && shared {
-                (vco_old * (1.0 - max_decrease), vco_old * (1.0 + max_change))
-            } else if running {
-                (600e6, if fb > 1.0 { 2.4e9 } else { 1.75e9 })
-            } else {
-                (1.0e9, 1.75e9)
-            };
-            if vco < lo || vco > hi || vco < 600e6 {
-                continue;
-            }
-            // The firmware never runs a PER channel faster than ~1 GHz
-            // (PLLC_PER feeds EMMC at 1 GHz); stay in that region.
-            if vco / per as f64 > 1.25e9 {
+            if !room.allows(vco, per) {
                 continue;
             }
             let units = vco / unit_hz;
@@ -231,10 +197,10 @@ pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64
             if margin < 0.005 || !(1.0..=1023.0).contains(&ndiv) {
                 continue;
             }
-            let change = if running { (vco - vco_old).abs() / vco_old } else { 0.0 };
             // Prefer: least disturbance, then no GPCLK division beyond what
             // is needed, then a high VCO (lower relative jitter).
-            let score = change * 100.0 + if running { 0.0 } else { (vco - 1.5e9).abs() / 1e9 } - margin * 0.01;
+            let score =
+                room.change(vco) * 100.0 + if room.running { 0.0 } else { (vco - 1.5e9).abs() / 1e9 } - margin * 0.01;
             if best.as_ref().is_none_or(|(s, _)| score < *s) {
                 let center = units.round();
                 let units_per_hz = n as f64 / unit_hz;
@@ -244,19 +210,19 @@ pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64
                         method: BcmMethod::Pll(pll.id),
                         gpclk,
                         gpclk_src: pll.id.gpclk_source(),
-                        power_up: !running,
-                        set_per: cur_per != Some(per) || !running,
+                        power_up: !room.running,
+                        set_per: room.per_now != Some(per) || !room.running,
                         ndiv: ndiv as u32,
                         center,
                         units_per_hz,
                         per_div: per,
                         gp_div: gp,
-                        vco_old,
+                        vco_old: room.vco_old,
                         vco_new: center * unit_hz,
                         carrier_hz: center * unit_hz / n as f64,
                         max_offset_hz: ((frac.min(1.0 - frac)) * (1u64 << cm::A2W_FRAC_BITS) as f64) / units_per_hz
                             - reserve_hz,
-                        users: users.clone(),
+                        users: room.users.clone(),
                         step_hz: 1.0 / units_per_hz,
                         loop_ki: modulation_ki(pll),
                     },
@@ -264,18 +230,7 @@ pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64
             }
         }
     }
-    best.map(|b| b.1).ok_or_else(|| {
-        HalError::Config(format!(
-            "{} cannot produce {:.4} MHz with its VCO within -{:.0} % / +{:.0} % of {:.1} MHz \
-             (it also drives: {}); choose another --pll",
-            pll.id.name(),
-            carrier / 1e6,
-            max_decrease * 100.0,
-            max_change * 100.0,
-            vco_old / 1e6,
-            users.names().join(", ")
-        ))
-    })
+    best.map(|b| b.1).ok_or_else(|| room.exhausted(pll.id, &format!("{:.4} MHz", carrier / 1e6)))
 }
 
 /// Plan clock-divider modulation from the PER channel of `pll` (unchanged).
@@ -495,14 +450,6 @@ pub fn plan_pacer(src_hz: f64, target: f64, min_rng: u32, max_rng: u32, max_clk_
     candidates.into_iter().min_by(|a, b| error_uhz(a).cmp(&error_uhz(b)).then(clk(b).total_cmp(&clk(a))))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PinState {
-    gpio: u32,
-    fsel: u32,
-    pads_reg: usize,
-    pads: u32,
-}
-
 /// Everything needed to restore the hardware (also run by the guardian).
 #[derive(Debug, Clone)]
 struct Restorer {
@@ -545,42 +492,18 @@ impl Restorer {
             }
         }
         let pclk = if self.pacer == Pacer::Pwm { cm::PWM } else { cm::PCM };
-        restore_clock(&self.cm, pclk, self.pacer_clk_saved);
+        self.cm.restore_clock(pclk, self.pacer_clk_saved);
         // Output off: pins back to their previous function, then the clock.
         for p in &self.pins {
-            let reg = regs::gpio::fsel(p.gpio);
-            let sh = regs::gpio::fsel_shift(p.gpio);
-            self.gpio.modify(reg, 7 << sh, p.fsel << sh);
-            self.pads.write(p.pads_reg, pads::PASSWORD | (p.pads & 0xffffff));
+            p.restore(&self.gpio, &self.pads);
         }
-        restore_clock(&self.cm, self.gp_ctl, self.gp_saved);
+        self.cm.restore_clock(self.gp_ctl, self.gp_saved);
         if let Some((pll, s)) = &self.pll
             && let Err(e) = pll.restore(s)
         {
             warn!("{}: {e}", pll.id.name());
         }
         self.cpu.restore();
-    }
-}
-
-/// Restores the CPU clock if construction fails before the [`Restorer`]
-/// has taken it over.
-struct CpuPinGuard(Option<CpuClockPin>);
-
-impl Drop for CpuPinGuard {
-    fn drop(&mut self) {
-        if let Some(p) = self.0.take() {
-            p.restore();
-        }
-    }
-}
-
-fn restore_clock(cm: &Cprman, ctl: usize, saved: (u32, u32)) {
-    let _ = cm.clock_stop(ctl);
-    cm.write(cm::div(ctl), saved.1);
-    cm.write(ctl, saved.0 & !cm::ENAB);
-    if saved.0 & cm::ENAB != 0 {
-        cm.write(ctl, saved.0);
     }
 }
 
@@ -605,8 +528,8 @@ pub struct BcmFmTransmitter {
     pll: Option<Pll>,
     /// The PLL as configured for transmission (checked for interference).
     pll_good: Option<PllConfig>,
-    /// Gate (crystal cycles) of the carrier frequency count in progress.
-    carrier_count: Option<u32>,
+    /// Counts the carrier in the background.
+    carrier_watch: ClockWatch,
     // Layout (byte offsets in `mem`).
     n: usize,
     cb_base: u32,
@@ -682,18 +605,7 @@ impl BcmFmTransmitter {
             }
             Some(BcmMethod::ClkDiv) => plan_clkdiv(&pll_of(PllId::D), gpclk, cfg.carrier_hz, cfg.max_offset_hz)?,
             None => {
-                // An idle PLL is ideal. Otherwise, on the BCM2836/7, PLLA,
-                // which normally clocks only the GPU's blocks and covers the
-                // whole band (see `GPU_PLL_MAX_DECREASE`), then PLLC, which
-                // clocks the VPU, the SD card and the WiFi. The BCM2711 has
-                // not been measured and keeps PLLC first.
-                let candidates = [PllId::A, PllId::C, PllId::D];
-                let idle = candidates.into_iter().find(|&id| {
-                    let p = pll_of(id);
-                    !(p.is_powered() && p.is_locked()) || p.users(gp_ctl).is_empty()
-                });
-                let shared = if bcm.bcm2711 { [PllId::C, PllId::A] } else { [PllId::A, PllId::C] };
-                let order: Vec<PllId> = idle.into_iter().chain(shared).collect();
+                let order = pll_preference(&cpr, osc, bcm.bcm2711, gp_ctl);
                 let mut last = None;
                 let mut found = None;
                 for id in order {
@@ -714,7 +626,7 @@ impl BcmFmTransmitter {
         };
         // From here on the DMA engine writes the PLL over the A2W bus, which
         // must not meet the firmware's CPU clock changes (see `cpufreq`).
-        let mut cpu = CpuPinGuard(pll.is_some().then(CpuClockPin::pin));
+        let mut cpu = CpuPinGuard::new(pll.is_some().then(CpuClockPin::pin));
 
         // Pacer clock: PLLD_PER unless we modulate PLLD, else the crystal.
         let plld = pll_of(PllId::D);
@@ -795,18 +707,7 @@ impl BcmFmTransmitter {
         };
 
         // Snapshot everything we will touch.
-        let pins_state: Vec<PinState> = pins
-            .iter()
-            .map(|&(g, _)| {
-                let pads_reg = if g < 28 { pads::GPIO_0_27 } else { pads::GPIO_28_45 };
-                PinState {
-                    gpio: g,
-                    fsel: (bcm.gpio.read(regs::gpio::fsel(g)) >> regs::gpio::fsel_shift(g)) & 7,
-                    pads_reg,
-                    pads: bcm.pads.read(pads_reg),
-                }
-            })
-            .collect();
+        let pins_state: Vec<PinState> = pins.iter().map(|&(g, _)| PinState::save(bcm, g)).collect();
         let pacer_ctl = if cfg.pacer == Pacer::Pwm { cm::PWM } else { cm::PCM };
         if cpr.read(gp_ctl) & cm::ENAB != 0 {
             warn!("GPCLK{gpclk} was already running (another transmitter?); taking it over");
@@ -831,7 +732,7 @@ impl BcmFmTransmitter {
             ],
             pins: pins_state,
             pll: pll.as_ref().map(|p| (p.clone(), p.snapshot())),
-            cpu: cpu.0.take().unwrap_or_default(),
+            cpu: cpu.take(),
         };
 
         let users = plan.users.names();
@@ -925,7 +826,7 @@ impl BcmFmTransmitter {
             guardian: None,
             pll,
             pll_good: None,
-            carrier_count: None,
+            carrier_watch: ClockWatch::new(cm::TCNT_GP0 + plan.gpclk as u32, bcm.osc_hz, plan.carrier_hz),
             n,
             samples_off,
             idle_off,
@@ -1144,18 +1045,18 @@ impl BcmFmTransmitter {
                     self.pwm.write(pwm::CTL, 0);
                     self.pwm.write(pwm::DMAC, 0);
                     self.cm.clock_start(cm::PWM, src, divi, divf, mash)?;
-                    self.pwm_write_confirmed(pwm::CTL, 0)?;
-                    self.pwm_write_confirmed(pwm::DMAC, 0)?;
-                    self.pwm_write_confirmed(pwm::RNG1, rng)?;
+                    pwm_write_confirmed(&self.pwm, pwm::CTL, 0)?;
+                    pwm_write_confirmed(&self.pwm, pwm::DMAC, 0)?;
+                    pwm_write_confirmed(&self.pwm, pwm::RNG1, rng)?;
                     self.pwm.write(pwm::CTL, pwm::CTL_CLRF1);
                     crate::sys::wait_until(Duration::from_millis(5), "PWM FIFO clear", || {
                         self.pwm.read(pwm::STA) & pwm::STA_EMPT1 != 0
                     })?;
                     self.pwm.write(pwm::STA, pwm::STA_ERRORS);
                     // DREQ while fewer than 8 words are queued; panic at 15.
-                    self.pwm_write_confirmed(pwm::DMAC, pwm::DMAC_ENAB | (15 << 8) | 8)?;
+                    pwm_write_confirmed(&self.pwm, pwm::DMAC, pwm::DMAC_ENAB | (15 << 8) | 8)?;
                     let ctl = pwm::CTL_USEF1 | pwm::CTL_MODE1 | pwm::CTL_PWEN1;
-                    self.pwm_write_confirmed(pwm::CTL, ctl)?;
+                    pwm_write_confirmed(&self.pwm, pwm::CTL, ctl)?;
                     let sta = self.pwm.read(pwm::STA);
                     if sta & pwm::STA_BERR == 0 {
                         break;
@@ -1212,13 +1113,6 @@ impl BcmFmTransmitter {
         Ok(())
     }
 
-    /// Write a PWM register and wait until it reads back.
-    fn pwm_write_confirmed(&self, reg: usize, v: u32) -> Result<()> {
-        self.pwm.write(reg, v);
-        crate::sys::wait_until(Duration::from_millis(5), "PWM register write", || self.pwm.read(reg) == v)?;
-        Ok(())
-    }
-
     /// Ring position of the DMA engine: Some(samples consumed modulo n), or
     /// None when parked in the idle loop.
     fn dma_position(&self) -> Result<Option<usize>> {
@@ -1264,7 +1158,7 @@ impl BcmFmTransmitter {
         // stereo pilot alone), so the registers are only read once the
         // frequency is wrong: another user of the counter can cause that too.
         if self.pll_good.is_some() {
-            let wrong_hz = self.count_carrier();
+            let wrong_hz = self.carrier_watch.check(&self.cm);
             if let (Some(p), Some(good)) = (&self.pll, &self.pll_good)
                 && (!p.is_locked() || (wrong_hz.is_some() && !p.matches(good)))
             {
@@ -1283,31 +1177,6 @@ impl BcmFmTransmitter {
             }
         }
         Ok(())
-    }
-
-    /// Count the carrier with the frequency counter in the background, one
-    /// gate per health check. Returns the frequency of a finished count if
-    /// it is off by more than the modulation and the crystal correction can
-    /// move the average (0.5 %; a feedback divider step is at least 0.8 %).
-    /// The gate alternates between 5 and 10 ms: a stopped clock leaves the
-    /// previous count in the register, which then does not fit the gate.
-    fn count_carrier(&mut self) -> Option<f64> {
-        let short = (self.osc_hz * 0.005) as u32;
-        let mut wrong = None;
-        let gate = match self.carrier_count {
-            Some(gate) => {
-                let n = self.cm.count_result()?;
-                let hz = n as f64 * self.osc_hz / gate as f64;
-                if (hz - self.plan.carrier_hz).abs() > 0.005 * self.plan.carrier_hz {
-                    wrong = Some(hz);
-                }
-                if gate == short { 2 * short } else { short }
-            }
-            None => short,
-        };
-        self.cm.count_start(cm::TCNT_GP0 + self.plan.gpclk as u32, gate);
-        self.carrier_count = Some(gate);
-        wrong
     }
 
     fn shutdown(&mut self) {
@@ -1346,11 +1215,7 @@ impl RfSink for BcmFmTransmitter {
         }
         // Carrier on: pads, then the pin function.
         for &(g, alt) in &self.pins {
-            let preg = if g < 28 { pads::GPIO_0_27 } else { pads::GPIO_28_45 };
-            self.pads_regs.write(preg, pads::PASSWORD | pads::SLEW_UNLIMITED | pads::HYST | self.drive as u32);
-            let reg = regs::gpio::fsel(g);
-            let sh = regs::gpio::fsel_shift(g);
-            self.gpio.modify(reg, 7 << sh, alt << sh);
+            set_pin_function(&self.gpio, &self.pads_regs, g, alt, self.drive);
         }
         // Confirm that the pacer requests data: the ring position must move
         // past what fits into the FIFO.

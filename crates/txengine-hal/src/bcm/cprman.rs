@@ -76,6 +76,17 @@ impl Cprman {
         Ok(())
     }
 
+    /// Put back the control and divider registers of the clock generator at
+    /// `ctl`, as read before it was used (`saved`: control, divider).
+    pub fn restore_clock(&self, ctl: usize, saved: (u32, u32)) {
+        let _ = self.clock_stop(ctl);
+        self.write(div(ctl), saved.1);
+        self.write(ctl, saved.0 & !ENAB);
+        if saved.0 & ENAB != 0 {
+            self.write(ctl, saved.0);
+        }
+    }
+
     /// Measure a clock with the frequency counter (`tcnt_mux` as in the
     /// Linux driver) over `seconds` of the crystal; returns Hz, or 0 if the
     /// clock is not running.
@@ -123,6 +134,51 @@ impl Cprman {
         let n = self.read(TCNTCNT);
         self.write(TCNTCTL, 0);
         Some(n)
+    }
+}
+
+/// Counts a clock with the frequency counter in the background, one gate
+/// per [`ClockWatch::check`], to notice when it runs at the wrong
+/// frequency. The gate alternates between 5 and 10 ms: a stopped clock
+/// leaves the previous count in the register, which then does not fit the
+/// gate.
+#[derive(Debug, Clone)]
+pub struct ClockWatch {
+    tcnt_mux: u32,
+    osc_hz: f64,
+    expected_hz: f64,
+    /// Gate (crystal cycles) of the count in progress.
+    gate: Option<u32>,
+}
+
+impl ClockWatch {
+    /// Watch the clock `tcnt_mux` (see [`Cprman::measure`]), which should
+    /// run at `expected_hz`, from a crystal of `osc_hz`.
+    pub fn new(tcnt_mux: u32, osc_hz: f64, expected_hz: f64) -> ClockWatch {
+        ClockWatch { tcnt_mux, osc_hz, expected_hz, gate: None }
+    }
+
+    /// Collect the count in progress if it has finished, and start the
+    /// next. Returns the frequency of a finished count that is off by more
+    /// than modulation and crystal correction can move a clock's average
+    /// (0.5 %; a PLL feedback divider step is at least 0.8 %).
+    pub fn check(&mut self, cm: &Cprman) -> Option<f64> {
+        let short = (self.osc_hz * 0.005) as u32;
+        let mut wrong = None;
+        let gate = match self.gate {
+            Some(gate) => {
+                let n = cm.count_result()?;
+                let hz = n as f64 * self.osc_hz / gate as f64;
+                if (hz - self.expected_hz).abs() > 0.005 * self.expected_hz {
+                    wrong = Some(hz);
+                }
+                if gate == short { 2 * short } else { short }
+            }
+            None => short,
+        };
+        cm.count_start(self.tcnt_mux, gate);
+        self.gate = Some(gate);
+        wrong
     }
 }
 
@@ -291,6 +347,126 @@ impl PllUsers {
     /// All users, for messages.
     pub fn names(&self) -> Vec<String> {
         self.per.iter().chain(&self.other).cloned().collect()
+    }
+}
+
+/// How far down the VCO of a PLL whose only users are the GPU's video and
+/// 3D blocks (normally PLLA) may be moved on the BCM2836/7: those blocks
+/// then run up to this much slower, and nothing else depends on them. From
+/// PLLA's 2250 MHz this reaches every FM carrier in 87.5–108 MHz (at most
+/// −12 % is needed; ±3 % reaches 76 % of the band). The loop's response
+/// and noise measure the same from 1927 to 2365 MHz (−14 % to +5 %).
+/// Upwards, which would overclock the blocks, the general limit applies.
+pub const GPU_PLL_MAX_DECREASE: f64 = 0.15;
+
+/// The PLLs to try for a clock generator at `own_ctl`, best first: an idle
+/// PLL is ideal (no other user, or not running). Otherwise, on the
+/// BCM2836/7, PLLA, which normally clocks only the GPU's blocks and may
+/// move furthest (see [`GPU_PLL_MAX_DECREASE`]), then PLLC, which clocks
+/// the VPU, the SD card and the WiFi. The BCM2711 has not been measured and
+/// keeps PLLC first.
+pub fn pll_preference(cm: &Cprman, osc_hz: f64, bcm2711: bool, own_ctl: usize) -> Vec<PllId> {
+    let idle = [PllId::A, PllId::C, PllId::D].into_iter().find(|&id| {
+        let p = Pll::new(cm, id, osc_hz, bcm2711);
+        !(p.is_powered() && p.is_locked()) || p.users(own_ctl).is_empty()
+    });
+    let shared = if bcm2711 { [PllId::C, PllId::A] } else { [PllId::A, PllId::C] };
+    idle.into_iter().chain(shared).collect()
+}
+
+/// Fastest PER channel output planned: the firmware never runs one faster
+/// than ~1 GHz (PLLC_PER feeds EMMC at 1 GHz); stay in that region.
+const MAX_PER_HZ: f64 = 1.25e9;
+
+/// What a frequency planner may do with a PLL, given who else uses it: the
+/// VCO frequencies and PER dividers it may choose.
+#[derive(Debug, Clone)]
+pub struct PllRoom {
+    /// Powered up and locked when planning.
+    pub running: bool,
+    /// Its other users (none if it is not running).
+    pub users: PllUsers,
+    /// The VCO frequency now (0 if not running).
+    pub vco_old: f64,
+    /// The VCO per unit of NDIV, in crystal periods: 2 with the feedback
+    /// pre-divider engaged (which is never changed on a running PLL).
+    pub fb: f64,
+    /// The PER dividers allowed: only the current one if another clock
+    /// uses the PER channel.
+    pub per_choices: Vec<u32>,
+    /// The PER divider now, if the channel is enabled.
+    pub per_now: Option<u32>,
+    /// Allowed VCO range.
+    pub vco_min: f64,
+    pub vco_max: f64,
+    /// Largest relative decrease and increase of a shared VCO (for messages).
+    pub max_decrease: f64,
+    pub max_increase: f64,
+}
+
+impl PllRoom {
+    /// The room on `pll` for a planner that drives the clock generator at
+    /// `own_ctl` (not counted as a user), moving a shared VCO by at most
+    /// `max_change` (relative; see [`GPU_PLL_MAX_DECREASE`] for a PLL that
+    /// only clocks the GPU).
+    pub fn of(pll: &Pll, own_ctl: usize, max_change: f64) -> PllRoom {
+        let running = pll.is_powered() && pll.is_locked();
+        let users = if running { pll.users(own_ctl) } else { PllUsers::default() };
+        let max_decrease =
+            if users.gpu_only && !pll.is_bcm2711() { max_change.max(GPU_PLL_MAX_DECREASE) } else { max_change };
+        let fb = if running { pll.fb_mult() } else { 1.0 };
+        let vco_old = if running { pll.vco_hz() } else { 0.0 };
+        let per_now = pll.per_divider();
+        // A PER channel used by another clock must keep its divider.
+        let per_choices = match (per_now, users.per.is_empty()) {
+            (Some(d), false) => vec![d],
+            _ => (1..=8).collect(),
+        };
+        // VCO limits; BCM2835/6/7 switch the feedback pre-divider above
+        // 1.75 GHz, which is never changed on a running PLL.
+        let (vco_min, vco_max) = if running && !users.is_empty() {
+            (vco_old * (1.0 - max_decrease), vco_old * (1.0 + max_change))
+        } else if running {
+            (600e6, if fb > 1.0 { 2.4e9 } else { 1.75e9 })
+        } else {
+            (1.0e9, 1.75e9)
+        };
+        PllRoom {
+            running,
+            users,
+            vco_old,
+            fb,
+            per_choices,
+            per_now,
+            vco_min: vco_min.max(600e6),
+            vco_max,
+            max_decrease,
+            max_increase: max_change,
+        }
+    }
+
+    /// Whether the VCO may run at `vco` with the PER divider `per` (one of
+    /// [`PllRoom::per_choices`]).
+    pub fn allows(&self, vco: f64, per: u32) -> bool {
+        (self.vco_min..=self.vco_max).contains(&vco) && vco / per as f64 <= MAX_PER_HZ
+    }
+
+    /// The relative change of the VCO's frequency to `vco` (0 if it is not running).
+    pub fn change(&self, vco: f64) -> f64 {
+        if self.running { (vco - self.vco_old).abs() / self.vco_old } else { 0.0 }
+    }
+
+    /// The error for a planner that found nothing in this room.
+    pub fn exhausted(&self, id: PllId, what: &str) -> HalError {
+        HalError::Config(format!(
+            "{} cannot produce {what} with its VCO within -{:.0} % / +{:.0} % of {:.1} MHz \
+             (it also drives: {}); choose another --pll",
+            id.name(),
+            self.max_decrease * 100.0,
+            self.max_increase * 100.0,
+            self.vco_old / 1e6,
+            self.users.names().join(", ")
+        ))
     }
 }
 

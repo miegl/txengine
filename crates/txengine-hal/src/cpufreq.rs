@@ -81,3 +81,28 @@ impl CpuClockPin {
         }
     }
 }
+
+/// Restores the CPU clock when dropped, unless the pin has been taken over
+/// (by a transmitter's restorer): for constructors that can fail after
+/// pinning it.
+#[derive(Debug)]
+pub struct CpuPinGuard(Option<CpuClockPin>);
+
+impl CpuPinGuard {
+    pub fn new(pin: Option<CpuClockPin>) -> CpuPinGuard {
+        CpuPinGuard(pin)
+    }
+
+    /// Take the pin over (nothing pinned if there was none).
+    pub fn take(&mut self) -> CpuClockPin {
+        self.0.take().unwrap_or_default()
+    }
+}
+
+impl Drop for CpuPinGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            p.restore();
+        }
+    }
+}
