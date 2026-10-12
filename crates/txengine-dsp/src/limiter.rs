@@ -10,7 +10,8 @@
 //! `L` frames to meet their gain. A release follower slows the recovery.
 //!
 //! [`PreemphasisLimiter`] uses it to limit a pre-emphasised programme,
-//! reducing the boost of the pre-emphasis before the whole programme.
+//! reducing the boost of the pre-emphasis before the whole programme;
+//! [`PeakLimiter`] to limit a mono programme.
 
 /// Look-ahead gain computer (see the module documentation).
 #[derive(Debug, Clone)]
@@ -261,6 +262,72 @@ impl PreemphasisLimiter {
     }
 }
 
+/// Look-ahead peak limiter for one channel: `|out| <= T` for every sample.
+///
+/// Like [`PreemphasisLimiter`] (without the boost), it works in frames of
+/// `F` samples at the output rate, so that true peaks are seen, computes the
+/// gain once per frame with a [`LookaheadGain`] and interpolates it linearly
+/// across the frame.
+#[derive(Debug, Clone)]
+pub struct PeakLimiter {
+    threshold: f32,
+    frame: usize,
+    gain: LookaheadGain,
+    /// Delay line of `L` frames; each frame's slot is read (the frame from
+    /// `L` frames ago) before it is overwritten.
+    delay: Vec<f32>,
+    slot: usize,
+    /// Gain of the previous frame.
+    last: f32,
+    min_gain: f32,
+}
+
+impl PeakLimiter {
+    /// `frame_rate`: frames per second; `lookahead` and `release` in seconds.
+    pub fn new(frame: usize, frame_rate: f64, threshold: f32, lookahead: f64, release: f64) -> PeakLimiter {
+        assert!(frame >= 1);
+        let gain = LookaheadGain::new(frame_rate, lookahead, release);
+        PeakLimiter { threshold, frame, delay: vec![0.0; gain.look() * frame], gain, slot: 0, last: 1.0, min_gain: 1.0 }
+    }
+
+    /// Latency in samples.
+    pub fn latency(&self) -> usize {
+        self.gain.look() * self.frame
+    }
+
+    /// Lowest gain applied since the last call (for metering).
+    pub fn take_min_gain(&mut self) -> f32 {
+        std::mem::replace(&mut self.min_gain, 1.0)
+    }
+
+    /// Push one frame of `F` samples and write the limited frame from `L`
+    /// frames earlier to `out`.
+    #[inline]
+    pub fn process(&mut self, x: &[f32], out: &mut [f32]) {
+        let f = self.frame;
+        let x = &x[..f];
+        // Compared on the bit patterns (ordered like the magnitudes): float
+        // compares are slow on 32-bit ARM.
+        let peak = x.iter().fold(0u32, |m, &v| m.max(v.abs().to_bits()));
+        let t = self.threshold;
+        let req = if peak > t.to_bits() { t / f32::from_bits(peak) } else { 1.0 };
+        let g1 = self.gain.next(req);
+        let g0 = std::mem::replace(&mut self.last, g1);
+        self.min_gain = crate::fmin(self.min_gain, g0);
+
+        let slots = self.delay.len() / f;
+        let slot = &mut self.delay[self.slot * f..(self.slot + 1) * f];
+        self.slot = if self.slot + 1 == slots { 0 } else { self.slot + 1 };
+        let gs = (g1 - g0) / f as f32;
+        let mut g = g0;
+        for ((d, &x), y) in slot.iter_mut().zip(x).zip(out.iter_mut()) {
+            *y = g * *d;
+            *d = x;
+            g += gs;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +459,38 @@ mod tests {
         assert!(peak(&out) <= 1.0 + 1e-5, "peak {}", peak(&out));
         let (_, g) = lim.take_min_gains();
         assert!(g < 0.7);
+    }
+
+    #[test]
+    fn mono_peak_limiter() {
+        for frame in [1, 4] {
+            // 100 kS/s.
+            let mut lim = PeakLimiter::new(frame, 100e3 / frame as f64, 1.0, 0.0015, 0.08);
+            let lat = lim.latency();
+            // Loud bursts, then quiet for good.
+            let x = |n: usize| {
+                let burst = if n < 50_000 && (n / 5000).is_multiple_of(2) { 3.0 } else { 0.3 };
+                burst * ((n as f32 * 0.05).sin() + noise(n))
+            };
+            let (mut inp, mut out) = (vec![0f32; frame], vec![0f32; frame]);
+            let mut quiet_ok = 0;
+            for k in 0..300_000 / frame {
+                for (p, v) in inp.iter_mut().enumerate() {
+                    *v = x(k * frame + p);
+                }
+                lim.process(&inp, &mut out);
+                for (p, &y) in out.iter().enumerate() {
+                    let i = k * frame + p;
+                    assert!(y.abs() <= 1.0 + 1e-5, "frame {frame}: {y} at {i}");
+                    // Long after the bursts the programme passes unchanged.
+                    if i >= lat + 200_000 {
+                        assert_eq!(y, x(i - lat));
+                        quiet_ok += 1;
+                    }
+                }
+            }
+            assert!(quiet_ok > 90_000);
+            assert!(lim.take_min_gain() < 0.5);
+        }
     }
 }
