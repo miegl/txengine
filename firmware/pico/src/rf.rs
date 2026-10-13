@@ -414,12 +414,16 @@ struct Transmitter {
 
 impl Transmitter {
     fn start(cfg: &Config) -> Result<Transmitter, Fault> {
+        // A correction sent before the start counts from the start.
+        let retune_version = SHARED.retune.version();
+        let r = SHARED.retune.get();
+        let (center, scale) = (r.center.min(Config::X_MAX), r.scale.min(Config::SCALE_MAX));
         let mut t = Transmitter {
             cfg: *cfg,
-            k: Kernel::new(cfg.center | 1, 1 + (cfg.base & 0x1f) as u32),
-            center: cfg.center,
-            scale: cfg.scale,
-            retune_version: SHARED.retune.version(),
+            k: Kernel::new(center | 1, 1 + (cfg.base & 0x1f) as u32),
+            center,
+            scale,
+            retune_version,
             written: 0,
             read: 0,
             last_offset: 0,

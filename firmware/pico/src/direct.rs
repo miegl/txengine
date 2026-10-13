@@ -229,13 +229,16 @@ impl Transmitter {
             *t = PioConfig::pattern(cfg.ratio, bin as u32);
         }
         crumb(1);
+        // A correction sent before the start counts from the start.
+        let retune_version = SHARED.retune.version();
+        let r = SHARED.retune.get();
         let mut t = Transmitter {
             cfg: *cfg,
             phase: 0,
-            inc: cfg.center,
-            center: cfg.center,
-            scale: cfg.scale,
-            retune_version: SHARED.retune.version(),
+            inc: r.center,
+            center: r.center,
+            scale: r.scale.min(PioConfig::SCALE_MAX),
+            retune_version,
             written: 0,
             read: 0,
             last_offset: 0,
