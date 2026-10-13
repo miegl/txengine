@@ -80,9 +80,16 @@ pub fn run(a: &AnalyzeArgs) -> anyhow::Result<()> {
     }
     let x: Vec<f32> = data.iter().step_by(channels).map(|&v| (v as f64 * a.full_scale) as f32).collect();
     let secs = x.len() as f64 / fs;
-    println!("File:       {} ({} Hz, {:.2} s)", a.file.display(), rate, secs);
+    // Skip the start-up transient (0.1 s) and measure over at least as
+    // much: the pilot frequency fit needs two 50 ms segments.
     let skip = (fs * 0.1) as usize;
-    let body = &x[skip.min(x.len())..];
+    if x.len() < 2 * skip {
+        bail!(
+            "{secs:.3} s is too short to analyze (need >= 0.2 s: the first 0.1 s is skipped as the start-up transient)"
+        );
+    }
+    println!("File:       {} ({} Hz, {:.2} s)", a.file.display(), rate, secs);
+    let body = &x[skip..];
     let peak = body.iter().fold(0f32, |m, &v| m.max(v.abs()));
     let mean = body.iter().map(|&v| v as f64).sum::<f64>() / body.len() as f64;
     println!("Deviation:  peak {:.2} kHz, mean (carrier offset) {:+.1} Hz", peak / 1e3, mean);
