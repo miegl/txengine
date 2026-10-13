@@ -216,6 +216,13 @@ impl RdsEncoder {
         &self.params
     }
 
+    /// Toggle the RadioText A/B flag and restart the text, so receivers
+    /// clear their display and show the same text afresh.
+    pub fn toggle_rt_ab(&mut self) {
+        self.rt_ab = !self.rt_ab;
+        self.rt_seg = 0;
+    }
+
     /// Install the function used to obtain the local time offset for CT.
     pub fn set_local_offset_fn(&mut self, f: LocalOffsetFn) {
         self.local_offset = f;

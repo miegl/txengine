@@ -247,11 +247,7 @@ impl Modulator for WfmModulator {
             }
             "AB" => {
                 // Force receivers to clear their RadioText display.
-                let mut p = self.rds.params().clone();
-                let rt = std::mem::take(&mut p.rt);
-                self.rds.set_params(p.clone()).map_err(invalid)?;
-                p.rt = rt;
-                self.rds.set_params(p).map_err(invalid)?;
+                self.rds.toggle_rt_ab();
                 Ok("RadioText A/B flag toggled".into())
             }
             "PTYN" => {

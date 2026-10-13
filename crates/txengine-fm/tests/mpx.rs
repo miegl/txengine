@@ -1,11 +1,13 @@
 //! Multiplex conformance tests (ITU-R BS.450-4, EN 50067).
 
-use txengine_audio::AudioFeed;
+use txengine_audio::{AudioFeed, Programme};
+use txengine_core::{Modulator, RenderContext, SampleFormat, SinkInfo};
 use txengine_dsp::{FirDesign, Preemphasis, sinc};
+use txengine_fm::WfmModulator;
 use txengine_fm::mpx::{MpxConfig, MpxGenerator, StereoMode};
 use txengine_rds::decoder::decode_mpx;
 use txengine_rds::encoder::{encode_rt, encode8};
-use txengine_rds::{RdsEncoder, RdsParams};
+use txengine_rds::{GroupType, RdsEncoder, RdsParams};
 
 /// Stereo test signal: independent tones on L and R.
 struct Tones {
@@ -228,13 +230,9 @@ fn measured_output_response_is_equalised() {
     assert!((lo + hi - m).abs() < 0.002 * m, "S sidebands {lo:.1} + {hi:.1}, M {m:.1}");
 }
 
-#[test]
-fn subcarriers_follow_the_actual_sample_rate() {
-    use txengine_audio::Programme;
-    use txengine_core::{Modulator, RenderContext, SampleFormat, SinkInfo};
-    use txengine_fm::WfmModulator;
-    let fs = 250_000.0;
-    let sink = SinkInfo {
+/// A frequency-modulating real-time output without a sample-and-hold.
+fn sink(fs: f64) -> SinkInfo {
+    SinkInfo {
         description: "test".into(),
         sample_rate: fs,
         carrier_hz: 87.6e6,
@@ -247,10 +245,15 @@ fn subcarriers_follow_the_actual_sample_rate() {
         realtime: true,
         zero_order_hold: false,
         response_db: Vec::new(),
-    };
+    }
+}
+
+#[test]
+fn subcarriers_follow_the_actual_sample_rate() {
+    let fs = 250_000.0;
     let cfg = MpxConfig { stereo: StereoMode::Stereo, ..Default::default() };
     let mut m = WfmModulator::new(cfg, Programme::None, RdsParams::default(), false).unwrap();
-    m.configure(&sink).unwrap();
+    m.configure(&sink(fs)).unwrap();
     // The crystal runs 150 ppm fast, so the samples leave 150 ppm faster
     // than nominal.
     let actual = fs * (1.0 + 150e-6);
@@ -412,4 +415,37 @@ fn hf_overload_lowers_only_the_treble() {
         * mpx.audio_deviation()
         * Preemphasis::new(50e-6, mpx.audio_rate(), 15_000.0).gain_at(10_000.0, mpx.audio_rate());
     assert!(hf < 0.9 * full, "10 kHz {hf} Hz, unlimited {full} Hz");
+}
+
+#[test]
+fn ab_command_toggles_the_radiotext_flag() {
+    let fs = 250_000.0;
+    let rds = RdsParams { rt: encode_rt("Same text").unwrap(), ct: false, ..Default::default() };
+    let mut m = WfmModulator::new(MpxConfig::default(), Programme::None, rds, true).unwrap();
+    m.configure(&sink(fs)).unwrap();
+    let mut x = vec![0f32; (fs * 4.0) as usize];
+    let (before, after) = x.split_at_mut((fs * 2.0) as usize);
+    let mut first_sample = 0;
+    let mut render = |m: &mut WfmModulator, part: &mut [f32]| {
+        for chunk in part.chunks_mut(4096) {
+            m.render(&RenderContext { first_sample, sample_rate: fs, emit_time_unix: None }, chunk);
+            first_sample += chunk.len() as u64;
+        }
+    };
+    render(&mut m, before);
+    m.command("AB").unwrap();
+    render(&mut m, after);
+    let d = decode_mpx(&x, fs);
+    // (A/B flag, segment) of each RadioText group.
+    let rt: Vec<(bool, u16)> = d
+        .groups
+        .iter()
+        .filter(|g| g.group_type() == GroupType::a(2))
+        .map(|g| (g.blocks[1] & 0x10 != 0, g.blocks[1] & 0xf))
+        .collect();
+    assert!(rt.len() > 10, "{} RadioText groups", rt.len());
+    let toggles: Vec<usize> = (1..rt.len()).filter(|&i| rt[i].0 != rt[i - 1].0).collect();
+    assert_eq!(toggles.len(), 1, "the flag must toggle once: {rt:?}");
+    assert_eq!(rt[toggles[0]].1, 0, "the text restarts at segment 0: {rt:?}");
+    assert_eq!(d.station.rt_string(), "Same text");
 }
