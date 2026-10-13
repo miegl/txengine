@@ -342,9 +342,18 @@ pulse width per carrier cycle into a PWM (AM).
 * The frequency counter that verifies the carrier is read with two gate
   times: its count register cannot be cleared while the measured clock is
   stopped, so a dead clock would otherwise read back the previous result.
-* Underruns: the ring ends in an idle loop (two control blocks that keep
-  the carrier at the centre frequency). New data re-links the tail; a
-  parked engine is redirected into the ring.
+* Underruns: samples are handed to the engine in blocks of 16. The newest
+  block's last sample leads, through the block's exit control block,
+  which writes the block's sequence number to a progress word, to an idle
+  loop (two control blocks that keep the carrier at the centre
+  frequency). The exits are off the samples' path: between underruns the
+  engine runs the samples' control blocks alone, as before. A parked
+  engine is sent on through a jump control block, as in AM (below), to
+  the first unplayed sample, so an underrun neither replays nor skips
+  samples. Before, the CPU closed the idle loop again only once it saw the
+  engine back in the ring, and took everything written as played when it
+  found the engine parked: on a Zero 2 W each underrun lost about 60 ms of
+  programme, and a stall right after the refill played it twice.
 * Memory comes from the VideoCore mailbox (uncached `DIRECT` alias), freed
   by the guardian if the process dies.
 

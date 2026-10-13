@@ -226,6 +226,8 @@ pub mod dma {
     pub const DEBUG_ERRORS: u32 = 0x7;
     /// Control block size and alignment.
     pub const CB_SIZE: usize = 32;
+    /// Byte offset of the `next` field in a control block.
+    pub const CB_NEXT: usize = 20;
 }
 
 /// GPIO function select.

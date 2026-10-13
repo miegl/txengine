@@ -94,9 +94,6 @@ const IDLE_CYCLES: usize = 16;
 /// Time constant of the mean amplitude the idle loop holds (s).
 const MEAN_TIME: f64 = 0.05;
 
-/// Byte offset of the `next` field in a control block.
-const CB_NEXT: usize = 20;
-
 const FRAC_ONE: f64 = (1u64 << cm::A2W_FRAC_BITS) as f64;
 
 /// Configuration of the BCM AM transmitter.
@@ -650,7 +647,7 @@ impl BcmAmTransmitter {
         let jump_cb = ControlBlock {
             ti: plain,
             source: self.bus(l.idle_addr),
-            dest: self.bus(l.idle_cb + CB_NEXT),
+            dest: self.bus(l.idle_cb + dmar::CB_NEXT),
             length: 4,
             stride: 0,
             next: idle,
@@ -762,10 +759,10 @@ impl BcmAmTransmitter {
         let v = self.validated;
         let k = (v % self.blocks as u64) as usize;
         self.mem.write_u32(self.layout.numbers + 4 * k, (v + 1) as u32);
-        self.mem.write_u32(self.marker_cb(k) + CB_NEXT, self.bus(self.layout.idle_cb));
+        self.mem.write_u32(self.marker_cb(k) + dmar::CB_NEXT, self.bus(self.layout.idle_cb));
         if v > 0 {
             let prev = ((v - 1) % self.blocks as u64) as usize;
-            self.mem.write_u32(self.marker_cb(prev) + CB_NEXT, self.bus(self.block_cb(k)));
+            self.mem.write_u32(self.marker_cb(prev) + dmar::CB_NEXT, self.bus(self.block_cb(k)));
         }
         self.mem.flush(0, 0);
         self.validated += 1;
@@ -835,7 +832,7 @@ impl BcmAmTransmitter {
     /// it, so no jump can be pending: the engine is parked, and the progress
     /// word tells exactly how far it got.
     fn resume_if_parked(&mut self) -> Result<()> {
-        let idle_next = self.layout.idle_cb + CB_NEXT;
+        let idle_next = self.layout.idle_cb + dmar::CB_NEXT;
         let idle = self.bus(self.layout.idle_cb);
         if !self.parked || self.mem.read_u32(idle_next) != idle {
             return Ok(());
@@ -843,7 +840,7 @@ impl BcmAmTransmitter {
         barrier::dsb();
         if self.place()? == Place::Idle && self.validated > self.completed {
             let k = (self.completed % self.blocks as u64) as usize;
-            self.mem.write_u32(self.layout.jump_cb + CB_NEXT, self.bus(self.block_cb(k)));
+            self.mem.write_u32(self.layout.jump_cb + dmar::CB_NEXT, self.bus(self.block_cb(k)));
             self.mem.flush(0, 0);
             self.mem.write_u32(idle_next, self.bus(self.layout.jump_cb));
             self.mem.flush(0, 0);
@@ -854,7 +851,7 @@ impl BcmAmTransmitter {
     /// Start the DMA engine at the first unplayed block, or in the idle
     /// loop if there is none.
     fn restart_dma(&mut self) -> Result<()> {
-        self.mem.write_u32(self.layout.idle_cb + CB_NEXT, self.bus(self.layout.idle_cb));
+        self.mem.write_u32(self.layout.idle_cb + dmar::CB_NEXT, self.bus(self.layout.idle_cb));
         let start = if self.validated > self.completed {
             self.block_cb((self.completed % self.blocks as u64) as usize)
         } else {

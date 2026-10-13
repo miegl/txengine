@@ -18,10 +18,17 @@
 //! of PLLD or the crystal: an integer one without jitter, or a fractional one
 //! whose jitter is at most 2 ns, see [`plan_pacer`]).
 //!
-//! The control blocks form a ring whose last written sample links to an idle
-//! loop that holds the carrier at the centre frequency. If the producer falls
-//! behind (or dies), the DMA engine parks there instead of replaying stale
-//! samples; new data is linked in front of the idle loop.
+//! The control blocks form a ring, handed to the DMA engine in blocks of
+//! [`BLOCK`] samples. The newest block's last sample leads to an exit
+//! control block, which writes the block's sequence number to a progress
+//! word, and on to an idle loop that holds the carrier at the centre
+//! frequency. If the producer falls behind (or dies), the DMA engine parks
+//! there instead of replaying stale samples, and the transmitter knows
+//! exactly which samples were played. A parked engine is sent on through a
+//! jump control block, which first lets the DMA engine close the idle loop
+//! again, then continues at the first unplayed sample. The exits are off the
+//! samples' path: between underruns the engine runs the samples' control
+//! blocks alone, so the timing of the register writes does not change.
 
 use std::time::{Duration, Instant};
 
@@ -38,7 +45,7 @@ use crate::error::{HalError, Result};
 use crate::guardian::Guardian;
 use crate::mem::mailbox::VcMemory;
 use crate::mem::{DmaMemory, DmaMemoryExt};
-use crate::mmio::Mmio;
+use crate::mmio::{Mmio, barrier};
 use crate::platform::Soc;
 
 /// How the carrier is frequency modulated.
@@ -450,6 +457,80 @@ pub fn plan_pacer(src_hz: f64, target: f64, min_rng: u32, max_rng: u32, max_clk_
     candidates.into_iter().min_by(|a, b| error_uhz(a).cmp(&error_uhz(b)).then(clk(b).total_cmp(&clk(a))))
 }
 
+/// PLL method: the FRAC register word for an offset, from FRAC at 0 Hz and
+/// FRAC units per Hz (relative to NDIV). f32 is exact to < 0.1 unit for
+/// 20-bit values; rounding by +0.5 and a saturating conversion avoids
+/// `round()`, a library call on 32-bit ARM.
+#[inline]
+fn frac_word(frac_base: f32, frac_scale: f32, offset_hz: f32) -> u32 {
+    let v = frac_base + offset_hz * frac_scale;
+    ((v + 0.5) as i32).clamp(0, cm::A2W_FRAC_MASK as i32) as u32 | cm::PASSWORD
+}
+
+/// Samples per block: data is handed to the DMA engine in whole blocks, so
+/// that the engine only runs out at the end of a block, whose exit records
+/// it. The samples of an incomplete block wait for the next write (at most
+/// 15 samples, 60 µs at 250 kS/s).
+const BLOCK: usize = 16;
+
+/// Byte offsets of the parts of the DMA memory.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    /// Per sample `k`: control block `2k` writes it to the frequency
+    /// register, `2k + 1` waits for the pacer.
+    cbs: usize,
+    /// The idle loop: the same pair for the centre frequency.
+    idle: usize,
+    jump: usize,
+    /// Per block: its exit into the idle loop.
+    exits: usize,
+    /// Per sample: the register word.
+    samples: usize,
+    /// Per block: the sequence number its exit writes.
+    numbers: usize,
+    /// Where the exits write.
+    progress: usize,
+    /// The idle loop's control block address (the jump's source).
+    idle_addr: usize,
+    idle_word: usize,
+    /// What the pacing control blocks write to the pacer's FIFO.
+    dummy: usize,
+    len: usize,
+}
+
+impl Layout {
+    /// For a ring of `n` samples (a multiple of [`BLOCK`]).
+    fn new(n: usize) -> Layout {
+        let blocks = n / BLOCK;
+        let cbs = 0;
+        let idle = cbs + 2 * n * dmar::CB_SIZE;
+        let jump = idle + 2 * dmar::CB_SIZE;
+        let exits = jump + dmar::CB_SIZE;
+        let samples = exits + blocks * dmar::CB_SIZE;
+        let numbers = samples + 4 * n;
+        let progress = numbers + 4 * blocks;
+        let idle_addr = progress + 4;
+        let idle_word = idle_addr + 4;
+        let dummy = idle_word + 4;
+        Layout { cbs, idle, jump, exits, samples, numbers, progress, idle_addr, idle_word, dummy, len: dummy + 4 }
+    }
+}
+
+/// Where the DMA engine is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// In the ring: samples written to the frequency register, modulo the
+    /// ring length.
+    Ring(usize),
+    /// In the idle loop, after the exit of the block that ends at this
+    /// sample (absolute).
+    Idle(u64),
+    /// On its way into the idle loop (an exit) or out of it (the jump).
+    Passing,
+    /// Stopped (the channel was reset).
+    Stopped,
+}
+
 /// Everything needed to restore the hardware (also run by the guardian).
 #[derive(Debug, Clone)]
 struct Restorer {
@@ -530,23 +611,21 @@ pub struct BcmFmTransmitter {
     pll_good: Option<PllConfig>,
     /// Counts the carrier in the background.
     carrier_watch: ClockWatch,
-    // Layout (byte offsets in `mem`).
+    /// Ring length in samples (a multiple of [`BLOCK`]).
     n: usize,
+    layout: Layout,
     cb_base: u32,
-    samples_off: usize,
-    idle_off: usize,
-    idle_word_off: usize,
-    dummy_off: usize,
     target_bus: u32,
     fifo_bus: u32,
     permap: u32,
-    // State.
+    // State (monotonic sample counts): `written` by the producer, of which
+    // `handed` (whole blocks) to the DMA engine, of which `consumed`.
     written: u64,
+    handed: u64,
     consumed: u64,
     last_pos: usize,
-    tail_linked: bool,
+    /// In the idle loop (an underrun), as last seen.
     parked: bool,
-    redirect: bool,
     underruns: u64,
     running: bool,
     stopped: bool,
@@ -681,25 +760,18 @@ impl BcmFmTransmitter {
         let fs = pclock.fs;
 
         // Ring size.
-        let n = ((cfg.buffer.as_secs_f64() * fs) as usize).clamp(4096, 65536);
-        let mut alloc_n = n;
-        let mem = loop {
-            let bytes = 2 * alloc_n * dmar::CB_SIZE + 2 * dmar::CB_SIZE + 4 * alloc_n + 64;
-            match VcMemory::alloc(bytes) {
-                Ok(m) => break m,
-                Err(e) if alloc_n > 4096 => {
+        let mut n = ((cfg.buffer.as_secs_f64() * fs) as usize).clamp(4096, 65536) / BLOCK * BLOCK;
+        let (mem, layout) = loop {
+            let layout = Layout::new(n);
+            match VcMemory::alloc(layout.len) {
+                Ok(m) => break (m, layout),
+                Err(e) if n > 4096 => {
                     debug!("{e}; retrying with a smaller buffer");
-                    alloc_n /= 2;
+                    n = n / 2 / BLOCK * BLOCK;
                 }
                 Err(e) => return Err(e),
             }
         };
-        let n = alloc_n;
-        let ring_bytes = 2 * n * dmar::CB_SIZE;
-        let idle_off = ring_bytes;
-        let samples_off = idle_off + 2 * dmar::CB_SIZE;
-        let idle_word_off = samples_off + 4 * n;
-        let dummy_off = idle_word_off + 4;
 
         let (fifo_bus, permap) = match cfg.pacer {
             Pacer::Pwm => (regs::BUS_PERIPH_BASE + (regs::PWM + pwm::FIF1) as u32, pwm::DREQ),
@@ -828,19 +900,15 @@ impl BcmFmTransmitter {
             pll_good: None,
             carrier_watch: ClockWatch::new(cm::TCNT_GP0 + plan.gpclk as u32, bcm.osc_hz, plan.carrier_hz),
             n,
-            samples_off,
-            idle_off,
-            idle_word_off,
-            dummy_off,
+            layout,
             target_bus,
             fifo_bus,
             permap,
             written: 0,
+            handed: 0,
             consumed: 0,
             last_pos: 0,
-            tail_linked: false,
             parked: false,
-            redirect: false,
             underruns: 0,
             running: false,
             stopped: false,
@@ -869,7 +937,7 @@ impl BcmFmTransmitter {
     }
 
     fn cb_off(&self, k: usize) -> usize {
-        k * dmar::CB_SIZE
+        self.layout.cbs + k * dmar::CB_SIZE
     }
 
     fn bus(&self, off: usize) -> u32 {
@@ -884,14 +952,7 @@ impl BcmFmTransmitter {
     #[inline]
     fn word(&mut self, offset_hz: f32) -> u32 {
         match self.plan.method {
-            BcmMethod::Pll(_) => {
-                // FRAC = centre + offset · units/Hz, relative to NDIV. f32 is
-                // exact to < 0.1 unit for 20-bit values; rounding by +0.5 and
-                // a saturating conversion avoids `round()`, a library call on
-                // 32-bit ARM.
-                let v = self.frac_base + offset_hz * self.frac_scale;
-                ((v + 0.5) as i32).clamp(0, cm::A2W_FRAC_MASK as i32) as u32 | cm::PASSWORD
-            }
+            BcmMethod::Pll(_) => frac_word(self.frac_base, self.frac_scale, offset_hz),
             BcmMethod::ClkDiv => {
                 // Exact divider for the requested frequency, with first order
                 // error feedback so the coarse 12-bit steps average out.
@@ -911,19 +972,25 @@ impl BcmFmTransmitter {
         w
     }
 
+    /// Offset of the exit of the block `b` (ring index).
+    fn exit_cb(&self, b: usize) -> usize {
+        self.layout.exits + b * dmar::CB_SIZE
+    }
+
     fn init_ring(&mut self) {
         let center = self.center_word();
-        let a_ti = dmar::TI_NO_WIDE_BURSTS | dmar::TI_WAIT_RESP;
-        let b_ti =
-            dmar::TI_NO_WIDE_BURSTS | dmar::TI_WAIT_RESP | dmar::TI_DEST_DREQ | (self.permap << dmar::TI_PERMAP_SHIFT);
+        let l = self.layout;
+        // Register writes and bookkeeping: plain. The pacer's FIFO: paced.
+        let plain = dmar::TI_NO_WIDE_BURSTS | dmar::TI_WAIT_RESP;
+        let paced = plain | dmar::TI_DEST_DREQ | (self.permap << dmar::TI_PERMAP_SHIFT);
         for k in 0..self.n {
             let a = self.cb_off(2 * k);
             let b = self.cb_off(2 * k + 1);
             self.write_cb(
                 a,
                 ControlBlock {
-                    ti: a_ti,
-                    source: self.bus(self.samples_off + 4 * k),
+                    ti: plain,
+                    source: self.bus(l.samples + 4 * k),
                     dest: self.target_bus,
                     length: 4,
                     stride: 0,
@@ -933,24 +1000,24 @@ impl BcmFmTransmitter {
             self.write_cb(
                 b,
                 ControlBlock {
-                    ti: b_ti,
-                    source: self.bus(self.dummy_off),
+                    ti: paced,
+                    source: self.bus(l.dummy),
                     dest: self.fifo_bus,
                     length: 4,
                     stride: 0,
                     next: self.bus(self.cb_off(2 * ((k + 1) % self.n))),
                 },
             );
-            self.mem.write_u32(self.samples_off + 4 * k, center);
+            self.mem.write_u32(l.samples + 4 * k, center);
         }
         // Idle loop: hold the carrier at the centre frequency.
-        let ia = self.idle_off;
-        let ib = self.idle_off + dmar::CB_SIZE;
+        let ia = l.idle;
+        let ib = l.idle + dmar::CB_SIZE;
         self.write_cb(
             ia,
             ControlBlock {
-                ti: a_ti,
-                source: self.bus(self.idle_word_off),
+                ti: plain,
+                source: self.bus(l.idle_word),
                 dest: self.target_bus,
                 length: 4,
                 stride: 0,
@@ -960,16 +1027,45 @@ impl BcmFmTransmitter {
         self.write_cb(
             ib,
             ControlBlock {
-                ti: b_ti,
-                source: self.bus(self.dummy_off),
+                ti: paced,
+                source: self.bus(l.dummy),
                 dest: self.fifo_bus,
                 length: 4,
                 stride: 0,
                 next: self.bus(ia),
             },
         );
-        self.mem.write_u32(self.idle_word_off, center);
-        self.mem.write_u32(self.dummy_off, 0);
+        // Exits: the block's number to the progress word, then the idle loop.
+        for b in 0..self.n / BLOCK {
+            self.write_cb(
+                self.exit_cb(b),
+                ControlBlock {
+                    ti: plain,
+                    source: self.bus(l.numbers + 4 * b),
+                    dest: self.bus(l.progress),
+                    length: 4,
+                    stride: 0,
+                    next: self.bus(ia),
+                },
+            );
+        }
+        // The jump closes the idle loop again, then continues in the ring
+        // (its `next` is set when it is used).
+        self.write_cb(
+            l.jump,
+            ControlBlock {
+                ti: plain,
+                source: self.bus(l.idle_addr),
+                dest: self.bus(ib + dmar::CB_NEXT),
+                length: 4,
+                stride: 0,
+                next: self.bus(ia),
+            },
+        );
+        self.mem.write_u32(l.idle_addr, self.bus(ia));
+        self.mem.write_u32(l.progress, 0);
+        self.mem.write_u32(l.idle_word, center);
+        self.mem.write_u32(l.dummy, 0);
         self.mem.flush(0, self.mem.len());
     }
 
@@ -1113,31 +1209,101 @@ impl BcmFmTransmitter {
         Ok(())
     }
 
-    /// Ring position of the DMA engine: Some(samples consumed modulo n), or
-    /// None when parked in the idle loop.
-    fn dma_position(&self) -> Result<Option<usize>> {
+    /// Where the DMA engine is. In the idle loop, the progress word is read
+    /// after the engine's register: the exit wrote it before the engine
+    /// got there.
+    fn place(&self) -> Result<Place> {
         let cb = self.ch.current_cb();
         let off = cb.wrapping_sub(self.cb_base) as usize;
-        if off < 2 * self.n * dmar::CB_SIZE {
+        let l = &self.layout;
+        Ok(if cb == 0 {
+            Place::Stopped
+        } else if off < l.idle {
             let idx = off / dmar::CB_SIZE;
-            // At A_k sample k is not yet written; at B_k it has been.
-            Ok(Some((idx / 2 + idx % 2) % self.n))
-        } else if off < self.samples_off {
-            Ok(None)
+            // At 2k sample k is not yet written; at 2k + 1 it has been.
+            Place::Ring((idx / 2 + idx % 2) % self.n)
+        } else if off == l.idle || off == l.idle + dmar::CB_SIZE {
+            barrier::dsb();
+            let progress = self.mem.read_u32(l.progress);
+            // The exit's block number (the blocks handed over until then),
+            // counted back from the blocks handed over now.
+            let blocks = self.handed / BLOCK as u64;
+            let back = (blocks as u32).wrapping_sub(progress) as u64;
+            if back > blocks {
+                return Err(HalError::Hardware(format!(
+                    "DMA progress {progress} is past the {blocks} blocks handed over"
+                )));
+            }
+            Place::Idle((blocks - back) * BLOCK as u64)
+        } else if off == l.jump || (l.exits..l.samples).contains(&off) {
+            Place::Passing
         } else {
-            Err(HalError::Hardware(format!("DMA control block address {cb:#010x} outside the ring")))
+            return Err(HalError::Hardware(format!("DMA control block address {cb:#010x} outside the ring")));
+        })
+    }
+
+    /// Hand the samples up to `to` (the end of a block) to the DMA engine:
+    /// the last block becomes the tail, which leads to its exit, and the
+    /// previous tail leads on to the first new sample.
+    fn hand_over(&mut self, to: u64) {
+        let v = to / BLOCK as u64 - 1;
+        let b = (v % (self.n / BLOCK) as u64) as usize;
+        let last = (b + 1) * BLOCK - 1;
+        self.mem.write_u32(self.layout.numbers + 4 * b, (v + 1) as u32);
+        self.mem.write_u32(self.cb_off(2 * last + 1) + dmar::CB_NEXT, self.bus(self.exit_cb(b)));
+        self.mem.flush(0, 0);
+        if self.handed > 0 {
+            let prev = ((self.handed - 1) % self.n as u64) as usize;
+            let first = (self.handed % self.n as u64) as usize;
+            self.mem.write_u32(self.cb_off(2 * prev + 1) + dmar::CB_NEXT, self.bus(self.cb_off(2 * first)));
+            self.mem.flush(0, 0);
         }
+        self.handed = to;
+    }
+
+    /// Send a parked engine on to the first unplayed sample, through the
+    /// jump. Only from the closed idle loop: an armed jump stays armed until
+    /// the engine takes it, and then the engine is in the ring until it runs
+    /// out again. The loop is found closed before the engine is seen in it,
+    /// so no jump can be pending: the engine is parked, and its exit tells
+    /// exactly how far it got.
+    fn resume(&mut self) -> Result<()> {
+        let idle_next = self.layout.idle + dmar::CB_SIZE + dmar::CB_NEXT;
+        if self.mem.read_u32(idle_next) != self.bus(self.layout.idle) {
+            return Ok(());
+        }
+        barrier::dsb();
+        if let Place::Idle(exited) = self.place()? {
+            self.consumed = self.consumed.max(exited);
+            self.last_pos = (self.consumed % self.n as u64) as usize;
+            if self.handed > self.consumed {
+                self.mem.write_u32(self.layout.jump + dmar::CB_NEXT, self.bus(self.cb_off(2 * self.last_pos)));
+                self.mem.flush(0, 0);
+                self.mem.write_u32(idle_next, self.bus(self.layout.jump));
+                self.mem.flush(0, 0);
+            }
+        }
+        Ok(())
+    }
+
+    /// Start the DMA engine at the first unplayed sample, or in the idle
+    /// loop if there is none.
+    fn restart_dma(&mut self) -> Result<()> {
+        let l = self.layout;
+        self.mem.write_u32(l.idle + dmar::CB_SIZE + dmar::CB_NEXT, self.bus(l.idle));
+        self.mem.flush(0, 0);
+        self.last_pos = (self.consumed % self.n as u64) as usize;
+        let start = if self.handed > self.consumed { self.cb_off(2 * self.last_pos) } else { l.idle };
+        self.ch.start(self.bus(start))
     }
 
     fn check_health(&mut self) -> Result<()> {
         if let Some(e) = self.ch.errors() {
             warn!("DMA channel {} error ({e}); restarting it", self.ch.ch);
-            let k = (self.consumed % self.n as u64) as usize;
-            self.ch.start(self.bus(self.cb_off(2 * k)))?;
+            self.restart_dma()?;
         } else if !self.ch.is_active() {
             warn!("DMA channel {} was stopped externally; restarting it", self.ch.ch);
-            let k = (self.consumed % self.n as u64) as usize;
-            self.ch.start(self.bus(self.cb_off(2 * k)))?;
+            self.restart_dma()?;
         }
         if self.pacer == Pacer::Pwm {
             let sta = self.pwm.read(pwm::STA) & pwm::STA_ERRORS;
@@ -1205,7 +1371,7 @@ impl RfSink for BcmFmTransmitter {
         if self.running {
             return Ok(());
         }
-        if self.written == 0 {
+        if self.handed == 0 {
             return Err(SinkError::config("pre-fill the buffer before starting"));
         }
         self.start_pacer()?;
@@ -1219,7 +1385,7 @@ impl RfSink for BcmFmTransmitter {
         }
         // Confirm that the pacer requests data: the ring position must move
         // past what fits into the FIFO.
-        let moving = |t: &Self| matches!(t.dma_position(), Ok(Some(p)) if p >= 20);
+        let moving = |t: &Self| matches!(t.place(), Ok(Place::Ring(p)) if p >= 20);
         if crate::sys::wait_until(Duration::from_millis(20), "DMA pacing", || moving(self)).is_err() {
             warn!("the {:?} pacer did not start; configuring it again", self.pacer);
             self.start_pacer()?;
@@ -1247,11 +1413,11 @@ impl RfSink for BcmFmTransmitter {
                 self.check_health()?;
             }
             let now = Instant::now();
-            match self.dma_position()? {
-                Some(pos) => {
+            match self.place()? {
+                Place::Ring(pos) => {
                     if pos != self.last_pos || self.parked {
                         self.last_progress = now;
-                    } else if self.written > self.consumed
+                    } else if self.handed > self.consumed
                         && now.duration_since(self.last_progress) > Duration::from_millis(100)
                     {
                         // Data is queued but the engine has not moved: the pacer
@@ -1267,27 +1433,21 @@ impl RfSink for BcmFmTransmitter {
                         self.last_progress = now;
                     }
                     let delta = (pos + self.n - self.last_pos) % self.n;
-                    self.consumed = (self.consumed + delta as u64).min(self.written);
+                    self.consumed = (self.consumed + delta as u64).min(self.handed);
                     self.last_pos = pos;
-                    if self.parked {
-                        self.parked = false;
-                    }
-                    if self.redirect {
-                        // Back in the ring: re-close the idle loop.
-                        let ib = self.idle_off + dmar::CB_SIZE;
-                        self.mem.write_u32(ib + 20, self.bus(self.idle_off));
-                        self.mem.flush(ib, dmar::CB_SIZE);
-                        self.redirect = false;
-                    }
+                    self.parked = false;
                 }
-                None => {
+                Place::Idle(_) => {
+                    // The engine ran out of samples (an underrun) and holds
+                    // the carrier at the centre frequency.
                     if !self.parked {
                         self.parked = true;
                         self.underruns += 1;
                     }
-                    self.consumed = self.written;
-                    self.last_pos = (self.written % self.n as u64) as usize;
+                    self.resume()?;
                 }
+                Place::Passing => {}
+                Place::Stopped => self.check_health()?,
             }
         }
         if self.running {
@@ -1308,36 +1468,35 @@ impl RfSink for BcmFmTransmitter {
         let first = (self.written % self.n as u64) as usize;
         // Direct 32-bit stores (the memory is uncached; no per-sample
         // virtual calls or bounds checks).
-        assert!(samples.len() <= self.n && self.samples_off + 4 * self.n <= self.mem.len());
+        assert!(samples.len() <= self.n && self.layout.samples + 4 * self.n <= self.mem.len());
         // SAFETY: the sample area lies within the buffer (checked above).
-        let base = unsafe { self.mem.as_ptr().add(self.samples_off).cast::<u32>() };
-        let mut k = first;
-        for &s in samples {
-            let w = self.word(s);
+        let base = unsafe { self.mem.as_ptr().add(self.layout.samples).cast::<u32>() };
+        let (n, mut k) = (self.n, first);
+        let mut put = |w| {
             // SAFETY: k < n, within the sample area.
             unsafe { crate::mmio::store32(base.add(k), w) };
             k += 1;
-            if k == self.n {
+            if k == n {
                 k = 0;
             }
+        };
+        // One loop per method, which keeps the PLL's constants in registers
+        // whatever the compiler makes of the rest of this function.
+        match self.plan.method {
+            BcmMethod::Pll(_) => {
+                let (frac_base, frac_scale) = (self.frac_base, self.frac_scale);
+                samples.iter().for_each(|&s| put(frac_word(frac_base, frac_scale, s)));
+            }
+            BcmMethod::ClkDiv => samples.iter().for_each(|&s| put(self.word(s))),
         }
-        let last = (first + samples.len() - 1) % self.n;
-        // New tail → idle loop, then open the old tail into the new data.
-        self.mem.write_u32(self.cb_off(2 * last + 1) + 20, self.bus(self.idle_off));
-        self.mem.flush(0, 0);
-        if self.tail_linked {
-            let prev = (first + self.n - 1) % self.n;
-            self.mem.write_u32(self.cb_off(2 * prev + 1) + 20, self.bus(self.cb_off(2 * first)));
-        }
-        self.tail_linked = true;
-        if self.running && self.parked && !self.redirect {
-            // The engine is parked: send it into the new data.
-            let ib = self.idle_off + dmar::CB_SIZE;
-            self.mem.write_u32(ib + 20, self.bus(self.cb_off(2 * first)));
-            self.redirect = true;
-        }
-        self.mem.flush(0, 0);
         self.written += samples.len() as u64;
+        let whole = self.written - self.written % BLOCK as u64;
+        if whole > self.handed {
+            self.hand_over(whole);
+        }
+        if self.running && self.parked {
+            self.resume()?;
+        }
         Ok(())
     }
 
@@ -1355,7 +1514,7 @@ impl RfSink for BcmFmTransmitter {
         self.div_source = self.plan.corrected_divider_source(ppm);
         // The idle loop holds the carrier centre.
         let w = self.center_word();
-        self.mem.write_u32(self.idle_word_off, w);
+        self.mem.write_u32(self.layout.idle_word, w);
         Ok(())
     }
 }
@@ -1465,5 +1624,17 @@ mod tests {
         }
         // Nothing fits: a clock source below 5 MHz.
         assert!(plan_pacer(4e6, 100_000.0, 2, 1 << 16, 25e6).is_none());
+    }
+
+    #[test]
+    fn layout_keeps_control_blocks_aligned() {
+        for n in [4096, 4096 + BLOCK, 65536] {
+            let (l, blocks) = (Layout::new(n), n / BLOCK);
+            for off in [l.cbs, l.idle, l.jump, l.exits] {
+                assert!(off.is_multiple_of(dmar::CB_SIZE), "{l:?}");
+            }
+            assert!(l.idle == l.cbs + 2 * n * dmar::CB_SIZE && l.samples == l.exits + blocks * dmar::CB_SIZE);
+            assert!(l.numbers == l.samples + 4 * n && l.progress == l.numbers + 4 * blocks && l.len == l.dummy + 4);
+        }
     }
 }
