@@ -27,6 +27,7 @@
 
 #![no_std]
 
+pub mod am;
 pub mod sigma_delta;
 
 /// Version of this protocol; [`Info::protocol`] must match.
