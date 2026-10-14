@@ -467,16 +467,18 @@ firmware turns them into a modulated carrier.
 * **PIO method** (`--synthesis pio`, `PioConfig`, firmware `direct.rs`): the
   system clock switches to `PLL_USB` at the bit rate B (240–264 MHz, chosen
   per carrier by `plan::pio_plan` to keep the bit stream's aliases out of
-  the FM band), with the core voltage at 1.20 V and the flash interface's
-  divider scaled up to keep the flash clock where boot put it (on the
-  RP2040, whose SSI must be disabled for that, core 0 makes the change from
-  RAM while core 1 waits). Core 1 looks up one 32-bit word per 32 bits in a
-  table of 4096 square-wave patterns indexed by the phase at the word's
-  start, advances the phase by the sample's increment (interpolated per
-  word), and DMA feeds a 32 KB ring of words to a state machine that runs
-  `out pins, 1` every cycle. The M0+ word loop is assembly (11 of the 32
-  cycles a word lasts; the compiled one took about 25, too many with the
-  per-sample work on top).
+  the FM band), with the core voltage at 1.20 V (the RP2350's regulator
+  ignores a new setting, which still reads back, until its software control
+  is unlocked; at the default 1.10 V the cores crash at these clocks) and
+  the flash interface's divider scaled up to keep the flash clock where
+  boot put it (on the RP2040, whose SSI must be disabled for that, core 0
+  makes the change from RAM while core 1 waits). Core 1 looks up one 32-bit
+  word per 32 bits in a table of 4096 square-wave patterns indexed by the
+  phase at the word's start, advances the phase by the sample's increment
+  (interpolated per word), and DMA feeds a 32 KB ring of words to a state
+  machine that runs `out pins, 1` every cycle. The M0+ word loop is
+  assembly (11 of the 32 cycles a word lasts; the compiled one took about
+  25, too many with the per-sample work on top).
   A starved state machine is `Fault::Stall`, a ring overtaken by the DMA
   `Fault::Late`. Stopping restores the clock, divider and voltage.
 * **Buffering**: core 0 (embassy, USB) puts the samples into a 32768-sample

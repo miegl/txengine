@@ -573,13 +573,23 @@ fn set_vsel(v: u8) -> u8 {
     }
     #[cfg(feature = "rp2350")]
     {
+        // POWMAN registers take a password in the top half. The regulator
+        // ignores VSEL (which still reads back as written) until software
+        // control is unlocked, which then stays so until a reset.
+        const PASSWORD: u32 = 0x5afe << 16;
+        pac::POWMAN.vreg_ctrl().modify(|w| {
+            w.0 = (w.0 & 0xffff) | PASSWORD;
+            w.set_unlock(true);
+        });
         let r = pac::POWMAN.vreg();
+        // Writes are ignored while an update is in progress.
+        while r.read().update_in_progress() {}
         let old = r.read().vsel();
-        // POWMAN registers take a password in the top half.
         r.modify(|w| {
-            w.0 = (w.0 & 0xffff) | (0x5afe << 16);
+            w.0 = (w.0 & 0xffff) | PASSWORD;
             w.set_vsel(v);
         });
+        while r.read().update_in_progress() {}
         old
     }
 }
