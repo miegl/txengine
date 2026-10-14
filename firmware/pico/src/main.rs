@@ -146,6 +146,18 @@ async fn main(_spawner: Spawner) {
     }
     watchdog.set_scratch(0, 0);
     watchdog.start(WATCHDOG_TIMEOUT);
+    // embassy-rp selects what a timeout resets with the RP2040's bits on the
+    // RP2350 too, where they stand for the oscillators, the clocks, the
+    // peripherals and part of the RAM, but not the cores: a hang would
+    // leave the cores running with USB reset under them, never rebooting.
+    // Everything but the oscillators, as the Pico SDK selects.
+    #[cfg(feature = "rp2350")]
+    {
+        let mut sel = embassy_rp::pac::psm::regs::Wdsel(0x01ff_ffff);
+        sel.set_rosc(false);
+        sel.set_xosc(false);
+        embassy_rp::pac::PSM.wdsel().write_value(sel);
+    }
     let driver = Driver::new(p.USB, Irqs);
     usb::run(driver, serial, watchdog).await;
 }

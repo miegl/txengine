@@ -478,10 +478,11 @@ firmware turns them into a modulated carrier.
   sample holds the carrier at its centre). Without samples for one second
   the firmware assumes the host is gone and switches the carrier off.
 * **Faults**: core 0 feeds a one-second watchdog, so a hung firmware
-  reboots (and the carrier stops); the firmware leaves breadcrumbs in a
-  watchdog scratch register, reported after such a reset in `Info` (shown
-  by `txengine probe`). Panics and hard faults reboot into the USB
-  bootloader.
+  reboots (and the carrier stops; on the RP2350 the firmware sets what the
+  watchdog resets itself, as embassy-rp's choice would leave the cores
+  running); the firmware leaves breadcrumbs in a watchdog scratch
+  register, reported after such a reset in `Info` (shown by `txengine
+  probe`). Panics and hard faults reboot into the USB bootloader.
 * **Timing**: `poll` reads the status with one control transfer (0.1–0.15
   ms), which `ClockDiscipline` brackets like a register read, so the crystal
   error is measured and corrected as on the Raspberry Pi
