@@ -13,7 +13,7 @@ use txengine_pico_protocol::{Config, Fault, Info, PioConfig, Request, Retune, St
 
 use crate::shared::{Command, Method, SHARED};
 use crate::usb_driver::Driver;
-use crate::{direct, rf};
+use crate::{clock, direct, rf};
 
 /// Set to reboot into the bootloader once the control transfer is done.
 static REBOOT_BOOTSEL: AtomicBool = AtomicBool::new(false);
@@ -30,7 +30,7 @@ fn wait_state(ok: impl Fn(State) -> bool, ms: u64) -> bool {
     let t0 = Instant::now();
     while !ok(SHARED.state()) {
         // The engine may need core 0 to switch the clocks (PIO method).
-        direct::service_switch();
+        clock::service_switch();
         if t0.elapsed() > Duration::from_millis(ms) {
             return false;
         }
@@ -113,8 +113,8 @@ impl Control {
                     buffer_samples: crate::shared::RING_SAMPLES as u32,
                     max_update_hz: rf::MAX_UPDATE_HZ,
                     gpio_mask: rf::gpio_mask(),
-                    pio_min_hz: direct::MIN_HZ,
-                    pio_max_hz: direct::MAX_HZ,
+                    pio_min_hz: clock::MIN_HZ,
+                    pio_max_hz: clock::MAX_HZ,
                     watchdog_note: crate::WATCHDOG_NOTE.load(Ordering::Relaxed),
                 };
                 let b = self.buf.first_chunk_mut::<{ Info::LEN }>().unwrap();
@@ -285,7 +285,7 @@ pub async fn run(driver: Driver<'static>, serial: &'static str, mut watchdog: em
             if !crate::REBOOTING.load(Ordering::Acquire) {
                 watchdog.feed(crate::WATCHDOG_TIMEOUT);
             }
-            direct::service_switch();
+            clock::service_switch();
             if REBOOT_BOOTSEL.load(Ordering::Acquire) {
                 Timer::after_millis(20).await;
                 crate::reboot_to_bootsel();

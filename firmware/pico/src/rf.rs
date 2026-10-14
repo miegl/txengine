@@ -386,7 +386,7 @@ pub fn output_off(gpio: Option<u8>) {
             }
         });
     }
-    crate::direct::leave_pll_usb();
+    crate::clock::leave_pll_usb();
     pac::PLL_USB.pwr().write(|w| {
         w.set_pd(true);
         w.set_vcopd(true);

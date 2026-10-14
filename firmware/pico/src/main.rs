@@ -9,6 +9,7 @@
 #![no_std]
 #![no_main]
 
+mod clock;
 mod direct;
 mod rf;
 mod shared;
@@ -165,6 +166,13 @@ async fn main(_spawner: Spawner) {
     }
     let driver = usb_driver::Driver::new(p.USB, Irqs);
     usb::run(driver, serial, watchdog).await;
+}
+
+/// Leave a breadcrumb in watchdog scratch 0, read back after a watchdog
+/// reset (`Info::watchdog_note`): a tag in the top half, a step below.
+#[inline(always)]
+pub fn crumb(code: u32) {
+    embassy_rp::pac::WATCHDOG.scratch0().write_value(code);
 }
 
 /// Switch the carrier off and reboot into the USB bootloader (from either

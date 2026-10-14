@@ -232,6 +232,24 @@ impl Info {
     }
 }
 
+/// A setting of `PLL_USB` as the system clock: `xosc / refdiv · fbdiv /
+/// (post_div1 · post_div2)` (the PIO method).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SysClock {
+    pub refdiv: u8,
+    pub fbdiv: u16,
+    pub post_div1: u8,
+    pub post_div2: u8,
+}
+
+impl SysClock {
+    /// The clock (Hz) from a crystal of `xosc_hz`.
+    pub fn hz(&self, xosc_hz: u32) -> u32 {
+        let vco = (xosc_hz / self.refdiv.max(1) as u32) as u64 * self.fbdiv as u64;
+        (vco / (self.post_div1.max(1) as u64 * self.post_div2.max(1) as u64)) as u32
+    }
+}
+
 /// The PIO method ([`Request::ConfigurePio`]).
 ///
 /// `PLL_USB` runs at `xosc / refdiv · fbdiv` and, divided by `post_div1 ·
@@ -275,6 +293,10 @@ impl PioConfig {
         w.put(&self.center.to_le_bytes());
         w.put(&self.scale.to_le_bytes());
         w.put(&[self.sample_words, self.interpolate as u8]);
+    }
+
+    pub fn clock(&self) -> SysClock {
+        SysClock { refdiv: self.refdiv, fbdiv: self.fbdiv, post_div1: self.post_div1, post_div2: self.post_div2 }
     }
 
     pub fn decode(b: &[u8]) -> Option<PioConfig> {
