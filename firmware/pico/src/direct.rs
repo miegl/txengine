@@ -428,6 +428,18 @@ fn restore_clock(saved: &Saved) {
     });
 }
 
+/// Take the system clock off `PLL_USB` if it runs from it (the raised
+/// clock), before the PLL is powered down other than by [`restore_clock`]:
+/// else both cores stop with it, and no watchdog reset follows. The flash
+/// divider and the voltage stay raised, which the slower clock tolerates.
+pub fn leave_pll_usb() {
+    use pac::clocks::vals::{ClkSysCtrlAuxsrc, ClkSysCtrlSrc};
+    let c = pac::CLOCKS.clk_sys_ctrl().read();
+    if c.src() == ClkSysCtrlSrc::CLKSRC_CLK_SYS_AUX && c.auxsrc() == ClkSysCtrlAuxsrc::CLKSRC_PLL_USB {
+        clk_sys_from(ClkSysCtrlAuxsrc::CLKSRC_PLL_SYS);
+    }
+}
+
 /// The flash interface's clock divider.
 fn flash_div() -> u16 {
     #[cfg(feature = "rp2040")]

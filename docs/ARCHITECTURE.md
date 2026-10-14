@@ -490,7 +490,10 @@ firmware turns them into a modulated carrier.
   watchdog resets itself, as embassy-rp's choice would leave the cores
   running); the firmware leaves breadcrumbs in a watchdog scratch
   register, reported after such a reset in `Info` (shown by `txengine
-  probe`). Panics and hard faults reboot into the USB bootloader.
+  probe`). Panics and hard faults, on either core, reboot into the USB
+  bootloader: the system clock first leaves `PLL_USB` (the raised clock)
+  before that PLL is switched off with the carrier, and core 0 stops
+  feeding the watchdog, on which the boot ROM counts the reboot down.
 * **Timing**: `poll` reads the status with one control transfer (0.1–0.15
   ms), which `ClockDiscipline` brackets like a register read, so the crystal
   error is measured and corrected as on the Raspberry Pi

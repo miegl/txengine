@@ -35,6 +35,9 @@ static mut CORE1_STACK: Stack<8192> = Stack::new();
 /// Core 0 feeds the watchdog; a hang reboots the firmware (and stops the
 /// carrier).
 pub const WATCHDOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(1);
+/// Set when the firmware reboots itself (from either core): core 0 stops
+/// feeding the watchdog, on which the boot ROM counts the reboot down.
+pub static REBOOTING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// The breadcrumb left in watchdog scratch 0 before the last watchdog reset.
 pub static WATCHDOG_NOTE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
@@ -164,8 +167,10 @@ async fn main(_spawner: Spawner) {
     usb::run(driver, serial, watchdog).await;
 }
 
-/// Switch the carrier off and reboot into the USB bootloader.
+/// Switch the carrier off and reboot into the USB bootloader (from either
+/// core).
 pub fn reboot_to_bootsel() -> ! {
+    REBOOTING.store(true, core::sync::atomic::Ordering::Release);
     rf::output_off(None);
     embassy_rp::rom_data::reset_to_usb_boot(0, 0);
     #[allow(clippy::empty_loop)]

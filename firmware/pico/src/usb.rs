@@ -282,7 +282,9 @@ pub async fn run(driver: Driver<'static>, serial: &'static str, mut watchdog: em
     let reboot = async {
         loop {
             Timer::after_millis(10).await;
-            watchdog.feed(crate::WATCHDOG_TIMEOUT);
+            if !crate::REBOOTING.load(Ordering::Acquire) {
+                watchdog.feed(crate::WATCHDOG_TIMEOUT);
+            }
             direct::service_switch();
             if REBOOT_BOOTSEL.load(Ordering::Acquire) {
                 Timer::after_millis(20).await;
