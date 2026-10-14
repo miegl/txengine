@@ -8,6 +8,7 @@ pub mod plan;
 
 use std::io;
 
+use log::warn;
 pub use txengine_pico_protocol as protocol;
 use txengine_pico_protocol::{self as proto, Config, Info, PioConfig, Request, Retune, Status};
 
@@ -110,9 +111,24 @@ impl Pico {
         self.dev.control_in(usbfs::TYPE_VENDOR | usbfs::RECIPIENT_INTERFACE, r as u8, 0, self.interface, buf)
     }
 
+    /// A request that may be repeated, once more if it failed on the bus (a
+    /// timeout, a corrupted packet): the firmware drops a transfer the host
+    /// gave up and serves the next, so one error need not end a
+    /// transmission.
+    fn retried<T>(what: &str, mut request: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+        request().or_else(|e| match e.raw_os_error() {
+            Some(libc::ETIMEDOUT | libc::EPROTO | libc::EILSEQ | libc::EOVERFLOW) => {
+                warn!("Pico: {what}: {e}; trying again");
+                request()
+            }
+            _ => Err(e),
+        })
+    }
+
     pub fn status(&self) -> Result<Status> {
         let mut b = [0u8; Status::LEN];
-        let n = self.request_in(Request::Status, &mut b).map_err(|e| io_err("reading its status", e))?;
+        let n = Self::retried("reading its status", || self.request_in(Request::Status, &mut b))
+            .map_err(|e| io_err("reading its status", e))?;
         Status::decode(&b[..n]).ok_or_else(|| HalError::Hardware("Pico: malformed status".into()))
     }
 
@@ -153,7 +169,7 @@ impl Pico {
     pub fn retune(&self, r: &Retune) -> Result<()> {
         let mut b = [0u8; Retune::LEN];
         r.encode(&mut b);
-        self.request_out(Request::Retune, &b).map_err(|e| io_err("retuning", e))
+        Self::retried("retuning", || self.request_out(Request::Retune, &b)).map_err(|e| io_err("retuning", e))
     }
 
     /// Reboot into the USB bootloader (for flashing).

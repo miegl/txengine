@@ -3,8 +3,6 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use embassy_rp::peripherals::USB;
-use embassy_rp::usb::Driver;
 use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request as ControlRequest, RequestType};
 use embassy_usb::driver::{Endpoint as _, EndpointOut};
@@ -14,6 +12,7 @@ use txengine_pico_protocol as proto;
 use txengine_pico_protocol::{Config, Fault, Info, PioConfig, Request, Retune, State, Status};
 
 use crate::shared::{Command, Method, SHARED};
+use crate::usb_driver::Driver;
 use crate::{direct, rf};
 
 /// Set to reboot into the bootloader once the control transfer is done.
@@ -208,11 +207,7 @@ impl Handler for Control {
 }
 
 /// Run the USB device forever.
-pub async fn run(
-    driver: Driver<'static, USB>,
-    serial: &'static str,
-    mut watchdog: embassy_rp::watchdog::Watchdog,
-) -> ! {
+pub async fn run(driver: Driver<'static>, serial: &'static str, mut watchdog: embassy_rp::watchdog::Watchdog) -> ! {
     let mut config = embassy_usb::Config::new(
         proto::VID,
         if cfg!(feature = "rp2040") { proto::PID_RP2040 } else { proto::PID_RP2350 },

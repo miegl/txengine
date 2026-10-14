@@ -13,6 +13,7 @@ mod direct;
 mod rf;
 mod shared;
 mod usb;
+mod usb_driver;
 
 use core::fmt::Write as _;
 use core::ptr::addr_of_mut;
@@ -20,12 +21,13 @@ use core::ptr::addr_of_mut;
 use embassy_executor::Spawner;
 use embassy_rp::clocks::{ClockConfig, PllConfig, UsbClkConfig, UsbClkSrc};
 use embassy_rp::multicore::{Stack, spawn_core1};
-use embassy_rp::usb::{Driver, InterruptHandler};
+use embassy_rp::usb::InterruptHandler;
 use embassy_rp::{bind_interrupts, peripherals};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
-    USBCTRL_IRQ => InterruptHandler<peripherals::USB>;
+    // The guard first: it acts on what embassy-rp's handler then clears.
+    USBCTRL_IRQ => usb_driver::Ep0Guard, InterruptHandler<peripherals::USB>;
 });
 
 static mut CORE1_STACK: Stack<8192> = Stack::new();
@@ -158,7 +160,7 @@ async fn main(_spawner: Spawner) {
         sel.set_xosc(false);
         embassy_rp::pac::PSM.wdsel().write_value(sel);
     }
-    let driver = Driver::new(p.USB, Irqs);
+    let driver = usb_driver::Driver::new(p.USB, Irqs);
     usb::run(driver, serial, watchdog).await;
 }
 

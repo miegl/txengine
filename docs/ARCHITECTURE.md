@@ -432,6 +432,12 @@ firmware turns them into a modulated carrier.
   A second interface is the Pico SDK's reset interface, for `picotool reboot
   -f`. On the host, `usbfs.rs` talks to `/dev/bus/usb` directly
   (asynchronous URBs for the samples, synchronous control transfers).
+  The firmware wraps embassy-rp's USB driver (`usb_driver.rs`, until a
+  release has the fixes): a control transfer the host gives up (after a
+  bus error, or cancelled) no longer blocks the device until it is
+  unplugged, and the RP2350's controller keeps the hardware fixes its
+  `Driver::new` switched off. txengine repeats a status read or a retune
+  once after an error on the bus.
 * **Carrier (PLL method)**: `PLL_USB` (the system and USB clocks both run
   from `PLL_SYS` at 144 MHz, USB at 144 / 3), its post dividers and
   `clk_gpout0` onto GP21. The PLL compares at the crystal / 2 (6 MHz: a
