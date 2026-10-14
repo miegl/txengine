@@ -7,7 +7,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering, fence};
 
-use txengine_pico_protocol::{Config, Fault, PioConfig, Retune, State};
+use txengine_pico_protocol::{AmConfig, Config, Fault, PioConfig, Retune, State};
 
 /// Capacity of the sample buffer (samples, a power of two).
 pub const RING_SAMPLES: usize = 1 << 15;
@@ -131,6 +131,7 @@ pub enum Command {
 pub enum Method {
     Pll = 0,
     Pio = 1,
+    Am = 2,
 }
 
 /// Progress reported by the RF engine.
@@ -144,9 +145,11 @@ pub struct Shared {
     pub samples: SampleRing,
     /// Samples received since the last stop.
     pub received: Published<u64>,
-    /// Written by core 0 while the engine is idle, with `method`.
+    /// Written by core 0 while the engine is idle, with `method` (one of
+    /// them, by the method).
     pub config: Published<Config>,
     pub pio_config: Published<PioConfig>,
+    pub am_config: Published<AmConfig>,
     method: AtomicU8,
     /// Written by core 0 at any time; the engine applies it at the next sample.
     pub retune: Published<Retune>,
@@ -189,6 +192,16 @@ pub static SHARED: Shared = Shared {
         sample_words: 1,
         interpolate: false,
     }),
+    am_config: Published::new(AmConfig {
+        refdiv: 1,
+        fbdiv: 0,
+        post_div1: 1,
+        post_div2: 1,
+        gpio: 0,
+        drive_ma: 2,
+        k: 0,
+        cycles: 1,
+    }),
     method: AtomicU8::new(Method::Pll as u8),
     retune: Published::new(Retune { center: 0, scale: 0 }),
     command: AtomicU8::new(Command::None as u8),
@@ -219,7 +232,11 @@ impl Shared {
     }
 
     pub fn method(&self) -> Method {
-        if self.method.load(Ordering::Acquire) == Method::Pio as u8 { Method::Pio } else { Method::Pll }
+        match self.method.load(Ordering::Acquire) {
+            1 => Method::Pio,
+            2 => Method::Am,
+            _ => Method::Pll,
+        }
     }
 
     pub fn set_method(&self, m: Method) {

@@ -18,23 +18,17 @@ use embassy_rp::pac;
 use txengine_pico_protocol::{Fault, PioConfig};
 
 use crate::clock;
-use crate::rf::{self, FUNCSEL_NULL, SM};
+use crate::rf::{self, FUNCSEL_NULL, FUNCSEL_PIO0, SM};
 use crate::shared::{Command, Progress, SHARED};
 
-/// Words in the ring (8192: 1 ms at 252 Mbit/s), aligned to its size for
-/// the DMA's ring addressing.
-const RING_WORDS: usize = 8192;
-#[repr(C, align(32768))]
-struct WordRing([u32; RING_WORDS]);
-static mut WORDS: WordRing = WordRing([0; RING_WORDS]);
+/// Words in the ring: all of `rf::WORD_RING` (8192: 1 ms at 252 Mbit/s).
+const RING_WORDS: usize = rf::WORD_RING_WORDS;
 
 const TABLE_LEN: usize = 1 << PioConfig::TABLE_BITS;
 static mut TABLE: [u32; TABLE_LEN] = [0; TABLE_LEN];
 
 /// DMA channel (a ping-pong pair with the next one on the RP2040).
 const CH: usize = 0;
-/// GPIO function: PIO0.
-const FUNCSEL_PIO0: u8 = 6;
 
 /// Breadcrumbs (see `crate::crumb`).
 const STEP: u32 = 0x5049_0000;
@@ -231,7 +225,7 @@ impl Transmitter {
         start_pio(cfg);
         crumb(9);
         // SAFETY: only the address is taken.
-        let ring = unsafe { addr_of_mut!(WORDS.0) } as u32;
+        let ring = unsafe { addr_of_mut!(rf::WORD_RING.0) } as u32;
         start_dma(ring);
         crumb(10);
         pac::PIO0.ctrl().modify(|w| w.set_sm_enable(1 << SM));
@@ -252,7 +246,8 @@ impl Transmitter {
             // SAFETY: in bounds; core 1 is the only writer, and these words
             // were read by the DMA a ring ago (the caller keeps the lead
             // below a ring).
-            let out = unsafe { core::slice::from_raw_parts_mut((addr_of_mut!(WORDS.0) as *mut u32).add(at), n) };
+            let out =
+                unsafe { core::slice::from_raw_parts_mut((addr_of_mut!(rf::WORD_RING.0) as *mut u32).add(at), n) };
             k.words(out);
             self.written = self.written.wrapping_add(n as u32);
             left -= n;
@@ -399,6 +394,6 @@ fn start_dma(ring: u32) {
 #[inline(always)]
 fn read_offset() -> Option<u32> {
     // SAFETY: only the address is taken.
-    let ring = unsafe { addr_of_mut!(WORDS.0) } as u32;
+    let ring = unsafe { addr_of_mut!(rf::WORD_RING.0) } as u32;
     rf::ring_read_offset(CH, ring, RING_WORDS as u32)
 }

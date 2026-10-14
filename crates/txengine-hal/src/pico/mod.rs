@@ -3,6 +3,7 @@
 //! samples and plans the clocks, the Pico synthesises and modulates the
 //! carrier. The protocol is in `txengine-pico-protocol`.
 
+pub mod am;
 pub mod fm;
 pub mod plan;
 
@@ -10,7 +11,7 @@ use std::io;
 
 use log::warn;
 pub use txengine_pico_protocol as protocol;
-use txengine_pico_protocol::{self as proto, Config, Info, PioConfig, Request, Retune, Status};
+use txengine_pico_protocol::{self as proto, AmConfig, Config, Info, PioConfig, Request, Retune, Status};
 
 use crate::usbfs::{self, Device, DeviceInfo};
 use crate::{HalError, Result};
@@ -84,19 +85,23 @@ impl Pico {
                 pio_min_hz: 0,
                 pio_max_hz: 0,
                 watchdog_note: 0,
+                am_pulse_cycles: 0,
+                am_sample_cycles: 0,
             },
             version: String::new(),
         };
-        let mut b = [0u8; Info::LEN];
+        let mut b = [0u8; 64];
         let n = pico.request_in(Request::Info, &mut b).map_err(|e| io_err("reading its description", e))?;
-        pico.info = Info::decode(&b[..n]).ok_or_else(|| HalError::Hardware("Pico: malformed description".into()))?;
-        if pico.info.protocol != proto::PROTOCOL_VERSION {
+        // The protocol version comes first in every version of the description.
+        let protocol = u16::from_le_bytes([b[0], b[1]]);
+        if n < 2 || protocol != proto::PROTOCOL_VERSION {
             return Err(HalError::Unsupported(format!(
-                "the Pico's firmware speaks protocol {}, this txengine {}: update the firmware",
-                pico.info.protocol,
-                proto::PROTOCOL_VERSION
+                "the Pico's firmware speaks protocol {protocol}, this txengine {}: update the {}",
+                proto::PROTOCOL_VERSION,
+                if protocol < proto::PROTOCOL_VERSION { "firmware" } else { "txengine" }
             )));
         }
+        pico.info = Info::decode(&b[..n]).ok_or_else(|| HalError::Hardware("Pico: malformed description".into()))?;
         let mut b = [0u8; proto::VERSION_MAX];
         let n = pico.request_in(Request::Version, &mut b).map_err(|e| io_err("reading its version", e))?;
         pico.version = String::from_utf8_lossy(&b[..n]).into_owned();
@@ -147,6 +152,16 @@ impl Pico {
         let mut b = [0u8; PioConfig::LEN];
         c.encode(&mut b);
         self.request_out(Request::ConfigurePio, &b).map_err(|e| match e.raw_os_error() {
+            Some(libc::EPIPE) => HalError::Config("the Pico refused the configuration".into()),
+            _ => io_err("configuring", e),
+        })
+    }
+
+    /// Send a configuration for AM.
+    pub fn configure_am(&self, c: &AmConfig) -> Result<()> {
+        let mut b = [0u8; AmConfig::LEN];
+        c.encode(&mut b);
+        self.request_out(Request::ConfigureAm, &b).map_err(|e| match e.raw_os_error() {
             Some(libc::EPIPE) => HalError::Config("the Pico refused the configuration".into()),
             _ => io_err("configuring", e),
         })

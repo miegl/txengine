@@ -113,7 +113,7 @@ pub struct HardwareArgs {
     #[arg(short, long, value_name = "DEVICE", help_heading = "Hardware")]
     pub device: Option<String>,
     /// Output GPIO (repeat for several pins on the same clock generator)
-    /// [default: 4; Pico: 21; AM: 18].
+    /// [default: 4; AM: 18; Pico: 21].
     #[arg(short, long = "gpio", value_name = "N", help_heading = "Hardware")]
     pub gpio: Vec<u32>,
     /// PLL that makes the carrier: in WFM the one to modulate (Pi 1-4: a, c,
@@ -133,12 +133,14 @@ pub struct HardwareArgs {
     /// speed.
     #[arg(long, default_value = "auto", value_parser = parse_ppm, allow_hyphen_values = true, value_name = "auto|PPM|off", help_heading = "Hardware")]
     pub ppm: Ppm,
-    /// Pico: how the carrier is made. "pll": PLL_USB's feedback divider,
-    /// dithered (any of the clock-output GPIOs). "pio": a PIO bit stream at
-    /// 240-264 Mbit/s (the Pico's system clock is raised for it, and its
-    /// core voltage to 1.20 V; any GPIO): less noise next to the carrier,
-    /// but the bit stream puts lines all over the FM band, measured up to
-    /// about -15 dBc (txengine picks the bit rate that keeps them lowest).
+    /// Pico, WFM: how the carrier is made. "pll": PLL_USB's feedback
+    /// divider, dithered (any of the clock-output GPIOs). "pio": a PIO bit
+    /// stream at 240-264 Mbit/s (the Pico's system clock is raised for it,
+    /// and its core voltage to 1.20 V; any GPIO): less noise next to the
+    /// carrier, but the bit stream puts lines all over the FM band, measured
+    /// up to about -15 dBc (txengine picks the bit rate that keeps them
+    /// lowest). AM is always made by the PIO, one pulse per carrier cycle at
+    /// the raised clock.
     #[arg(long, value_name = "pll|pio", help_heading = "Raspberry Pi Pico")]
     pub synthesis: Option<String>,
     /// DMA channel to use [default: a free one].

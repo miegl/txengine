@@ -24,8 +24,8 @@ use embassy_rp::pac;
 use txengine_pico_protocol::sigma_delta::Mash11;
 use txengine_pico_protocol::{Config, FRAC_BITS, Fault, State};
 
-use crate::direct;
 use crate::shared::{Command, Method, Progress, SHARED};
+use crate::{am, direct};
 
 /// Words in the code ring (a power of two; 6 codes of 5 bits per word,
 /// in its top 30 bits).
@@ -37,6 +37,14 @@ struct CodeRing([u32; RING_WORDS]);
 
 /// The DMA reads it as a ring: aligned to its size.
 static mut CODES: CodeRing = CodeRing([0; RING_WORDS]);
+
+/// The words the PIO method and AM feed to their state machine (one of
+/// them transmits at a time). The DMA reads them as a ring: aligned to its
+/// size (a part from the start is aligned to its own size too).
+pub const WORD_RING_WORDS: usize = 8192;
+#[repr(C, align(32768))]
+pub struct WordRing(pub [u32; WORD_RING_WORDS]);
+pub static mut WORD_RING: WordRing = WordRing([0; WORD_RING_WORDS]);
 
 /// DMA channels: codes → PIO, PIO → `FBDIV_INT`. On the RP2040, whose
 /// transfer counts run out, each is a pair that chains to each other.
@@ -270,6 +278,8 @@ const FUNCSEL_GPCK: u8 = 8;
 #[cfg(feature = "rp2350")]
 const FUNCSEL_GPCK: u8 = 9;
 pub const FUNCSEL_NULL: u8 = 0x1f;
+/// GPIO function: PIO0.
+pub const FUNCSEL_PIO0: u8 = 6;
 
 /// State machine cycles per update.
 fn update_cycles(cfg: &Config) -> u32 {
@@ -325,6 +335,10 @@ pub fn run() -> ! {
                     Method::Pio => {
                         let cfg = SHARED.pio_config.get();
                         transmit(direct::validate(&cfg), || direct::Transmitter::start(&cfg), |t| t.run(), |t| t.stop())
+                    }
+                    Method::Am => {
+                        let cfg = SHARED.am_config.get();
+                        transmit(am::validate(&cfg), || am::Transmitter::start(&cfg), |t| t.run(), |t| t.stop())
                     }
                 };
                 match end {

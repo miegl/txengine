@@ -1,14 +1,18 @@
 //! txengine RF front end for the Raspberry Pi Pico (RP2040) and Pico 2
 //! (RP2350): the host renders the samples, the Pico turns them into a
-//! frequency-modulated carrier. See `txengine-pico-protocol`.
+//! carrier modulated in frequency ([`rf`]: the PLL method, [`direct`]: the
+//! PIO method) or in amplitude ([`am`]). See `txengine-pico-protocol`.
 //!
 //! Core 0 runs the USB device; core 1 runs the RF engine alone ([`rf`]).
 //! The system clock (144 MHz) and the USB clock (144 / 3 MHz) both come
-//! from `PLL_SYS`, which leaves `PLL_USB` for the carrier.
+//! from `PLL_SYS`, which leaves `PLL_USB` for the carrier, or, raised to
+//! 240-264 MHz, for the system clock while the PIO method or AM transmits
+//! ([`clock`]).
 
 #![no_std]
 #![no_main]
 
+mod am;
 mod clock;
 mod direct;
 mod rf;
@@ -54,7 +58,7 @@ static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 3] = {
     [
         bi::rp_cargo_bin_name!(),
         bi::env!(consts::TAG_RASPBERRY_PI, consts::ID_RP_PROGRAM_VERSION_STRING, "TXENGINE_VERSION"),
-        bi::rp_program_description!(c"txengine RF front end: an FM transmitter on USB"),
+        bi::rp_program_description!(c"txengine RF front end: an FM and AM transmitter on USB"),
     ]
 };
 
@@ -137,7 +141,7 @@ async fn main(_spawner: Spawner) {
     let mut p = embassy_rp::init(embassy_rp::config::Config::new(clock_config()));
     let serial = serial_number(&mut p);
     // The assembly kernels must match the Rust arithmetic.
-    assert!(rf::self_test() && direct::self_test());
+    assert!(rf::self_test() && direct::self_test() && am::self_test());
     // Reserve what the RF engine programs directly.
     let _rf = (p.PIO0, p.DMA_CH0, p.DMA_CH1, p.DMA_CH2, p.DMA_CH3, p.PIN_21);
     spawn_core1(

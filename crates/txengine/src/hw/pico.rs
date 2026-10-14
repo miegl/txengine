@@ -13,28 +13,53 @@ use crate::cli::HardwareArgs;
 
 pub struct Pico;
 
-/// The deviation the plan must allow; the Pico only does FM so far.
-fn frequency_range(output: Output) -> anyhow::Result<f64> {
-    match output {
-        Output::Frequency { max_offset_hz } => Ok(max_offset_hz),
-        Output::Amplitude => bail!("the Pico does not transmit AM yet"),
-    }
-}
+/// Default sample rate of AM: each sample lasts the whole number of carrier
+/// cycles that comes closest.
+const AM_SAMPLE_RATE: f64 = 100e3;
 
-fn config(args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<pico::fm::PicoFmConfig> {
+/// The options every mode takes on the Pico: the device, the GPIO and the
+/// pad drive (mA).
+fn common(args: &str, hw: &HardwareArgs) -> anyhow::Result<(Option<String>, u8, u8)> {
     if hw.pll.is_some() || hw.pacer.is_some() || hw.dma_channel.is_some() {
         bail!("--pll, --pacer and --dma-channel do not apply to the Pico");
+    }
+    if !matches!(hw.synthesis.as_deref(), None | Some("pll") | Some("pio")) {
+        bail!("--synthesis {}: use pll or pio", hw.synthesis.as_deref().unwrap_or_default());
     }
     let gpio = match hw.gpio.as_slice() {
         [] => 21,
         &[g] => g,
         _ => bail!("the Pico transmits on one GPIO"),
     };
+    Ok((
+        Some(args.to_string()).filter(|s| !s.is_empty()),
+        u8::try_from(gpio)?,
+        [2, 2, 4, 4, 8, 8, 12, 12][hw.power as usize],
+    ))
+}
+
+fn am_config(args: &str, hw: &HardwareArgs) -> anyhow::Result<pico::am::PicoAmConfig> {
+    let (device, gpio, drive_ma) = common(args, hw)?;
+    if hw.synthesis.as_deref() == Some("pll") {
+        bail!("the Pico makes AM with the PIO (--synthesis pio): the PLL method only modulates the frequency");
+    }
+    Ok(pico::am::PicoAmConfig {
+        carrier_hz: hw.freq_hz,
+        device,
+        gpio,
+        drive_ma,
+        sample_rate: hw.sample_rate.unwrap_or(AM_SAMPLE_RATE),
+        buffer: Duration::from_millis(hw.buffer_ms),
+    })
+}
+
+fn config(args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<pico::fm::PicoFmConfig> {
+    let (device, gpio, drive_ma) = common(args, hw)?;
     Ok(pico::fm::PicoFmConfig {
         carrier_hz: hw.freq_hz,
-        device: Some(args.to_string()).filter(|s| !s.is_empty()),
-        gpio: u8::try_from(gpio)?,
-        drive_ma: [2, 2, 4, 4, 8, 8, 12, 12][hw.power as usize],
+        device,
+        gpio,
+        drive_ma,
         sample_rate: hw.sample_rate,
         buffer: Duration::from_millis(hw.buffer_ms),
         max_offset_hz,
@@ -43,9 +68,8 @@ fn config(args: &str, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<p
         update_hz: hw.pico_update_rate,
         refdiv: hw.pico_refdiv,
         synthesis: match hw.synthesis.as_deref() {
-            None | Some("pll") => pico::fm::Synthesis::Pll,
             Some("pio") => pico::fm::Synthesis::Pio,
-            Some(other) => bail!("--synthesis {other}: use pll or pio"),
+            _ => pico::fm::Synthesis::Pll,
         },
     })
 }
@@ -73,7 +97,7 @@ impl Backend for Pico {
     }
 
     fn check(&self, args: &str, hw: &HardwareArgs) -> anyhow::Result<()> {
-        config(args, hw, 0.0).map(|_| ())
+        common(args, hw).map(|_| ())
     }
 
     fn lock_name(&self, args: &str) -> anyhow::Result<String> {
@@ -83,13 +107,21 @@ impl Backend for Pico {
     }
 
     fn open(&self, args: &str, hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn RfSink>> {
-        let cfg = config(args, hw, frequency_range(output)?)?;
-        Ok(Box::new(pico::fm::PicoFmTransmitter::new(&cfg).context("Pico transmitter")?))
+        Ok(match output {
+            Output::Frequency { max_offset_hz } => {
+                let cfg = config(args, hw, max_offset_hz)?;
+                Box::new(pico::fm::PicoFmTransmitter::new(&cfg).context("Pico transmitter")?)
+            }
+            Output::Amplitude => {
+                let cfg = am_config(args, hw)?;
+                Box::new(pico::am::PicoAmTransmitter::new(&cfg).context("Pico AM transmitter")?)
+            }
+        })
     }
 
     fn probe(&self, args: &str, hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
-        let cfg = config(args, hw, frequency_range(output)?)?;
-        let usb = pico::find(cfg.device.as_deref())?;
+        let (device, ..) = common(args, hw)?;
+        let usb = pico::find(device.as_deref())?;
         let p = pico::Pico::open(&usb)?;
         let i = &p.info;
         println!("Device:   {}", p.describe());
@@ -106,6 +138,35 @@ impl Backend for Pico {
         let s = p.status()?;
         let fault = if s.fault == proto::Fault::None { String::new() } else { format!(" ({})", s.fault.describe()) };
         println!("State:    {:?}{fault}", s.state);
+        let max_offset_hz = match output {
+            Output::Frequency { max_offset_hz } => max_offset_hz,
+            Output::Amplitude => {
+                let cfg = am_config(args, hw)?;
+                let p = pico::am::plan(cfg.carrier_hz, cfg.sample_rate, i)?;
+                let (lo, hi) = pico::am::carrier_range(i, cfg.sample_rate).unwrap_or_default();
+                println!(
+                    "Carrier:  {:.4} kHz (AM) on GPIO{} from PIO, one pulse per carrier cycle: system clock \
+                     {:.3} MHz (PLL_USB {:.0} MHz x {} / {}x{}) / {:.3}",
+                    p.carrier_hz / 1e3,
+                    cfg.gpio,
+                    p.clock_hz / 1e6,
+                    i.xosc_hz as f64 / 1e6,
+                    p.clock.fbdiv,
+                    p.clock.post_div1,
+                    p.clock.post_div2,
+                    p.period()
+                );
+                println!(
+                    "Sampling: {:.3} S/s ({} carrier cycles per sample); AM carriers {:.0} kHz to {:.2} MHz",
+                    p.sample_rate(),
+                    p.cycles,
+                    lo / 1e3,
+                    hi / 1e6
+                );
+                return Ok(());
+            }
+        };
+        let cfg = config(args, hw, max_offset_hz)?;
         if cfg.synthesis == pico::fm::Synthesis::Pio {
             let p = pico::fm::pio_plan_for(&cfg, i)?;
             println!(

@@ -31,7 +31,7 @@ transmission mode or a hardware platform means implementing one side.
 | `txengine-am` | The AM broadcast mode: `EnvelopeGenerator` (programme to carrier envelope) and `AmModulator`. |
 | `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input; the programme the modes share (`Programme`, `AudioFeed`). |
 | `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backends and the RP1 (Pi 5) backends (FM and AM each), amplitude by pulse width (`am`), the shutdown guardian; usbfs (USB without libusb) and the Pico backend (planning, `RfSink`). |
-| `txengine-pico-protocol` | The USB protocol between txengine and the Pico firmware, and the sigma-delta arithmetic both sides share. `no_std`, no dependencies. |
+| `txengine-pico-protocol` | The USB protocol between txengine and the Pico firmware, and the arithmetic both sides share: the sigma-delta modulator of FM, the pulse quantiser of AM (`am`). `no_std`, no dependencies. |
 | `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, `devices`, the hardware backends and their selection (`hw/`), the programme input options every mode shares, and per mode its options, set-up and tools (WFM: `analyze`). |
 | `firmware/pico` | The RP2040/RP2350 firmware (embassy-rp), a cargo workspace of its own for the bare-metal targets. |
 
@@ -418,17 +418,19 @@ pulse width per carrier cycle into a PWM (AM).
 ### Raspberry Pi Pico and Pico 2 (USB)
 
 The Pico is a front end: txengine renders the samples on the computer, the
-firmware turns them into a modulated carrier.
+firmware turns them into a modulated carrier. One firmware does all: FM by
+either method, and AM.
 
 * **Link** (`txengine-pico-protocol`): one vendor interface with a bulk OUT
-  endpoint for the samples (`i16` in units of the plan's resolution, about
-  3 Hz) and control requests for the rest: `Info` (whose protocol version
-  must match txengine's), `Version` (the firmware's `git describe`),
-  `Configure` or
-  `ConfigurePio` (the whole clock plan of either method, computed by
-  txengine: `txengine-hal/src/pico/plan.rs`),
+  endpoint for the samples (FM: `i16` in units of the plan's resolution,
+  about 3 Hz; AM: `u16` amplitudes) and control requests for the rest:
+  `Info` (whose protocol version must match txengine's; also what AM costs
+  the firmware), `Version` (the firmware's `git describe`), `Configure`,
+  `ConfigurePio` or `ConfigureAm` (the whole clock plan of a method,
+  computed by txengine: `txengine-hal/src/pico/plan.rs`, `pico/am.rs`),
   `Start`, `Stop`, `Status` (the count of samples whose emission has
-  started, underruns, faults), `Retune` (crystal correction) and `Bootsel`.
+  started, underruns, faults), `Retune` (crystal correction, also before
+  the start) and `Bootsel`.
   A second interface is the Pico SDK's reset interface, for `picotool reboot
   -f`. On the host, `usbfs.rs` talks to `/dev/bus/usb` directly
   (asynchronous URBs for the samples, synchronous control transfers).
@@ -472,19 +474,47 @@ firmware turns them into a modulated carrier.
   is unlocked; at the default 1.10 V the cores crash at these clocks) and
   the flash interface's divider scaled up to keep the flash clock where
   boot put it (on the RP2040, whose SSI must be disabled for that, core 0
-  makes the change from RAM while core 1 waits). Core 1 looks up one 32-bit
-  word per 32 bits in a table of 4096 square-wave patterns indexed by the
-  phase at the word's start, advances the phase by the sample's increment
-  (interpolated per word), and DMA feeds a 32 KB ring of words to a state
-  machine that runs `out pins, 1` every cycle. The M0+ word loop is
-  assembly (11 of the 32 cycles a word lasts; the compiled one took about
-  25, too many with the per-sample work on top).
-  A starved state machine is `Fault::Stall`, a ring overtaken by the DMA
-  `Fault::Late`. Stopping restores the clock, divider and voltage.
+  makes the change from RAM while core 1 waits; `clock.rs`, shared with
+  AM). Core 1 looks up one 32-bit word per 32 bits in a table of 4096
+  square-wave patterns indexed by the phase at the word's start, advances
+  the phase by the sample's increment (interpolated per word), and DMA
+  feeds a 32 KB ring of words to a state machine that runs `out pins, 1`
+  every cycle. The M0+ word loop is assembly (11 of the 32 cycles a word
+  lasts; the compiled one took about 25, too many with the per-sample
+  work on top). A starved state machine is `Fault::Stall`, a ring
+  overtaken by the DMA `Fault::Late`. Stopping restores the clock,
+  divider and voltage.
+* **AM** (`AmConfig`, firmware `am.rs`, the quantiser in
+  `txengine-pico-protocol::am`): the system clock is raised as for the PIO
+  method (to 264 MHz, the most cycles per carrier cycle), and a state
+  machine puts out one pulse per carrier cycle from words of two counts,
+  low then high (side-set, so the counts are exact to the cycle and a
+  pulse may have no width). The carrier is `clock · k / 2³²`; samples last
+  a whole number of carrier cycles, so `Retune` (a new `k`) corrects the
+  carrier and the sample clock together (`paced_by_carrier`). For every
+  pulse the quantiser chooses the width and centre near `v = a − (2E₁ −
+  E₂)`, `E` the complex errors of the last pulses' phasors, which it
+  computes from their integer edges (a 4096-entry sine table corrected to
+  first order): second-order noise shaping of the carrier's complex
+  envelope, so that the edges can be rounded to clock cycles although the
+  period is not a whole number of them. Rare paths keep the loop from
+  winding up (v pointing backwards: a pulse a quarter period off; beyond
+  the full output, which sits 10·(π/P)² below the square wave for the
+  noise shaping's room). On the RP2040 the quantiser is assembly (Rust
+  spilled to the stack, 280 cycles a pulse): core 1's interpolators turn a
+  phase into its table entry's address and remainder, and their spare
+  registers hold the errors, the amplitude step and constants, at one
+  cycle per access on the I/O port; checked against the Rust version at
+  boot. It takes about 120 cycles per pulse and 280 per sample, which
+  `Info` reports (with a margin) and txengine plans with: carriers up to
+  1.76 MHz at 100 kS/s. The RP2350 runs the Rust version: about 131 and
+  157 cycles on its Cortex-M33, 1.71 MHz. A starved state machine is
+  `Fault::Stall`; an underrun holds the samples' recent mean.
 * **Buffering**: core 0 (embassy, USB) puts the samples into a 32768-sample
   ring; core 1 takes one per sample period and counts underruns (a missing
-  sample holds the carrier at its centre). Without samples for one second
-  the firmware assumes the host is gone and switches the carrier off.
+  sample holds an FM carrier at its centre, an AM one at its recent mean).
+  Without samples for one second the firmware assumes the host is gone and
+  switches the carrier off.
 * **Faults**: core 0 feeds a one-second watchdog, so a hung firmware
   reboots (and the carrier stops; on the RP2350 the firmware sets what the
   watchdog resets itself, as embassy-rp's choice would leave the cores

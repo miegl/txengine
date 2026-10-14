@@ -9,11 +9,11 @@ use embassy_usb::driver::{Endpoint as _, EndpointOut};
 use embassy_usb::{Builder, Handler};
 use static_cell::StaticCell;
 use txengine_pico_protocol as proto;
-use txengine_pico_protocol::{Config, Fault, Info, PioConfig, Request, Retune, State, Status};
+use txengine_pico_protocol::{AmConfig, Config, Fault, Info, PioConfig, Request, Retune, State, Status};
 
 use crate::shared::{Command, Method, SHARED};
 use crate::usb_driver::Driver;
-use crate::{clock, direct, rf};
+use crate::{am, clock, direct, rf};
 
 /// Set to reboot into the bootloader once the control transfer is done.
 static REBOOT_BOOTSEL: AtomicBool = AtomicBool::new(false);
@@ -77,6 +77,16 @@ impl Control {
                 configured(Retune { center: cfg.center, scale: cfg.scale });
                 true
             }
+            Request::ConfigureAm => {
+                let Some(cfg) = AmConfig::decode(data) else { return false };
+                if !matches!(SHARED.state(), State::Idle | State::Configured) || !am::validate(&cfg) {
+                    return false;
+                }
+                SHARED.am_config.set(cfg);
+                SHARED.set_method(Method::Am);
+                configured(Retune { center: cfg.k, scale: 0 });
+                true
+            }
             Request::Start => {
                 if SHARED.state() != State::Configured {
                     return false;
@@ -116,6 +126,8 @@ impl Control {
                     pio_min_hz: clock::MIN_HZ,
                     pio_max_hz: clock::MAX_HZ,
                     watchdog_note: crate::WATCHDOG_NOTE.load(Ordering::Relaxed),
+                    am_pulse_cycles: am::PULSE_CYCLES,
+                    am_sample_cycles: am::SAMPLE_CYCLES,
                 };
                 let b = self.buf.first_chunk_mut::<{ Info::LEN }>().unwrap();
                 info.encode(b);

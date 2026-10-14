@@ -6,7 +6,8 @@ stereo multiplex (ITU-R BS.450) and RDS (EN 50067), on the Raspberry Pi 2, 3,
 4, 5 and Zero 2 W, as 32-bit (armv7) or 64-bit (aarch64) static binaries. A
 Raspberry Pi Pico or Pico 2 with txengine's firmware does the same on USB, for
 any Linux computer. On the Raspberry Pi it also transmits AM on long and
-medium wave and, up to 4.2 MHz (Raspberry Pi 5: 6.2 MHz), short wave.
+medium wave and, up to 4.2 MHz (Raspberry Pi 5: 6.2 MHz), short wave, and
+the Pico on long and medium wave.
 
 > **Transmitting without a licence is illegal in most countries.** The output
 > is a square wave rich in harmonics. Connect it to a receiver with a shielded
@@ -67,12 +68,14 @@ medium wave and, up to 4.2 MHz (Raspberry Pi 5: 6.2 MHz), short wave.
   standard input, or a test tone; resampled with rubato; clock-drift
   compensation for live input. A WAV stream on standard input plays until
   it ends, whatever length its header declares.
-* **AM** (Raspberry Pi 2-5 and Zero 2 W; 100 kHz to 6.2 MHz on the Pi 5,
-  to 4.2 MHz on the others): double sideband with full carrier, made by
-  pulse widths that keep the carrier's phase (PWM, noise-shaped widths for
-  every carrier cycle by DMA); programme low-pass at the channel's audio
-  bandwidth (4.5 kHz) and a look-ahead limiter on the true peaks. See
-  [AM](#am).
+* **AM** (Raspberry Pi 2-5, Zero 2 W and Pico; 100 kHz to 6.2 MHz on the
+  Pi 5, to 4.2 MHz on the other Raspberry Pis, to 1.76 MHz on the Pico and
+  1.71 MHz on the Pico 2): double sideband with full carrier, made by pulse
+  widths that keep the carrier's phase (PWM with noise-shaped widths for
+  every carrier cycle by DMA; on the Pico a PIO state machine, its pulses'
+  edges placed by the firmware with noise shaping); programme low-pass at
+  the channel's audio bandwidth (4.5 kHz) and a look-ahead limiter on the
+  true peaks. See [AM](#am).
 * **Run-time control** through a FIFO or a Unix socket (PS, RT, PTY, TA, AF,
   gain, ...), status reporting, clean shutdown and a guardian process that
   restores every touched register even after `kill -9`.
@@ -96,9 +99,9 @@ medium wave and, up to 4.2 MHz (Raspberry Pi 5: 6.2 MHz), short wave.
 The default output is GPIO4 (pin 7); on the Pico GP21 (pin 27, ground on
 pin 28), the only clock output on its header. AM is transmitted on GPIO18
 (pin 12, ground on pin 14) of the Raspberry Pi 2-5 and Zero 2 W (tested on
-the Pi 5 and the Zero 2 W); the Pico does not transmit AM yet. `txengine
-devices` lists the transmitters found, and `txengine probe -f 87.6` shows
-what will be used, without transmitting.
+the Pi 5 and the Zero 2 W), and on any GPIO of the Pico and Pico 2, GP21
+unless given. `txengine devices` lists the transmitters found, and
+`txengine probe -f 87.6` shows what will be used, without transmitting.
 
 ## Building
 
@@ -272,6 +275,7 @@ sudo txengine am tx -f 999k -a music.flac                      # medium wave
 sudo txengine am tx -f 6.1M -a talk.mp3 --bandwidth 10000      # short wave (49 m, Pi 5), 10 kHz audio
 sudo txengine am tx -f 999k --tone 1000 --gain 6               # 1 kHz at the full depth (90 %)
 sudo txengine probe --mode am -f 999k                          # the clock plan
+txengine am tx -d pico -f 1503k -a music.flac                  # through a Pico on USB
 txengine am render -a music.flac --duration 10 -o envelope.wav # the envelope as WAV
 ```
 
@@ -280,7 +284,8 @@ the waveform: once per carrier period the PWM puts out one pulse, centred
 on the same instant of every period. Its fundamental is `sin(π w / P)` of
 the full square wave's (width `w`, period `P`), and its phase does not move
 with the width (a pulse starting at the period's start would move it by
-up to 90°). The output pin is GPIO18 (default), 12, 13 or 19.
+up to 90°). The output pin is GPIO18 (default), 12, 13 or 19 on a
+Raspberry Pi, any GPIO on a Pico.
 
 * **Raspberry Pi 5:** PWM0 runs in phase-correct mode from `pll_audio` at
   up to 400 MHz, beyond the datasheet's 150 MHz (the counter and the pin
@@ -303,6 +308,28 @@ up to 90°). The output pin is GPIO18 (default), 12, 13 or 19.
   PWM's FIFO lasts, and the PWM drops carrier cycles (0.4–1 % with the
   `schedutil` governor, which also shifts the carrier's phase). txengine
   warns if the PWM misses cycles.
+* **Pico and Pico 2:** a PIO state machine puts out one pulse per carrier
+  cycle, low for one count of system clock cycles and high for another,
+  at the raised system clock of the PIO method (264 MHz from `PLL_USB`,
+  1.20 V). The carrier period is not a whole number of clocks (999 kHz is
+  264.26), so the firmware places every pulse's edges itself: the carrier
+  is an exact fraction of the clock (`f · k / 2³²`, 0.06 Hz steps, which is
+  also how the crystal is corrected), and each pulse is chosen so that the
+  error of the carrier's complex envelope, computed from the pulse's
+  integer edges, is noise-shaped (second-order error feedback on the
+  phasor; shaping the edges' times instead lets the shaped noise
+  intermodulate back into the audio band). Simulated, the error within
+  ±5 kHz is 98 dB below the carrier at 153 kHz, 106 dB at 999 kHz and
+  111 dB at 1.6 MHz, for a 1 kHz tone at 90 %; a steady carrier has no line
+  above −100 dBc within 20 kHz. The full output is the square wave less
+  10·(π/P)², 0.01 dB at 999 kHz, the headroom the noise shaping needs.
+  Core 1 of the RP2040 runs this in assembly, with its interpolators as
+  single-cycle table lookup and scratch registers: about 120 clock cycles
+  per carrier cycle and 280 per sample, so carriers up to 1.76 MHz at the
+  default 100 kS/s (`txengine probe --mode am` shows the limit for a sample
+  rate). The RP2350 runs the Rust version, which its Cortex-M33 gets through
+  in about 131 cycles per carrier cycle and 157 per sample: carriers up to
+  1.71 MHz.
 
 The widths, far too coarse by themselves, are noise-shaped (second-order
 error feedback), which moves the quantisation error from the carrier
@@ -320,11 +347,11 @@ off, which would splatter into the neighbouring channels.
 The output is a pulse train, rich in harmonics: at full output the third
 is 9.5 dB below the carrier, and narrower pulses carry even harmonics as
 well. At the carrier of 90 % depth the second harmonic is 1.4 dB below the
-carrier on the Pi 5, and 2.8 dB above it on the Pi 2-4 and Zero 2 W (two
-pulses per period). The noise-shaped quantisation error is strongest half
-the carrier frequency away (simulated −40 to −56 dBc in 9 kHz at 999 kHz).
-Put a band-pass, at least a low-pass, at the carrier between the pin and
-anything that can radiate.
+carrier on the Pi 5 and the Pico, and 2.8 dB above it on the Pi 2-4 and
+Zero 2 W (two pulses per period). The noise-shaped quantisation error is
+strongest half the carrier frequency away (simulated −40 to −56 dBc in
+9 kHz at 999 kHz). Put a band-pass, at least a low-pass, at the carrier
+between the pin and anything that can radiate.
 
 Measured on a Raspberry Pi 5 through an RC tap into a LimeSDR Mini: the
 carrier is on frequency (with `--ppm auto` within the receiver's own
@@ -344,6 +371,24 @@ carrier's phase moving by less than 1.1°. txengine takes 10 % of a core
 at 999 kHz and 19 % at 3.5 MHz (64-bit build; 32-bit: 17 % and 26 %). While
 the output waits for samples (an underrun), the carrier stays on,
 unmodulated, at its mean level.
+
+Measured on a Pico (RP2040) through the same tap: the carrier is on
+frequency at 153 kHz, 999 kHz and 1.602 MHz (+10.7 ppm uncorrected; with
+`--ppm auto` the error is measured as +10.1 to +10.7 ppm, and the carrier
+lands within 0.4 ppm of the receiver), and runs without underruns up to
+1.76 MHz. A 1 kHz tone at 90 % reads 94–98 % (more with a stronger pad
+drive or Lime gain), 45 % reads 47 % and 22.5 % reads 23 %: the same
+expansion of the receive path as with the Pi 5, constant across depths
+even where the narrowest pulses are wide; the second harmonic reads −28 to
+−32 dB, and the measurement cannot tell how much of it the receiver adds
+(the simulation puts the transmitter's own distortion below −100 dB). On
+long wave the Lime is too insensitive to judge the modulation. During an
+underrun the carrier stays on at its recent mean level, unmodulated; if
+txengine dies, the firmware switches it off one second later. A Pico 2
+(RP2350) measures the same: on frequency at 153 kHz, 999 kHz and 1.602 MHz
+(−3.6 ppm uncorrected; `--ppm auto` measures −2.1 to −2.7 ppm, landing
+within 1.4 ppm of the receiver), 90 % reads 93–95 % with the second harmonic
+at −32 to −41 dB, and underruns and a killed txengine behave alike.
 
 ## Signal quality
 

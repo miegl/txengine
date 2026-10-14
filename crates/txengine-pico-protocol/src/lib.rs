@@ -1,10 +1,12 @@
 //! The USB protocol between txengine and its RP2040/RP2350 firmware.
 //!
 //! The firmware turns a Raspberry Pi Pico into an RF front end: the host
-//! renders the samples (instantaneous carrier frequency offsets) and plans
-//! the clocks, the Pico synthesises the carrier and modulates it.
+//! renders the samples (instantaneous carrier frequency offsets, or
+//! amplitudes) and plans the clocks, the Pico synthesises the carrier and
+//! modulates it.
 //!
-//! Two ways to make the carrier ([`Config`], [`PioConfig`]):
+//! Two ways to make a frequency-modulated carrier ([`Config`],
+//! [`PioConfig`]), and one for amplitude modulation ([`AmConfig`]):
 //!
 //! * **PLL**: the PLL that is not clocking the system makes the carrier;
 //!   its integer feedback divider (`FBDIV_INT`) is switched at a fraction of
@@ -15,13 +17,17 @@
 //!   which runs at 240-264 MHz from the other PLL while it does: a square
 //!   wave whose edges fall on the nearest bit. Cleaner near the carrier, but
 //!   the square wave's harmonics alias, some of them into the FM band.
+//! * **AM**: a PIO state machine, at the same raised system clock, puts out
+//!   one pulse per carrier cycle, whose width sets the amplitude; the
+//!   firmware places the edges with a noise-shaping quantiser ([`am`]).
 //!
 //! The device has one vendor interface ([`INTERFACE_CLASS`]…) with a bulk OUT
-//! endpoint ([`SAMPLES_ENDPOINT`]) for the samples, `i16` little endian, one
-//! after another; control requests to that interface ([`Request`]) configure,
-//! start, stop, retune and query it. A second interface is the Pico SDK's
-//! reset interface ([`RESET_INTERFACE_CLASS`]…), so `picotool reboot -f -u`
-//! can put the device back into its USB bootloader.
+//! endpoint ([`SAMPLES_ENDPOINT`]) for the samples, 16 bits little endian
+//! (`i16` for FM, `u16` for AM), one after another; control requests to
+//! that interface ([`Request`]) configure, start, stop, retune and query
+//! it. A second interface is the Pico SDK's reset interface
+//! ([`RESET_INTERFACE_CLASS`]…), so `picotool reboot -f -u` can put the
+//! device back into its USB bootloader.
 //!
 //! All multi-byte fields are little endian.
 
@@ -31,7 +37,7 @@ pub mod am;
 pub mod sigma_delta;
 
 /// Version of this protocol; [`Info::protocol`] must match.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Longest firmware version string ([`Request::Version`]), in bytes.
 pub const VERSION_MAX: usize = 64;
@@ -92,6 +98,8 @@ pub enum Request {
     /// IN: the firmware's version, UTF-8, at most [`VERSION_MAX`] bytes:
     /// `git describe` of its source tree, like txengine's.
     Version = 0x09,
+    /// OUT: [`AmConfig`]. Only while idle.
+    ConfigureAm = 0x0a,
 }
 
 impl Request {
@@ -106,6 +114,7 @@ impl Request {
             0x07 => Request::Bootsel,
             0x08 => Request::ConfigurePio,
             0x09 => Request::Version,
+            0x0a => Request::ConfigureAm,
             _ => return None,
         })
     }
@@ -193,10 +202,15 @@ pub struct Info {
     /// If the watchdog reset the firmware (a hang), the step it had reached
     /// (a breadcrumb for debugging); 0 otherwise.
     pub watchdog_note: u32,
+    /// What AM costs the firmware, in system clock cycles: per carrier
+    /// cycle, and per sample on top. A carrier period must be at least
+    /// `am_pulse_cycles + am_sample_cycles / cycles_per_sample` clock cycles.
+    pub am_pulse_cycles: u16,
+    pub am_sample_cycles: u16,
 }
 
 impl Info {
-    pub const LEN: usize = 35;
+    pub const LEN: usize = 39;
 
     pub fn encode(&self, buf: &mut [u8; Self::LEN]) {
         let mut w = Writer { buf, at: 0 };
@@ -210,6 +224,8 @@ impl Info {
         w.put(&self.pio_min_hz.to_le_bytes());
         w.put(&self.pio_max_hz.to_le_bytes());
         w.put(&self.watchdog_note.to_le_bytes());
+        w.put(&self.am_pulse_cycles.to_le_bytes());
+        w.put(&self.am_sample_cycles.to_le_bytes());
     }
 
     pub fn decode(b: &[u8]) -> Option<Info> {
@@ -229,12 +245,14 @@ impl Info {
             pio_min_hz: r.u32()?,
             pio_max_hz: r.u32()?,
             watchdog_note: r.u32()?,
+            am_pulse_cycles: r.u16()?,
+            am_sample_cycles: r.u16()?,
         })
     }
 }
 
 /// A setting of `PLL_USB` as the system clock: `xosc / refdiv · fbdiv /
-/// (post_div1 · post_div2)` (the PIO method).
+/// (post_div1 · post_div2)` (the PIO method and AM).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SysClock {
     pub refdiv: u8,
@@ -323,6 +341,67 @@ impl PioConfig {
     pub fn pattern(ratio: u32, bin: u32) -> u32 {
         let start = (bin << (32 - Self::TABLE_BITS)) | (1 << (31 - Self::TABLE_BITS));
         (0..32).fold(0, |w, j| w | ((start.wrapping_add(ratio.wrapping_mul(j)) < 1 << 31) as u32) << j)
+    }
+}
+
+/// Amplitude modulation ([`Request::ConfigureAm`]).
+///
+/// While transmitting, the system clock (and the state machine) runs from
+/// `PLL_USB` at [`AmConfig::clock`], as in the PIO method. The pin puts
+/// out one pulse per carrier cycle (see [`am`]); the carrier is
+/// `clock · k / 2³²`. A sample (`u16`; 65535 is the full output) lasts
+/// `cycles` carrier cycles, and the amplitude moves linearly from one
+/// sample's to the next. [`Retune::center`] sets a new `k`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmConfig {
+    pub refdiv: u8,
+    pub fbdiv: u16,
+    pub post_div1: u8,
+    pub post_div2: u8,
+    pub gpio: u8,
+    pub drive_ma: u8,
+    /// Carrier phase advance per system clock cycle (2³² = one period).
+    pub k: u32,
+    /// Carrier cycles per sample.
+    pub cycles: u16,
+}
+
+impl AmConfig {
+    pub const LEN: usize = 13;
+
+    /// Whether a firmware with these costs ([`Info::am_pulse_cycles`],
+    /// [`Info::am_sample_cycles`]) keeps up.
+    pub fn sustainable(&self, pulse_cycles: u16, sample_cycles: u16) -> bool {
+        let cycles = self.cycles.max(1) as u64;
+        // period · cycles ≥ pulse · cycles + sample, in 2^-32 cycles.
+        (cycles << 32) >= self.k as u64 * (pulse_cycles as u64 * cycles + sample_cycles as u64)
+    }
+
+    pub fn clock(&self) -> SysClock {
+        SysClock { refdiv: self.refdiv, fbdiv: self.fbdiv, post_div1: self.post_div1, post_div2: self.post_div2 }
+    }
+
+    pub fn encode(&self, buf: &mut [u8; Self::LEN]) {
+        let mut w = Writer { buf, at: 0 };
+        w.put(&[self.refdiv]);
+        w.put(&self.fbdiv.to_le_bytes());
+        w.put(&[self.post_div1, self.post_div2, self.gpio, self.drive_ma]);
+        w.put(&self.k.to_le_bytes());
+        w.put(&self.cycles.to_le_bytes());
+    }
+
+    pub fn decode(b: &[u8]) -> Option<AmConfig> {
+        let mut r = Reader(b);
+        Some(AmConfig {
+            refdiv: r.u8()?,
+            fbdiv: r.u16()?,
+            post_div1: r.u8()?,
+            post_div2: r.u8()?,
+            gpio: r.u8()?,
+            drive_ma: r.u8()?,
+            k: r.u32()?,
+            cycles: r.u16()?,
+        })
     }
 }
 
@@ -435,7 +514,8 @@ impl Config {
 }
 
 /// A new centre and scale ([`Request::Retune`]), e.g. for a corrected
-/// crystal error.
+/// crystal error. In AM, `center` is the new [`AmConfig::k`] and `scale`
+/// is not used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retune {
     pub center: u32,
@@ -528,7 +608,8 @@ pub struct Status {
     /// Number of times the buffer ran empty while running.
     pub underruns: u32,
     /// Smallest lead of the modulator over the hardware since the last
-    /// status request, in sigma-delta updates.
+    /// status request: in sigma-delta updates (PLL method), bits (PIO
+    /// method) or carrier cycles (AM).
     pub min_lead: u32,
 }
 
@@ -580,6 +661,8 @@ mod tests {
             pio_min_hz: 240_000_000,
             pio_max_hz: 264_000_000,
             watchdog_note: 0,
+            am_pulse_cycles: 132,
+            am_sample_cycles: 300,
         };
         let mut b = [0; Info::LEN];
         i.encode(&mut b);
@@ -620,6 +703,21 @@ mod tests {
         let mut b = [0; PioConfig::LEN];
         p.encode(&mut b);
         assert_eq!(PioConfig::decode(&b), Some(p));
+
+        let a = AmConfig {
+            refdiv: 1,
+            fbdiv: 126,
+            post_div1: 6,
+            post_div2: 1,
+            gpio: 21,
+            drive_ma: 12,
+            k: 0x0103_0405,
+            cycles: 10,
+        };
+        let mut b = [0; AmConfig::LEN];
+        a.encode(&mut b);
+        assert_eq!(AmConfig::decode(&b), Some(a));
+        assert_eq!(a.clock().hz(12_000_000), 252_000_000);
 
         let s = Status {
             state: State::Running,
