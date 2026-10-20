@@ -277,7 +277,7 @@ USB protocol and asks for an update.
 
 ## Measurements
 
-All boards ran txengine and firmware c595393, on 2026-10-19 unless noted.
+All boards ran txengine and firmware c595393, on 2026-10-19 and 20.
 FM was received over the air by a USRP B210 with a short antenna
 (`tools/sdr_capture.py`, demodulated at 4 MS/s, then a pilot-locked stereo
 decoder with 50 µs de-emphasis). AM went through an RC tap (1 kΩ, 470 pF,
@@ -298,7 +298,11 @@ synchronously.
 | … with `--ppm auto` | −0.3 ppm | (reference) | −0.4 ppm | −0.8 ppm | −0.4 ppm | −1.0 ppm | −0.5 ppm |
 | Audio THD (1 kHz, 0 dBFS) | −97 dB | −89 dB | −85 dB | −94 dB | −88 dB | −98 dB | −85 dB |
 | Audio frequency response (31.5 Hz – 15 kHz) | ±0.04 dB | ±0.04 dB | ±0.04 dB | ±0.02 dB | ±0.03 dB | ±0.03 dB | ±0.05 dB |
-| Modulation THD (10 kHz at 75 kHz deviation) | −76 dB | — | −60 dB | −62 dB | −57 dB | −65 dB | −51 dB |
+| Audio SNR, mono / stereo (unweighted) | 71 / 53 dB | 74 / 56 dB | 70–73 / 52–55 dB | 68 / 50 dB | 71 / 52 dB | 71 / 53 dB | 71 / 54 dB |
+| Audio SNR, mono / stereo (ITU-R 468 weighting, rms) | 64 / 45 dB | 66 / 48 dB | 63–66 / 45–47 dB | 61 / 42 dB | 64 / 45 dB | 64 / 45 dB | 64 / 46 dB |
+| Effective bit depth, mono / stereo | 10.5 / 7.6 bits | 11.1 / 8.1 bits | 10.5–11.0 / 7.5–8.0 bits | 10.1 / 7.1 bits | 10.6 / 7.4 bits | 10.6 / 7.5 bits | 10.6 / 7.7 bits |
+| Phase noise at 10 kHz / 100 kHz / 1 MHz | −91 / −95 / < −101 dBc/Hz | < −94 / < −91 / < −93 dBc/Hz | −93 / −96 / < −102 dBc/Hz | −85 / −88 / −96 dBc/Hz | −95 / −95 / < −99 dBc/Hz | −92 / −86 / −95 dBc/Hz | −91 / −91 / < −99 dBc/Hz |
+| Modulation THD (10 kHz at 75 kHz deviation) | −76 dB | −62 dB | −60 dB | −62 dB | −57 dB | −65 dB | −51 dB |
 | Strongest line more than 1 MHz from the carrier (82–112 MHz) | none above −60 dBc | none above −43 dBc | −57 dBc (85.0 MHz) | −41 dBc (±1.2 MHz) | −28 dBc (97.2 MHz) | −34 dBc (94.8 MHz) | −22 dBc (92.4 MHz) |
 | CPU (stereo + RDS, network stream) | 3.3 % | 53 % at 600 MHz (throttled) | 18 % at 1 GHz | 2 % on the computer | 2 % | 2 % | 2 % |
 
@@ -309,8 +313,25 @@ synchronously.
   the BCM boards and 15.6 on the Pico (16-bit samples of about 3 Hz); the
   multiplex as computed (`txengine wfm render`) has a noise floor of
   −128 dBFS (21 bits).
-* **Over the air**, the receiver's own floor limits what can be seen of the
-  weaker boards (the Pi 2 arrived 15 dB below the others).
+* **Noise**: the decoded silence of a stereo transmission (two rounds),
+  re a sine at 75 kHz deviation, without local interference: the spectrum
+  at 0.5 Hz resolution, its median over 2 s segments (drops bursts), then
+  its running median over 300 Hz (drops narrow lines), calibrated on white
+  noise. The weighted row applies the ITU-R BS.468 weighting and reads rms,
+  not quasi-peak. The effective bit depth follows from the unweighted SNR:
+  (SNR re 0 dBFS − 1.76 dB) / 6.02 dB, a 0 dBFS tone deviating 40 kHz.
+* **Phase noise**: an unmodulated carrier, the median of both sidebands
+  over ±5 % of the offset; at 10 kHz also from the noise floor of the
+  decoded silence above. The lowest of the readings (an evening and two
+  morning rounds), as interference only adds; "<" where the receiver's own
+  floor was reached.
+* **Over the air**, the reception limits the noise figures: the boards
+  measured in the morning read about 71 dB mono and 53 dB stereo, though
+  their carriers are made in entirely different ways, while the Pi 2,
+  measured later with the antenna placed differently, reads 74 dB. The
+  hardware notes' phase noise figures, from earlier measurements under
+  better reception, are lower. In the other measurements the Pi 2 arrived
+  15 dB below the others.
 * **Modulation THD**: `txengine tone --tones 10000 --deviation 75000`, the
   harmonics up to 100 kHz in the demodulated signal, without any of the
   programme's processing.
@@ -335,10 +356,10 @@ synchronously.
 | Carriers | 100 kHz – 6.2 MHz | 100 kHz – 4.2 MHz | 64 kHz – 1.71 MHz | 64 kHz – 1.76 MHz |
 | Width steps up to the full output (999 kHz) | 100 | 62 | edges placed to the clock cycle (264 MHz) | edges placed to the clock cycle (264 MHz) |
 | Crystal error, uncorrected (re the Lime) | −54.8 ppm | +3.7 ppm | −4.4 ppm | +9.7 ppm |
-| Carrier with `--ppm auto` (re the Lime) | within 0.3 Hz | within 0.2 Hz (2.5 Hz at 3.5 MHz) | within 1 Hz | within 0.3 Hz |
-| 1 kHz at 90 % reads | 89.6 % (999 kHz), 90.0 % (1.602 MHz), 89.5 % (3.5 MHz), 88.8 % (6.1 MHz) | 90.4 % (999 kHz), 89.2 % (1.602 MHz), 88.8 % (3.5 MHz) | 91.5 % (999 kHz), 98.6 % (1.602 MHz), at 8 dB receiver gain | 91.4 % (999 kHz), 91.2 % (1.602 MHz), 90.8 % (1.71 MHz) |
-| Harmonics of the tone | below −34 dB | below −37 dB | below −33 dB | below −39 dB |
-| Phase modulation (1 kHz at 90 %) | < 0.13° | < 0.15° | < 0.21° | < 0.36° |
+| Carrier with `--ppm auto` (re the Lime) | within 0.3 Hz | within 0.2 Hz (2.5 Hz at 3.5 MHz) | within 1.5 Hz | within 0.3 Hz |
+| 1 kHz at 90 % reads | 89.6 % (999 kHz), 90.0 % (1.602 MHz), 89.5 % (3.5 MHz), 88.8 % (6.1 MHz) | 90.4 % (999 kHz), 89.2 % (1.602 MHz), 88.8 % (3.5 MHz) | 90.6 % (999 kHz), 89.6 % (1.602 MHz) | 91.4 % (999 kHz), 91.2 % (1.602 MHz), 90.8 % (1.71 MHz) |
+| Harmonics of the tone | below −34 dB | below −37 dB | below −40 dB | below −39 dB |
+| Phase modulation (1 kHz at 90 %) | < 0.13° | < 0.15° | < 0.08° | < 0.36° |
 | CPU (network stream) | 1.9 % (999 kHz), 5.3 % (6.1 MHz) | 10.1 % (999 kHz), 18.8 % (3.5 MHz); 32-bit 15.5 %, 24.6 % | as the Pico | 1.4 % on the computer |
 
 * **The receive path** limits what these show. Through the tap the Lime gets
