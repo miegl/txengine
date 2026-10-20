@@ -315,9 +315,12 @@ impl FcSource {
     }
     pub const PLL_SYS: FcSource = FcSource { idx: 0, src: 2 };
     pub const PLL_AUDIO: FcSource = FcSource { idx: 4, src: 2 };
-    pub const PLL_AUDIO_PRI_PH: FcSource = FcSource { idx: 5, src: 1 };
+    // pll_audio_pri_ph (counted only while that output is enabled) and
+    // pll_video: found by counting every input on a Pi 5; the kernel's
+    // (5, 1) and (3, 2) count nothing.
+    pub const PLL_AUDIO_PRI_PH: FcSource = FcSource { idx: 5, src: 2 };
     pub const PWM0: FcSource = FcSource { idx: 0, src: 5 };
-    pub const PLL_VIDEO: FcSource = FcSource { idx: 3, src: 2 };
+    pub const PLL_VIDEO: FcSource = FcSource { idx: 3, src: 3 };
 }
 
 /// Measure a clock with the hardware frequency counter. Returns Hz.
