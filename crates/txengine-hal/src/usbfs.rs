@@ -244,9 +244,10 @@ impl Device {
                 }
                 return Err(e);
             }
-            // SAFETY: `urb` is the first field of a `Transfer` we own.
-            let status = unsafe { (*urb).status };
-            let ctx = urb as *const Transfer;
+            // SAFETY: `urb` is the URB of a `Transfer` we own, which its user
+            // context points to (the field order of `Transfer` is the
+            // compiler's, so `urb` need not be its address).
+            let (status, ctx) = unsafe { ((*urb).status, (*urb).usercontext as *const Transfer) };
             self.in_flight.retain(|t| !std::ptr::eq(&**t, ctx));
             done += 1;
             if status != 0 && first_err.is_none() {
