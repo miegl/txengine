@@ -20,8 +20,8 @@ const AM_SAMPLE_RATE: f64 = 100e3;
 /// The options every mode takes on the Pico: the device, the GPIO and the
 /// pad drive (mA).
 fn common(args: &str, hw: &HardwareArgs) -> anyhow::Result<(Option<String>, u8, u8)> {
-    if hw.pll.is_some() || hw.pacer.is_some() || hw.dma_channel.is_some() {
-        bail!("--pll, --pacer and --dma-channel do not apply to the Pico");
+    if hw.pll.is_some() || hw.pacer.is_some() || hw.dma_channel.is_some() || hw.force_gpclk {
+        bail!("--pll, --pacer, --dma-channel and --force-gpclk do not apply to the Pico");
     }
     if !matches!(hw.synthesis.as_deref(), None | Some("pll") | Some("pio")) {
         bail!("--synthesis {}: use pll or pio", hw.synthesis.as_deref().unwrap_or_default());

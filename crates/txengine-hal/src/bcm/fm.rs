@@ -88,6 +88,47 @@ pub struct BcmFmConfig {
     ///
     /// [`GPU_PLL_MAX_DECREASE`]: super::cprman::GPU_PLL_MAX_DECREASE
     pub max_vco_change: f64,
+    /// Take the clock generator over even if it is already running (see
+    /// [`gpclk_in_use`]).
+    pub force_gpclk: bool,
+}
+
+/// The frequency of clock generator `gpclk` (Hz, from its source and
+/// divider; 0 for a source not known here) if it is already running: then
+/// something else uses it. On the Raspberry Pi 2 GPCLK1 clocks the Ethernet
+/// and USB chip (25 MHz), on the Zero 2 W GPCLK2 the WiFi chip (its
+/// 32.768 kHz sleep clock). The frequency counter cannot tell: its count
+/// stays stale for a clock as slow as that.
+pub fn gpclk_in_use(cpr: &Cprman, gpclk: usize, osc_hz: f64, bcm2711: bool) -> Option<f64> {
+    let ctl = cpr.read(cm::gp(gpclk));
+    if ctl & cm::ENAB == 0 {
+        return None;
+    }
+    let per = |id| {
+        let pll = Pll::new(cpr, id, osc_hz, bcm2711);
+        pll.per_divider().map(|d| pll.vco_hz() / d as f64)
+    };
+    let src_hz = match ctl & cm::SRC_MASK {
+        cm::SRC_OSC => Some(osc_hz),
+        cm::SRC_PLLA_PER => per(PllId::A),
+        cm::SRC_PLLC_PER => per(PllId::C),
+        cm::SRC_PLLD_PER => per(PllId::D),
+        _ => None,
+    };
+    let div = cpr.read(cm::div(cm::gp(gpclk)));
+    let frac = if ctl & cm::MASH_MASK != 0 { (div & 0xfff) as f64 / 4096.0 } else { 0.0 };
+    let divisor = (div >> cm::DIVI_SHIFT & 0xfff) as f64 + frac;
+    Some(src_hz.filter(|_| divisor >= 1.0).map_or(0.0, |hz| hz / divisor))
+}
+
+/// "GPCLKn is already running at f", for messages about [`gpclk_in_use`].
+pub fn describe_in_use(gpclk: usize, hz: f64) -> String {
+    let at = match hz {
+        hz if hz >= 1e6 => format!(" at {:.3} MHz", hz / 1e6),
+        hz if hz > 0.0 => format!(" at {:.3} kHz", hz / 1e3),
+        _ => String::new(),
+    };
+    format!("GPCLK{gpclk} is already running{at}")
 }
 
 impl Default for BcmFmConfig {
@@ -103,6 +144,7 @@ impl Default for BcmFmConfig {
             max_offset_hz: 100_000.0,
             dma_channel: None,
             max_vco_change: 0.03,
+            force_gpclk: false,
         }
     }
 }
@@ -725,6 +767,18 @@ impl BcmFmTransmitter {
         let osc = bcm.osc_hz;
         let cpr = Cprman::new(bcm.cm.clone());
         let gp_ctl = cm::gp(gpclk);
+        // A running clock generator is someone else's.
+        if let Some(hz) = gpclk_in_use(&cpr, gpclk, osc, bcm.bcm2711) {
+            let running = describe_in_use(gpclk, hz);
+            if !cfg.force_gpclk {
+                return Err(HalError::Config(format!(
+                    "{running}: something else uses it (on the Pi 2 GPCLK1 clocks the Ethernet and USB chip, on \
+                     the Zero 2 W GPCLK2 the WiFi chip); transmit on another clock generator's pin (GPCLK0: GPIO \
+                     4, 20; GPCLK1: 5, 21; GPCLK2: 6), or take this one over with --force-gpclk"
+                )));
+            }
+            warn!("{running}: taking it over until txengine stops (--force-gpclk)");
+        }
         let pll_of = |id| Pll::new(&cpr, id, osc, bcm.bcm2711);
 
         // Choose the modulation method.
@@ -834,9 +888,6 @@ impl BcmFmTransmitter {
         // Snapshot everything we will touch.
         let pins_state: Vec<PinState> = pins.iter().map(|&(g, _)| PinState::save(bcm, g)).collect();
         let pacer_ctl = if cfg.pacer == Pacer::Pwm { cm::PWM } else { cm::PCM };
-        if cpr.read(gp_ctl) & cm::ENAB != 0 {
-            warn!("GPCLK{gpclk} was already running (another transmitter?); taking it over");
-        }
         let restorer = Restorer {
             cm: cpr.clone(),
             gpio: bcm.gpio.clone(),
@@ -1751,6 +1802,13 @@ mod tests {
         assert!(p.gp_div >= MIN_DIVI, "{p:?}");
         let e = plan_a(446e6, 10e3).unwrap_err().to_string();
         assert!(e.contains("--harmonic 3"), "{e}");
+    }
+
+    #[test]
+    fn describes_a_running_clock_generator() {
+        assert_eq!(describe_in_use(1, 25e6), "GPCLK1 is already running at 25.000 MHz");
+        assert_eq!(describe_in_use(2, 32_768.0), "GPCLK2 is already running at 32.768 kHz");
+        assert_eq!(describe_in_use(0, 0.0), "GPCLK0 is already running");
     }
 
     #[test]

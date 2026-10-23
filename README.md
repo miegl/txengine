@@ -280,9 +280,10 @@ Several pins of one clock generator transmit together (`-g 4 -g 20`). On
 the Pi 5 the audio PLL reaches GPCLK0 and GPCLK1, the video PLL GPCLK2
 (GPIO6 needs `--pll video`). On the Pi 2–4 and Zero 2 W a clock generator
 may already be in use: on the Pi 2 GPCLK1 clocks the Ethernet and USB chip
-(25 MHz), on the Zero 2 W GPCLK2 the WiFi chip's sleep clock (32.768 kHz),
-and txengine takes over a running one with only a warning, which cuts that
-connection while it transmits. Use GPCLK0 there.
+(25 MHz), on the Zero 2 W GPCLK2 the WiFi chip's sleep clock (32.768 kHz).
+txengine refuses a clock generator that is already running (`txengine
+probe` shows it), so use GPCLK0 there; `--force-gpclk` takes it over until
+txengine stops, which cuts that connection meanwhile.
 
 `txengine devices` lists the transmitters found, and `txengine probe -f 87.6`
 (or `--mode nfm -f 446.00625`, `--mode am -f 999k`) shows what will be used,

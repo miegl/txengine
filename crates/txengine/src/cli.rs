@@ -121,6 +121,12 @@ pub struct HardwareArgs {
     /// [default: 4; AM: 18; Pico: 21].
     #[arg(short, long = "gpio", value_name = "N", help_heading = "Hardware")]
     pub gpio: Vec<u32>,
+    /// Transmit on a clock generator that is already running, taking it over
+    /// from whatever uses it until txengine stops (FM and NFM): on the Pi 2
+    /// GPCLK1 (GPIO 5, 21) clocks the Ethernet and USB chip, on the Zero 2 W
+    /// GPCLK2 (GPIO 6) the WiFi chip. Without it txengine refuses such a pin.
+    #[arg(long, help_heading = "Raspberry Pi")]
+    pub force_gpclk: bool,
     /// PLL that makes the carrier: in WFM and NFM the one to modulate (Pi
     /// 1-4: a, c, d, or "clkdiv" to modulate the clock divider instead; Pi
     /// 5: audio, video); in AM on the Pi 1-4 the one that clocks the PWM (a,

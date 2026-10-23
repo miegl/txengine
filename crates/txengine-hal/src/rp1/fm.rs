@@ -78,6 +78,9 @@ pub struct Rp1FmConfig {
     pub dma_channel: Option<usize>,
     /// DMA tick generator to pace with (0 or 1).
     pub tick: usize,
+    /// Take the clock generator over even if it is already running: then
+    /// something else uses it.
+    pub force_gpclk: bool,
 }
 
 impl Default for Rp1FmConfig {
@@ -92,6 +95,7 @@ impl Default for Rp1FmConfig {
             max_offset_hz: 100_000.0,
             dma_channel: None,
             tick: 0,
+            force_gpclk: false,
         }
     }
 }
@@ -150,6 +154,15 @@ const FRAC_ONE: f64 = (1u64 << regs::clk::PLL_FRAC_BITS) as f64;
 /// divided by 1. Beyond, the frequency counter that verifies the PLL
 /// output no longer counts it (1.3 GHz read as 1.8 MHz).
 pub const MAX_CARRIER_HZ: f64 = 1e9;
+
+/// Whether clock generator `gpclk` is already running: then something else
+/// uses it.
+pub fn gpclk_running(gpclk: usize) -> Result<bool> {
+    let rp1 = Rp1::open()?;
+    let clocks = rp1.clocks();
+    let gp = ClockGen::new(&clocks, &rp1.block_set(regs::CLOCKS_MAIN), &rp1.block_clr(regs::CLOCKS_MAIN), gpclk);
+    Ok(gp.is_enabled())
+}
 
 /// Choose dividers for `carrier_hz`, from a reference of nominally `ref_hz`.
 pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_offset_hz: f64) -> Result<ClockPlan> {
@@ -389,6 +402,17 @@ impl Rp1FmTransmitter {
             warn!("{w}");
         }
         let gp = ClockGen::new(&clocks, &clocks_set, &clocks_clr, gpclk);
+        // A running clock generator is someone else's.
+        if gp.is_enabled() {
+            if !cfg.force_gpclk {
+                return Err(HalError::Config(format!(
+                    "clk_gp{gpclk} is already running: something else uses it; transmit on another clock \
+                     generator's pin (GPCLK0: GPIO 4, 20; GPCLK1: 5, 18, 21; GPCLK2: 6, from the video PLL), or \
+                     take this one over with --force-gpclk"
+                )));
+            }
+            warn!("clk_gp{gpclk} is already running: taking it over until txengine stops (--force-gpclk)");
+        }
         let gpio = Gpio::new(rp1.block(regs::IO_BANK0), rp1.block(regs::PADS_BANK0));
         let dmac = Dmac::new(rp1.block(regs::DMA));
 
@@ -416,9 +440,6 @@ impl Rp1FmTransmitter {
             gp: gp.snapshot(),
             pins: pins.iter().map(|&(g, _)| gpio.snapshot(g)).collect::<Result<_>>()?,
         };
-        if gp.is_enabled() {
-            warn!("clk_gp{gpclk} was already running (another transmitter?); taking it over");
-        }
         if cfg.pll == Rp1Pll::Audio && saved.pll.fbdiv_int != 0 {
             let consumers = ["clk_i2s", "clk_audio_out"];
             debug!("pll_audio was at {:.3} MHz; its users ({consumers:?}) will be affected", pll.vco_hz() / 1e6);

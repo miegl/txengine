@@ -243,7 +243,11 @@ forked before any thread exists; when the transmitter's pipe closes, for
 whatever reason including `kill -9`, it stops the DMA and restores the
 snapshot), then run a DMA ring, paced by hardware, that writes one
 frequency word per sample into a PLL or clock divider register (FM) or a
-pulse width per carrier cycle into a PWM (AM).
+pulse width per carrier cycle into a PWM (AM). A clock generator that is
+already running belongs to something else (the Pi 2's Ethernet and USB
+chip on GPCLK1, the Zero 2 W's WiFi on GPCLK2): FM refuses it before
+touching anything, unless `--force-gpclk` takes it over until the
+transmitter stops.
 
 Every planner that modulates a PLL (RP1, BCM, the Pico's PLL method)
 prefers, above its other preferences, divisions that keep the carrier clear

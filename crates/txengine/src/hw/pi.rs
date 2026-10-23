@@ -26,8 +26,8 @@ fn am_gpio(hw: &HardwareArgs) -> anyhow::Result<u32> {
 }
 
 fn rp1_am_config(hw: &HardwareArgs) -> anyhow::Result<rp1::am::Rp1AmConfig> {
-    if hw.pll.is_some() || hw.pacer.is_some() {
-        bail!("--pll and --pacer do not apply to AM on the Raspberry Pi 5");
+    if hw.pll.is_some() || hw.pacer.is_some() || hw.force_gpclk {
+        bail!("--pll, --pacer and --force-gpclk do not apply to AM on the Raspberry Pi 5");
     }
     Ok(rp1::am::Rp1AmConfig {
         carrier_hz: hw.freq_hz,
@@ -56,6 +56,7 @@ fn rp1_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<rp1::fm::
         max_offset_hz,
         dma_channel: hw.dma_channel,
         tick: 0,
+        force_gpclk: hw.force_gpclk,
     })
 }
 
@@ -144,8 +145,8 @@ fn open_transmitter(hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn
 
 fn bcm_am_config(hw: &HardwareArgs) -> anyhow::Result<bcm::am::BcmAmConfig> {
     use bcm::cprman::PllId;
-    if hw.pacer.is_some() {
-        bail!("--pacer does not apply to AM");
+    if hw.pacer.is_some() || hw.force_gpclk {
+        bail!("--pacer and --force-gpclk do not apply to AM (it transmits from the PWM)");
     }
     let pll = match hw.pll.as_deref().map(str::to_ascii_lowercase).as_deref() {
         None | Some("auto") => None,
@@ -193,6 +194,7 @@ fn bcm_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<bcm::fm::
         max_offset_hz,
         dma_channel: hw.dma_channel,
         max_vco_change: 0.03,
+        force_gpclk: hw.force_gpclk,
     })
 }
 
@@ -268,6 +270,13 @@ fn probe(hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
             );
             let cycles = (xosc / cfg.sample_rate).round();
             println!("Sampling: {:.3} S/s (xosc / {cycles}) paced by RP1 DMA tick", xosc / cycles);
+            if rp1::fm::gpclk_running(plan.gpclk)? {
+                println!(
+                    "In use:   clk_gp{} is already running: something else uses it; transmitting there needs \
+                     --force-gpclk",
+                    plan.gpclk
+                );
+            }
             let busy = rp1::dma::Dmac::kernel_channels_in_use();
             println!("DMA:      kernel channels in use {busy:#04x}");
             if let Some(w) = plan.spur_warning(cfg.max_offset_hz) {
@@ -382,6 +391,12 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::
     let (gpclk, _) = bcm::gpclk_for_pin(cfg.gpios[0]).context("unsupported output GPIO")?;
     let gp_ctl = bcm::regs::cm::gp(gpclk);
     println!("Output:   GPIO{:?} via GPCLK{gpclk}", cfg.gpios);
+    if let Some(hz) = bcm::fm::gpclk_in_use(&cm, gpclk, osc, b.bcm2711) {
+        println!(
+            "In use:   {}: something else uses it; transmitting there needs --force-gpclk",
+            bcm::fm::describe_in_use(gpclk, hz)
+        );
+    }
     for id in [PllId::A, PllId::C, PllId::D] {
         let p = Pll::new(&cm, id, osc, b.bcm2711);
         print_pll(&p, gp_ctl);
