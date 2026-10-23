@@ -216,12 +216,14 @@ says so (`txengine probe` shows the state). The reference is the frequency
 the daemon has measured for the system clock, so the result is as good as
 that. With chrony (polling a LAN server every 16–64 s) the carriers, pilots
 and playback speeds of the Raspberry Pis came within 0.4 ppm (35 Hz at
-87.6 MHz); with systemd-timesyncd, which polls only every 34 minutes, the
-error can reach a few ppm (the Picos below, on a computer with it, came
-within 1 ppm). Use chrony. The first measurement is used after about 25 s
-(on a Pico 25–50 s).
-The status line shows the correction in effect, and `PPM` on the control
-interface reports the measurement in detail:
+87.6 MHz); a Pi 4 whose chrony polls internet servers came within 0.1 and
+1.0 ppm in two measurements, the latter while chrony removed a time offset
+of 0.3 ms by running the clock slightly fast. With systemd-timesyncd, which
+polls only every 34 minutes, the error can reach a few ppm (the Picos below,
+on a computer with it, came within 1 ppm). Use chrony. The first measurement
+is used after about 25 s (on a Pico 25–50 s). The status line shows the
+correction in effect, and `PPM` on the control interface reports the
+measurement in detail:
 
 ```
 crystal error +6.73 ppm (measured against the system clock): correcting the carrier by -590 Hz and the sample rate
@@ -369,33 +371,34 @@ USB protocol and asks for an update.
 ## Measurements
 
 For FM and AM all boards ran txengine and firmware c595393, on 2026-10-19
-and 20. FM was received over the air by a USRP B210 with a short antenna
-(`tools/sdr_capture.py`, demodulated at 4 MS/s, then a pilot-locked stereo
-decoder with 50 µs de-emphasis). AM went through an RC tap (1 kΩ, 470 pF,
-10 kΩ, 1000 pF ∥ 50 Ω) from the pin into a LimeSDR Mini, detected
-synchronously.
+and 20; the Raspberry Pi 4 ran this version, on 2026-10-23. FM was
+received over the air by a USRP B210 with a short antenna, the Pi 4's
+through a wire (`tools/sdr_capture.py`, demodulated at 4 MS/s, then a
+pilot-locked stereo decoder with 50 µs de-emphasis). AM went through an RC
+tap (1 kΩ, 470 pF, 10 kΩ, 1000 pF ∥ 50 Ω) from the pin into a LimeSDR
+Mini, detected synchronously.
 
 ### FM
 
-| | Raspberry Pi 5 | Raspberry Pi 2 | Raspberry Pi Zero 2 W | Pico 2, PLL | Pico 2, PIO | Pico, PLL | Pico, PIO |
-|---|---|---|---|---|---|---|---|
-| Sample rate | 250 kS/s | 190 kS/s | 190 kS/s | 166.7 kS/s | 190.2 kS/s | 166.7 kS/s | 190.2 kS/s |
-| Pilot (target 6.75 kHz) | 6.76 kHz | 6.76 kHz | 6.76 kHz | 6.75 kHz | 6.75 kHz | 6.75 kHz | 6.75 kHz |
-| 38 kHz carrier residual | 0.001 % | 0.003 % | 0.003 % | 0.003 % | 0.001 % | 0.002 % | 0.005 % |
-| Stereo separation (left only, 1 kHz) | 51 dB | 51 dB | 50 dB | 65 dB | 85 dB | 64 dB | 77–87 dB |
-| RDS injection (target 2.0 kHz) | 2.04 kHz | 2.06 kHz | 2.04 kHz | 2.03 kHz | 2.01 kHz | 2.04 kHz | 2.05 kHz |
-| RDS block errors (stereo music) | 0 % | 0 % | 0 % | 0 % | 0 % | 0 % | 0 % |
-| Crystal error, uncorrected | −55.5 ppm | +8.1 ppm | +3.7 ppm | −4.5 ppm | −4.7 ppm | +9.9 ppm | +9.5 ppm |
-| … with `--ppm auto` | −0.3 ppm | (reference) | −0.4 ppm | −0.8 ppm | −0.4 ppm | −1.0 ppm | −0.5 ppm |
-| Audio THD (1 kHz, 0 dBFS) | −97 dB | −89 dB | −85 dB | −94 dB | −88 dB | −98 dB | −85 dB |
-| Audio frequency response (31.5 Hz – 15 kHz) | ±0.04 dB | ±0.04 dB | ±0.04 dB | ±0.02 dB | ±0.03 dB | ±0.03 dB | ±0.05 dB |
-| Audio SNR, mono / stereo (unweighted) | 71 / 53 dB | 74 / 56 dB | 70–73 / 52–55 dB | 68 / 50 dB | 71 / 52 dB | 71 / 53 dB | 71 / 54 dB |
-| Audio SNR, mono / stereo (ITU-R 468 weighting, rms) | 64 / 45 dB | 66 / 48 dB | 63–66 / 45–47 dB | 61 / 42 dB | 64 / 45 dB | 64 / 45 dB | 64 / 46 dB |
-| Effective bit depth, mono / stereo | 10.5 / 7.6 bits | 11.1 / 8.1 bits | 10.5–11.0 / 7.5–8.0 bits | 10.1 / 7.1 bits | 10.6 / 7.4 bits | 10.6 / 7.5 bits | 10.6 / 7.7 bits |
-| Phase noise at 10 kHz / 100 kHz / 1 MHz | −91 / −95 / < −101 dBc/Hz | < −94 / < −91 / < −93 dBc/Hz | −93 / −96 / < −102 dBc/Hz | −85 / −88 / −96 dBc/Hz | −95 / −95 / < −99 dBc/Hz | −92 / −86 / −95 dBc/Hz | −91 / −91 / < −99 dBc/Hz |
-| Modulation THD (10 kHz at 75 kHz deviation) | −76 dB | −62 dB | −60 dB | −62 dB | −57 dB | −65 dB | −51 dB |
-| Strongest line more than 1 MHz from the carrier (82–112 MHz) | none above −60 dBc | none above −43 dBc | −57 dBc (85.0 MHz) | −41 dBc (±1.2 MHz) | −28 dBc (97.2 MHz) | −34 dBc (94.8 MHz) | −22 dBc (92.4 MHz) |
-| CPU (stereo + RDS, network stream) | 3.3 % | 53 % at 600 MHz (throttled) | 18 % at 1 GHz | 2 % on the computer | 2 % | 2 % | 2 % |
+| | Raspberry Pi 5 | Raspberry Pi 4 | Raspberry Pi 2 | Raspberry Pi Zero 2 W | Pico 2, PLL | Pico 2, PIO | Pico, PLL | Pico, PIO |
+|---|---|---|---|---|---|---|---|---|
+| Sample rate | 250 kS/s | 228 kS/s | 190 kS/s | 190 kS/s | 166.7 kS/s | 190.2 kS/s | 166.7 kS/s | 190.2 kS/s |
+| Pilot (target 6.75 kHz) | 6.76 kHz | 6.76 kHz | 6.76 kHz | 6.76 kHz | 6.75 kHz | 6.75 kHz | 6.75 kHz | 6.75 kHz |
+| 38 kHz carrier residual | 0.001 % | 0.003 % | 0.003 % | 0.003 % | 0.003 % | 0.001 % | 0.002 % | 0.005 % |
+| Stereo separation (left only, 1 kHz) | 51 dB | 53 dB | 51 dB | 50 dB | 65 dB | 85 dB | 64 dB | 77–87 dB |
+| RDS injection (target 2.0 kHz) | 2.04 kHz | 2.03 kHz | 2.06 kHz | 2.04 kHz | 2.03 kHz | 2.01 kHz | 2.04 kHz | 2.05 kHz |
+| RDS block errors (stereo music) | 0 % | 0 % | 0 % | 0 % | 0 % | 0 % | 0 % | 0 % |
+| Crystal error, uncorrected | −55.5 ppm | +18.9 ppm | +8.1 ppm | +3.7 ppm | −4.5 ppm | −4.7 ppm | +9.9 ppm | +9.5 ppm |
+| … with `--ppm auto` | −0.3 ppm | +0.1 ppm | (reference) | −0.4 ppm | −0.8 ppm | −0.4 ppm | −1.0 ppm | −0.5 ppm |
+| Audio THD (1 kHz, 0 dBFS) | −97 dB | −99 dB | −89 dB | −85 dB | −94 dB | −88 dB | −98 dB | −85 dB |
+| Audio frequency response (31.5 Hz – 15 kHz) | ±0.04 dB | ±0.06 dB | ±0.04 dB | ±0.04 dB | ±0.02 dB | ±0.03 dB | ±0.03 dB | ±0.05 dB |
+| Audio SNR, mono / stereo (unweighted) | 71 / 53 dB | 68–74 / 50–59 dB | 74 / 56 dB | 70–73 / 52–55 dB | 68 / 50 dB | 71 / 52 dB | 71 / 53 dB | 71 / 54 dB |
+| Audio SNR, mono / stereo (ITU-R 468 weighting, rms) | 64 / 45 dB | 62–68 / 40–52 dB | 66 / 48 dB | 63–66 / 45–47 dB | 61 / 42 dB | 64 / 45 dB | 64 / 45 dB | 64 / 46 dB |
+| Effective bit depth, mono / stereo | 10.5 / 7.6 bits | 10.1–11.1 / 7.0–8.7 bits | 11.1 / 8.1 bits | 10.5–11.0 / 7.5–8.0 bits | 10.1 / 7.1 bits | 10.6 / 7.4 bits | 10.6 / 7.5 bits | 10.6 / 7.7 bits |
+| Phase noise at 10 kHz / 100 kHz / 1 MHz | −91 / −95 / < −101 dBc/Hz | −98 / −97 / −101 dBc/Hz | < −94 / < −91 / < −93 dBc/Hz | −93 / −96 / < −102 dBc/Hz | −85 / −88 / −96 dBc/Hz | −95 / −95 / < −99 dBc/Hz | −92 / −86 / −95 dBc/Hz | −91 / −91 / < −99 dBc/Hz |
+| Modulation THD (10 kHz at 75 kHz deviation) | −76 dB | −77 dB | −62 dB | −60 dB | −62 dB | −57 dB | −65 dB | −51 dB |
+| Strongest line more than 1 MHz from the carrier (82–112 MHz) | none above −60 dBc | none above −55 dBc | none above −43 dBc | −57 dBc (85.0 MHz) | −41 dBc (±1.2 MHz) | −28 dBc (97.2 MHz) | −34 dBc (94.8 MHz) | −22 dBc (92.4 MHz) |
+| CPU (stereo + RDS, network stream) | 3.3 % | 6.6 % at 1.5 GHz | 53 % at 600 MHz (throttled) | 18 % at 1 GHz | 2 % on the computer | 2 % | 2 % | 2 % |
 
 * **Audio figures**: a pilot-locked stereo decoder with 50 µs de-emphasis,
   unweighted, 20 Hz – 15 kHz. A 0 dBFS tone deviates 40 kHz, not 65 kHz,
@@ -404,25 +407,29 @@ synchronously.
   the BCM boards and 15.6 on the Pico (16-bit samples of about 3 Hz); the
   multiplex as computed (`txengine wfm render`) has a noise floor of
   −128 dBFS (21 bits).
-* **Noise**: the decoded silence of a stereo transmission (two rounds),
-  re a sine at 75 kHz deviation, without local interference: the spectrum
-  at 0.5 Hz resolution, its median over 2 s segments (drops bursts), then
-  its running median over 300 Hz (drops narrow lines), calibrated on white
-  noise. The weighted row applies the ITU-R BS.468 weighting and reads rms,
-  not quasi-peak. The effective bit depth follows from the unweighted SNR:
-  (SNR re 0 dBFS − 1.76 dB) / 6.02 dB, a 0 dBFS tone deviating 40 kHz.
-* **Phase noise**: an unmodulated carrier, the median of both sidebands
-  over ±5 % of the offset; at 10 kHz also from the noise floor of the
-  decoded silence above. The lowest of the readings (an evening and two
-  morning rounds), as interference only adds; "<" where the receiver's own
-  floor was reached.
+* **Noise**: the decoded silence of a stereo transmission (two rounds; the
+  Pi 4 three), re a sine at 75 kHz deviation, without local interference:
+  the spectrum at 0.5 Hz resolution, its median over 2 s segments (drops
+  bursts), then its running median over 300 Hz (drops narrow lines),
+  calibrated on white noise. The weighted row applies the ITU-R BS.468
+  weighting and reads rms, not quasi-peak. The effective bit depth follows
+  from the unweighted SNR: (SNR re 0 dBFS − 1.76 dB) / 6.02 dB, a 0 dBFS
+  tone deviating 40 kHz.
+* **Phase noise**: an unmodulated carrier, the median of both sidebands over
+  ±5 % of the offset; at 10 kHz also from the noise floor of the decoded
+  silence above. The lowest of the readings (an evening and two morning
+  rounds; the Pi 4 three evening rounds), as interference only adds; "<"
+  where the receiver's own floor was reached.
 * **Over the air**, the reception limits the noise figures: the boards
   measured in the morning read about 71 dB mono and 53 dB stereo, though
   their carriers are made in entirely different ways, while the Pi 2,
   measured later with the antenna placed differently, reads 74 dB. The
   hardware notes' phase noise figures, from earlier measurements under
   better reception, are lower. In the other measurements the Pi 2 arrived
-  15 dB below the others.
+  15 dB below the others. The Pi 4, through a wire at the level of the
+  others (−31 dBFS), read 68–69 dB mono and 50–53 dB stereo in two rounds
+  and 74 / 59 dB an hour later, when its phase noise at 10 kHz was 7 dB
+  lower too: most of the noise comes in with the reception.
 * **Modulation THD**: `txengine tone --tones 10000 --deviation 75000`, the
   harmonics up to 100 kHz in the demodulated signal, without any of the
   programme's processing.
@@ -449,23 +456,23 @@ demodulated at 48 kHz, 750 µs de-emphasis for the audio figures, all at
 same input. Raspberry Pis transmitted from GPIO4, the Picos from GP21 with
 the PLL method.
 
-| | Raspberry Pi 5 | Raspberry Pi 2 | Raspberry Pi Zero 2 W | Pico 2 | Pico |
-|---|---|---|---|---|---|
-| Sample rate | 250 kS/s | 190 kS/s | 190 kS/s | 166.7 kS/s | 166.7 kS/s |
-| 1013 Hz tone at half scale (render: 1263.9 Hz) | 1264.1 Hz | 1263.9 Hz | 1263.9 Hz | 1263.8 Hz | 1263.9 Hz |
-| Audio frequency response (310 Hz – 2.99 kHz), re the render | ±0.004 dB | ±0.006 dB | ±0.007 dB | ±0.009 dB | ±0.012 dB |
-| Audio THD (1013 Hz at half scale) | −81 dB | −75 dB | −73 dB | −78 dB | −75 dB |
-| Audio SNR (300 Hz – 3 kHz, re ±2.5 kHz) | 63 dB | 59 dB | 60 dB | 63 dB | 59 dB |
-| Phase noise at 1 kHz / 10 kHz | −88 / −98 dBc/Hz | −87 / −89 dBc/Hz | −87 / −94 dBc/Hz | −90 / −85 dBc/Hz | −79 / −84 dBc/Hz |
-| Adjacent channel (±12.5 kHz, in 8.5 kHz), unmodulated | −56 dB | −49 dB | −50 dB | −43 dB | −41 dB |
-| CTCSS 88.5 Hz (target ±375 Hz) | 374.9 Hz | 374.8 Hz | 374.8 Hz | 374.8 Hz | 374.8 Hz |
-| DCS 023 | 32 of 32 words, no bit errors | 32 of 32, none | 32 of 32, none | 32 of 32, none | 32 of 32, none |
-| Peak deviation, pink noise 12 dB over full scale (limit 2.5 kHz) | 2.49 kHz | 2.50 kHz | 2.51 kHz | 2.49 kHz | 2.53 kHz |
-| Occupied bandwidth (99 %), the same | 6.1 kHz | 6.1 kHz | 6.1 kHz | 6.1 kHz | 6.2 kHz |
-| Carrier with `--ppm auto` | −0.4 ppm | (reference) | 0.0 ppm | +0.7 ppm | +1.2 ppm |
-| 446.00625 MHz (PMR446 channel 1): audio SNR / adjacent channel | 60 / −54 dB | 53 / −44 dB (`--harmonic 3`) | 56 / −49 dB (`--harmonic 3`) | 48 / −31 dB | 42 / −24 dB |
-| 27.185 MHz (CB channel 19, ±2 kHz): audio SNR / THD | 66 / −81 dB | 60 / −76 dB | 58 / −77 dB | 65 / −84 dB | 64 / −79 dB |
-| CPU (48 kHz stereo stream, CTCSS) | 1.3 % | 22 % at 900 MHz | 6.8 % at 1 GHz | 1.4 % on the computer | as the Pico 2 |
+| | Raspberry Pi 5 | Raspberry Pi 4 | Raspberry Pi 2 | Raspberry Pi Zero 2 W | Pico 2 | Pico |
+|---|---|---|---|---|---|---|
+| Sample rate | 250 kS/s | 228 kS/s | 190 kS/s | 190 kS/s | 166.7 kS/s | 166.7 kS/s |
+| 1013 Hz tone at half scale (render: 1263.9 Hz) | 1264.1 Hz | 1264.2 Hz | 1263.9 Hz | 1263.9 Hz | 1263.8 Hz | 1263.9 Hz |
+| Audio frequency response (310 Hz – 2.99 kHz), re the render | ±0.004 dB | ±0.009 dB | ±0.006 dB | ±0.007 dB | ±0.009 dB | ±0.012 dB |
+| Audio THD (1013 Hz at half scale) | −81 dB | −74 dB | −75 dB | −73 dB | −78 dB | −75 dB |
+| Audio SNR (300 Hz – 3 kHz, re ±2.5 kHz) | 63 dB | 63 dB | 59 dB | 60 dB | 63 dB | 59 dB |
+| Phase noise at 1 kHz / 10 kHz | −88 / −98 dBc/Hz | −90 / −94 dBc/Hz | −87 / −89 dBc/Hz | −87 / −94 dBc/Hz | −90 / −85 dBc/Hz | −79 / −84 dBc/Hz |
+| Adjacent channel (±12.5 kHz, in 8.5 kHz), unmodulated | −56 dB | −53 dB | −49 dB | −50 dB | −43 dB | −41 dB |
+| CTCSS 88.5 Hz (target ±375 Hz) | 374.9 Hz | 374.8 Hz | 374.8 Hz | 374.8 Hz | 374.8 Hz | 374.8 Hz |
+| DCS 023 | 32 of 32 words, no bit errors | 32 of 32, none | 32 of 32, none | 32 of 32, none | 32 of 32, none | 32 of 32, none |
+| Peak deviation, pink noise 12 dB over full scale (limit 2.5 kHz) | 2.49 kHz | 2.49 kHz | 2.50 kHz | 2.51 kHz | 2.49 kHz | 2.53 kHz |
+| Occupied bandwidth (99 %), the same | 6.1 kHz | 6.1 kHz | 6.1 kHz | 6.1 kHz | 6.1 kHz | 6.2 kHz |
+| Carrier with `--ppm auto` | −0.4 ppm | +1.0 ppm | (reference) | 0.0 ppm | +0.7 ppm | +1.2 ppm |
+| 446.00625 MHz (PMR446 channel 1): audio SNR / adjacent channel | 60 / −54 dB | 57 / −47 dB (`--harmonic 3`) | 53 / −44 dB (`--harmonic 3`) | 56 / −49 dB (`--harmonic 3`) | 48 / −31 dB | 42 / −24 dB |
+| 27.185 MHz (CB channel 19, ±2 kHz): audio SNR / THD | 66 / −81 dB | 58 / −75 dB | 60 / −76 dB | 58 / −77 dB | 65 / −84 dB | 64 / −79 dB |
+| CPU (48 kHz stereo stream, CTCSS) | 1.3 % | 2.8 % at 1.5 GHz | 22 % at 900 MHz | 6.8 % at 1 GHz | 1.4 % on the computer | as the Pico 2 |
 
 * **Carrier**: 145.5125 MHz unless given, a channel whose plan is clear of
   the PLLs' spurs on every board (see [How the carrier is
@@ -491,7 +498,8 @@ the PLL method.
   channels (99 % bandwidth with a tone: 55 kHz on the Pico 2, 80 kHz on
   the Pico). On the third harmonic (`--harmonic 3`, division 10) the Pico 2
   reads 52 / −34 dB with 4.2 kHz of bandwidth, the Pico 47 / −27 dB with
-  30 kHz. The Pi 2 and Zero 2 W reach 446 MHz only on a harmonic.
+  30 kHz. The Raspberry Pi 2–4 and Zero 2 W reach 446 MHz only on a
+  harmonic.
 * **CB** was received on the third harmonic (81.555 MHz, below the B210's
   range at the fundamental), with the deviation scaled back. The Pico 2's
   PIO method measures 64 dB and −82 dB there.
@@ -499,20 +507,25 @@ the PLL method.
   2 W measures there as at 145.5 MHz. The Pi 2 read −79 dBc/Hz at 1 and
   10 kHz there, about as at 156–168 MHz with PLLA anywhere from +2.7 % to
   −16.6 % (−73 to −84 dBc/Hz): its reception limits these figures.
+* **`--ppm auto`** follows the frequency the NTP daemon sets for the system
+  clock, and chrony removes a time offset by running the clock slightly fast
+  or slow for a while: on the Pi 4, catching up 0.2–0.3 ms, its frequency
+  was 0.5–1.3 ppm away from chrony's own estimate of the crystal, which put
+  the carrier +1.0 ppm off here (+0.1 ppm in the FM measurement).
 * **CPU**: of one core, the audio input's resampling from 48 kHz included.
 
 ### AM
 
-| | Raspberry Pi 5 | Raspberry Pi Zero 2 W | Pico 2 | Pico |
-|---|---|---|---|---|
-| Carriers | 100 kHz – 6.2 MHz | 100 kHz – 4.2 MHz | 64 kHz – 1.71 MHz | 64 kHz – 1.76 MHz |
-| Width steps up to the full output (999 kHz) | 100 | 62 | edges placed to the clock cycle (264 MHz) | edges placed to the clock cycle (264 MHz) |
-| Crystal error, uncorrected (re the Lime) | −54.8 ppm | +3.7 ppm | −4.4 ppm | +9.7 ppm |
-| Carrier with `--ppm auto` (re the Lime) | within 0.3 Hz | within 0.2 Hz (2.5 Hz at 3.5 MHz) | within 1.5 Hz | within 0.3 Hz |
-| 1 kHz at 90 % reads | 89.6 % (999 kHz), 90.0 % (1.602 MHz), 89.5 % (3.5 MHz), 88.8 % (6.1 MHz) | 90.4 % (999 kHz), 89.2 % (1.602 MHz), 88.8 % (3.5 MHz) | 90.6 % (999 kHz), 89.6 % (1.602 MHz) | 91.4 % (999 kHz), 91.2 % (1.602 MHz), 90.8 % (1.71 MHz) |
-| Harmonics of the tone | below −34 dB | below −37 dB | below −40 dB | below −39 dB |
-| Phase modulation (1 kHz at 90 %) | < 0.13° | < 0.15° | < 0.08° | < 0.36° |
-| CPU (network stream) | 1.9 % (999 kHz), 5.3 % (6.1 MHz) | 10.1 % (999 kHz), 18.8 % (3.5 MHz); 32-bit 15.5 %, 24.6 % | as the Pico | 1.4 % on the computer |
+| | Raspberry Pi 5 | Raspberry Pi 4 | Raspberry Pi Zero 2 W | Pico 2 | Pico |
+|---|---|---|---|---|---|
+| Carriers | 100 kHz – 6.2 MHz | 100 kHz – 2.2 MHz | 100 kHz – 4.2 MHz | 64 kHz – 1.71 MHz | 64 kHz – 1.76 MHz |
+| Width steps up to the full output (999 kHz) | 100 | 62 | 62 | edges placed to the clock cycle (264 MHz) | edges placed to the clock cycle (264 MHz) |
+| Crystal error, uncorrected (re the Lime) | −54.8 ppm | +18.8 ppm | +3.7 ppm | −4.4 ppm | +9.7 ppm |
+| Carrier with `--ppm auto` (re the Lime) | within 0.3 Hz | within 1 Hz | within 0.2 Hz (2.5 Hz at 3.5 MHz) | within 1.5 Hz | within 0.3 Hz |
+| 1 kHz at 90 % reads | 89.6 % (999 kHz), 90.0 % (1.602 MHz), 89.5 % (3.5 MHz), 88.8 % (6.1 MHz) | 89.9 % (999 kHz), 89.7 % (1.602 MHz), 89.5 % (2.2 MHz) | 90.4 % (999 kHz), 89.2 % (1.602 MHz), 88.8 % (3.5 MHz) | 90.6 % (999 kHz), 89.6 % (1.602 MHz) | 91.4 % (999 kHz), 91.2 % (1.602 MHz), 90.8 % (1.71 MHz) |
+| Harmonics of the tone | below −34 dB | below −41 dB | below −37 dB | below −40 dB | below −39 dB |
+| Phase modulation (1 kHz at 90 %) | < 0.13° | < 0.15° | < 0.15° | < 0.08° | < 0.36° |
+| CPU (network stream) | 1.9 % (999 kHz), 5.3 % (6.1 MHz) | 4.3 % (999 kHz), 7.3 % (2.2 MHz) at 1.5 GHz; 32-bit 6.0 %, 8.8 % | 10.1 % (999 kHz), 18.8 % (3.5 MHz); 32-bit 15.5 %, 24.6 % | as the Pico | 1.4 % on the computer |
 
 * **The receive path** limits what these show. Through the tap the Lime gets
   the carrier at about −90 dBFS against a noise floor that leaves a
