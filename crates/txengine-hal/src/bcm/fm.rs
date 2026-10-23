@@ -40,6 +40,7 @@ use super::dma::{ControlBlock, DmaChannel};
 use super::regs::{self, cm, dma as dmar, pcm, pwm};
 use super::{Bcm, PinState, gpclk_for_pin, pwm_write_confirmed, set_pin_function};
 use crate::MAX_CLOCK_ERROR_PPM;
+use crate::boundary;
 use crate::cpufreq::{CpuClockPin, CpuPinGuard};
 use crate::error::{HalError, Result};
 use crate::guardian::Guardian;
@@ -135,9 +136,19 @@ pub struct BcmPlan {
     /// Loop filter integral gain to set on the PLL (see [`modulation_ki`]);
     /// `None` keeps the PLL's current one.
     pub loop_ki: Option<u32>,
+    /// PLL method: how far the carrier is from where the PLL puts a spur
+    /// next to it ([`boundary`]).
+    pub clearance_hz: Option<f64>,
 }
 
 impl BcmPlan {
+    /// PLL method: a warning if the carrier is too close to a spur of the
+    /// PLL for quiet passages of a modulation up to ±`max_offset_hz`.
+    pub fn spur_warning(&self, max_offset_hz: f64) -> Option<String> {
+        let BcmMethod::Pll(id) = self.method else { return None };
+        boundary::warning(self.clearance_hz?, self.carrier_hz, max_offset_hz, id.name())
+    }
+
     /// PLL method: FRAC at the carrier centre and FRAC units per Hz of
     /// offset when the crystal runs `ppm` fast. The whole feedback divider
     /// (NDIV.FRAC) shrinks by `1 + ppm · 10⁻⁶`, so that the VCO keeps its
@@ -199,7 +210,8 @@ fn plan_in_room(
     let unit_hz = osc * room.fb / (1u64 << cm::A2W_FRAC_BITS) as f64;
     // Room for correcting the crystal error at run time.
     let reserve_hz = carrier * MAX_CLOCK_ERROR_PPM * 1e-6;
-    let mut best: Option<(f64, BcmPlan)> = None;
+    let target = boundary::target_hz(carrier, max_offset);
+    let mut best: Option<((f64, f64), BcmPlan)> = None;
     for &per in &room.per_choices {
         for gp in MIN_DIVI..=4095u32 {
             let n = per * gp;
@@ -218,15 +230,19 @@ fn plan_in_room(
             if margin < 0.005 || !(1.0..=1023.0).contains(&ndiv) {
                 continue;
             }
-            // Prefer: least disturbance, then no GPCLK division beyond what
-            // is needed, then a high VCO (lower relative jitter).
+            // Prefer: clear of the PLL's spurs (the VCO at a half multiple
+            // of the crystal, at which its phase detector compares), then
+            // the least disturbance, then a VCO near 1.5 GHz if it is idle,
+            // then the fraction far from whole numbers.
             let score =
                 room.change(vco) * 100.0 + if room.running { 0.0 } else { (vco - 1.5e9).abs() / 1e9 } - margin * 0.01;
-            if best.as_ref().is_none_or(|(s, _)| score < *s) {
+            let clearance_hz = boundary::Spurs { vco: &[osc / 2.0], carrier: &[] }.clearance_hz(carrier, n as f64);
+            let rank = (boundary::rank(clearance_hz, target), -score);
+            if best.as_ref().is_none_or(|(r, _)| rank > *r) {
                 let center = units.round();
                 let units_per_hz = n as f64 / unit_hz;
                 best = Some((
-                    score,
+                    rank,
                     BcmPlan {
                         method: BcmMethod::Pll(id),
                         gpclk,
@@ -246,6 +262,7 @@ fn plan_in_room(
                         users: room.users.clone(),
                         step_hz: 1.0 / units_per_hz,
                         loop_ki,
+                        clearance_hz: Some(clearance_hz),
                     },
                 ));
             }
@@ -290,6 +307,7 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
         users: PllUsers::default(),
         step_hz: 1.0 / units_per_hz.abs(),
         loop_ki: None,
+        clearance_hz: None,
     })
 }
 
@@ -713,6 +731,9 @@ impl BcmFmTransmitter {
                 found.ok_or_else(|| last.expect("a planning error"))?
             }
         };
+        if let Some(w) = plan.spur_warning(cfg.max_offset_hz) {
+            warn!("{w}");
+        }
         let pll = match plan.method {
             BcmMethod::Pll(id) => Some(pll_of(id)),
             BcmMethod::ClkDiv => None,
@@ -1588,6 +1609,7 @@ mod tests {
             users: PllUsers::default(),
             step_hz: 1.0 / units_per_hz.abs(),
             loop_ki: None,
+            clearance_hz: None,
         }
     }
 
@@ -1624,6 +1646,56 @@ mod tests {
                 plan_in_room(&idle_room(), PllId::D, None, 0, f, 19.2e6, 100e3).unwrap_or_else(|e| panic!("{f}: {e}"));
             assert!((p.carrier_hz - f).abs() <= p.step_hz / 2.0 && p.gp_div >= MIN_DIVI, "{f}: {p:?}");
         }
+    }
+
+    /// PLLA as the firmware leaves it on a Pi 2 or Zero 2 W: 2250 MHz with
+    /// the feedback pre-divider, only the GPU's 3D block on it.
+    fn plla_room() -> PllRoom {
+        use super::super::cprman::GPU_PLL_MAX_DECREASE;
+        let vco = 2250e6;
+        PllRoom {
+            running: true,
+            users: PllUsers { per: vec![], other: vec!["PLLA_CORE (v3d)".into()], gpu_only: true },
+            vco_old: vco,
+            fb: 2.0,
+            per_choices: (1..=8).collect(),
+            per_now: None,
+            vco_min: vco * (1.0 - GPU_PLL_MAX_DECREASE),
+            vco_max: vco * 1.03,
+            max_decrease: GPU_PLL_MAX_DECREASE,
+            max_increase: 0.03,
+        }
+    }
+
+    fn plan_a(carrier: f64, max_offset: f64) -> Result<BcmPlan> {
+        plan_in_room(&plla_room(), PllId::A, Some(MODULATION_KI), 0, carrier, 19.2e6, max_offset)
+    }
+
+    /// Every FM carrier, clear of the PLL's spurs except next to a multiple
+    /// of 9.6 MHz (half the crystal), where every VCO is next to one too,
+    /// and a few where PLLA's room ends.
+    #[test]
+    fn plla_reaches_the_fm_band() {
+        let mut stuck = 0;
+        for k in 8750..=10800 {
+            let f = k as f64 * 10e3;
+            let p = plan_a(f, 100e3).unwrap_or_else(|e| panic!("{f}: {e}"));
+            assert!((p.carrier_hz - f).abs() < 1.0 && p.max_offset_hz >= 100e3, "{f}: {p:?}");
+            let clear = p.clearance_hz.unwrap() >= 12.5e3;
+            let near_9_6 = (f / 9.6e6 - (f / 9.6e6).round()).abs() * 9.6e6 < 12.5e3;
+            assert!(!(clear && near_9_6), "{f}: {p:?}");
+            assert_eq!(p.spur_warning(100e3).is_some(), !clear, "{f}");
+            stuck += !clear as u32;
+        }
+        assert!(stuck <= 12, "{stuck}");
+    }
+
+    /// 144 MHz is 15 x 9.6 MHz; 145.5 MHz is clear.
+    #[test]
+    fn plla_warns_of_its_spurs() {
+        let p = plan_a(144e6, 10e3).unwrap();
+        assert!(p.spur_warning(10e3).unwrap().contains("the carrier is 0 Hz from a point where PLLA"), "{p:?}");
+        assert!(plan_a(145.5e6, 10e3).unwrap().spur_warning(10e3).is_none());
     }
 
     #[test]

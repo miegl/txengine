@@ -270,6 +270,9 @@ fn probe(hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
             println!("Sampling: {:.3} S/s (xosc / {cycles}) paced by RP1 DMA tick", xosc / cycles);
             let busy = rp1::dma::Dmac::kernel_channels_in_use();
             println!("DMA:      kernel channels in use {busy:#04x}");
+            if let Some(w) = plan.spur_warning(cfg.max_offset_hz) {
+                println!("Warning:  {w}");
+            }
         }
         _ => bcm_probe(&plat, hw, max_offset_hz)?,
     }
@@ -383,20 +386,25 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::
         let p = Pll::new(&cm, id, osc, b.bcm2711);
         print_pll(&p, gp_ctl);
         match bcm::fm::plan_pll(&p, gpclk, cfg.carrier_hz, osc, cfg.max_offset_hz, cfg.max_vco_change) {
-            Ok(plan) => println!(
-                "          plan: VCO {:.3} MHz{}, PER /{}, GPCLK /{}, carrier {:.6} MHz, step {:.2} Hz{}",
-                plan.vco_new / 1e6,
-                if plan.vco_old > 0.0 {
-                    format!(" ({:+.2} %)", (plan.vco_new / plan.vco_old - 1.0) * 100.0)
-                } else {
-                    String::new()
-                },
-                plan.per_div,
-                plan.gp_div,
-                plan.carrier_hz / 1e6,
-                plan.step_hz,
-                plan.loop_ki.map_or(String::new(), |k| format!(", loop KI {} -> {k}", p.loop_ki()))
-            ),
+            Ok(plan) => {
+                println!(
+                    "          plan: VCO {:.3} MHz{}, PER /{}, GPCLK /{}, carrier {:.6} MHz, step {:.2} Hz{}",
+                    plan.vco_new / 1e6,
+                    if plan.vco_old > 0.0 {
+                        format!(" ({:+.2} %)", (plan.vco_new / plan.vco_old - 1.0) * 100.0)
+                    } else {
+                        String::new()
+                    },
+                    plan.per_div,
+                    plan.gp_div,
+                    plan.carrier_hz / 1e6,
+                    plan.step_hz,
+                    plan.loop_ki.map_or(String::new(), |k| format!(", loop KI {} -> {k}", p.loop_ki()))
+                );
+                if let Some(w) = plan.spur_warning(cfg.max_offset_hz) {
+                    println!("          warning: {w}");
+                }
+            }
             Err(e) => println!("          plan: {e}"),
         }
     }

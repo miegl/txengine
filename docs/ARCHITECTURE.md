@@ -206,6 +206,16 @@ snapshot), then run a DMA ring, paced by hardware, that writes one
 frequency word per sample into a PLL or clock divider register (FM) or a
 pulse width per carrier cycle into a PWM (AM).
 
+Every planner that modulates a PLL (RP1, BCM, the Pico's PLL method)
+prefers, above its other preferences, divisions that keep the carrier clear
+of the points where the PLL makes a spur next to it: the VCO at a half
+multiple of the frequency its phase detector compares at, and on the Pico
+also the carrier at some fractions of it (`boundary::Spurs`; the module
+has the measurements). The clearance it aims for is an eighth of the
+largest offset planned (the quiet passages) plus 30 ppm (the crystal
+correction); a plan that falls short of the first part logs a warning (and
+`txengine probe` shows it).
+
 ### Raspberry Pi 5 (RP1)
 
 * The carrier is `pll_audio` (or `pll_video`) → `clk_gp0..2` → GPIO. The PLL's
@@ -271,7 +281,9 @@ pulse width per carrier cycle into a PWM (AM).
   normally PLLA) may move down by up to 15 % on the BCM2836/7
   (`cprman::GPU_PLL_MAX_DECREASE`): from 2250 MHz that reaches every carrier
   in 87.5–108 MHz, where ±3 % reaches 76 % of the band (PLLC at ±3 %:
-  50 %). Idle PLLs are preferred and powered up with the kernel's loop
+  50 %). The planner takes the least change that keeps the carrier clear of
+  the PLL's spurs (above): −12 % at most, but for 15 of 2051 FM carriers
+  (down to −14 %). Idle PLLs are preferred and powered up with the kernel's loop
   settings; otherwise, on the BCM2836/7, PLLA, then PLLC (the BCM2711, not
   measured, keeps PLLC first).
 * Loop gain of PLLA and PLLC: the firmware and Linux run every PLL with the loop
@@ -446,8 +458,8 @@ either method, and AM.
   from `PLL_SYS` at 144 MHz, USB at 144 / 3), its post dividers and
   `clk_gpout0` onto GP21. The PLL compares at the crystal / 2 (6 MHz: a
   divider step moves the carrier half as far as at 12 MHz). The divider from
-  the VCO is chosen as large as the VCO range allows (the smallest steps),
-  14–18 in the FM band.
+  the VCO is the largest the VCO range allows (the smallest steps) among
+  those clear of the PLL's spurs (above), 9–18 in the FM band.
 * **Modulation (PLL method)**: the feedback divider is integer only, so a
   MASH 1-1 (`sigma_delta::Mash11`, input in 30-bit fixed point over 0–2
   steps) dithers it over `base … base + 4` at 3 MHz, interpolating linearly

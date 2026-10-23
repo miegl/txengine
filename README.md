@@ -443,6 +443,27 @@ feedback), which moves the quantisation error from the carrier towards
 (simulated, Pi 5). Each sample lasts a whole number of carrier cycles, so
 in AM the carrier paces the samples.
 
+**Spurs of the PLLs.** A fractional PLL makes a spur next to its output
+when its VCO is close to a half multiple of the frequency its phase detector
+compares at (19.2 MHz on the Pi 2, 3 and Zero 2 W, 50 MHz on the Pi 5; on
+the Pico, at 6 MHz, also when the carrier is on a multiple of 2 or
+1.5 MHz), offset from the carrier by the distance from that point. The
+modulation drags it through the audio band, where it distorts quiet
+passages by some 10–30 Hz of deviation: near 145 MHz the harmonics of a
+1 kHz tone at 1.25 kHz deviation reached −33 to −42 dB on a Pico, −42 dB on
+a Zero 2 W and −51 dB on a Pi 5, and stayed below −66 dB one 12.5 kHz
+channel away. Against the 75 kHz of wide-band FM that is about at the
+noise floor, but audible as distortion (at 90.0 MHz a Pico 2 put the second
+harmonic of a tone 30 dB below full scale at −39 dB, −69 dB re full
+scale). txengine therefore chooses the PLL's division to keep the carrier
+clear of these points, by an eighth of the largest deviation plus 30 ppm
+for the crystal correction, and warns where no division can: in the FM band
+62 of 2051 carriers on a Pico (next to multiples of 1.5 and 2 MHz), 12 on
+the Pi 2, 3 and Zero 2 W (next to multiples of 9.6 MHz), none on the Pi 5.
+Measured with the planner's choice, the Pi 5 at 147.5 MHz went from −51 to
+−73 dB. Thirds and quarters of the comparison frequency are milder (−50 to
+−60 dB) and not avoided.
+
 #### Raspberry Pi 5 (RP1)
 
 * **FM**: fractional-N modulation of the RP1 audio or video PLL (24-bit
@@ -592,10 +613,12 @@ txengine renders the samples on the computer; the firmware puts them out.
   UART, HDMI) stays within ±3 %, which reaches only half of the band. PLLA
   only clocks the GPU's video and 3D blocks, idle on a transmitter, so
   txengine prefers it and lets it move down by up to 15 % (the blocks run
-  slower; upwards the 3 % limit stays). That reaches every carrier in
-  87.5–108 MHz on a 10 kHz raster (from the firmware's 2250 MHz at most
-  −12 %), and the response, noise and separation measure the same at −14 %
-  (VCO 1927 MHz) as at +1.2 %. PLLC moved by −3.6 % caused no SD or WiFi
+  slower; upwards the 3 % limit stays), retuning it as little as keeps the
+  carrier clear of the PLL's spurs (see [How the carrier is
+  made](#how-the-carrier-is-made)). −12 % reach every carrier in
+  87.5–108 MHz on a 10 kHz raster from the firmware's 2250 MHz (15 of them
+  go further, to −14 %, to stay clear), and the response, noise and
+  separation measure the same at −14 % (VCO 1927 MHz) as at +1.2 %. PLLC moved by −3.6 % caused no SD or WiFi
   errors and no lost packets on either board.
 * **A clock divider of 1 divides by 4096:** set to an integer divider of
   1, GPCLK0 and the PWM clock put out a 4096th of their input, from any

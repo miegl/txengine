@@ -11,6 +11,7 @@
 
 use txengine_pico_protocol::{Config, FRAC_BITS, PioConfig};
 
+use crate::boundary;
 use crate::{HalError, MAX_CLOCK_ERROR_PPM, Result};
 
 const VCO_MIN: f64 = 750e6;
@@ -43,6 +44,9 @@ pub struct Plan {
     /// Reference cycles per sigma-delta update, and updates per sample.
     pub update_div: u8,
     pub sample_updates: u8,
+    /// How far the carrier is from where the PLL puts a spur next to it
+    /// ([`boundary`]).
+    pub clearance_hz: f64,
 }
 
 impl Plan {
@@ -57,6 +61,13 @@ impl Plan {
 
     pub fn sample_rate(&self) -> f64 {
         self.update_hz() / self.sample_updates as f64
+    }
+
+    /// A warning if the carrier is too close to a spur of the PLL for
+    /// quiet passages of a modulation up to ±`max_offset_hz`.
+    pub fn spur_warning(&self, max_offset_hz: f64) -> Option<String> {
+        boundary::warning(self.clearance_hz, self.carrier_hz, max_offset_hz, "PLL_USB")
+            .map(|w| if self.carrier_hz < 120e6 { format!("{w}; --synthesis pio avoids it") } else { w })
     }
 
     /// Largest offset a sample can carry (Hz).
@@ -127,11 +138,27 @@ impl Timing {
     }
 }
 
+/// Where `PLL_USB` makes a spur next to the carrier ([`boundary`], measured
+/// from a 12 MHz crystal): with the 6 MHz reference, the VCO at a multiple
+/// of 3 MHz (a half of the reference) or the carrier at one of 2 MHz or
+/// 1.5 MHz (a third, a quarter); with the 12 MHz reference, the VCO at a
+/// multiple of 3 MHz or 2 MHz.
+fn spurs(xosc_hz: f64, refdiv: u8) -> boundary::Spurs<'static> {
+    // Spacings for the 12 MHz crystal the Pico boards have.
+    debug_assert!(xosc_hz == 12e6);
+    match refdiv {
+        1 => boundary::Spurs { vco: &[3e6, 2e6], carrier: &[] },
+        _ => boundary::Spurs { vco: &[3e6], carrier: &[2e6, 1.5e6] },
+    }
+}
+
 /// Plan `carrier_hz` from a `xosc_hz` crystal, able to move by
 /// ±`max_offset_hz` and to correct ±[`MAX_CLOCK_ERROR_PPM`].
 pub fn plan(carrier_hz: f64, xosc_hz: f64, max_offset_hz: f64, timing: Timing, refdiv: u8) -> Result<Plan> {
     let fref = xosc_hz / refdiv as f64;
     let reserve = max_offset_hz + carrier_hz * MAX_CLOCK_ERROR_PPM * 1e-6;
+    let target = boundary::target_hz(carrier_hz, max_offset_hz);
+    let spurs = spurs(xosc_hz, refdiv);
     // The modulator takes 0-2 steps; keep x away from the ends by a
     // sample's worth of interpolation steps.
     let guard = timing.sample_updates as f64 / ONE;
@@ -181,16 +208,13 @@ pub fn plan(carrier_hz: f64, xosc_hz: f64, max_offset_hz: f64, timing: Timing, r
                     resolution_hz: scale * step / ONE,
                     update_div: timing.update_div,
                     sample_updates: timing.sample_updates,
+                    clearance_hz: spurs.clearance_hz(carrier_hz, d),
                 };
-                // The highest VCO (smallest steps, least jitter), then the
-                // fewest dividers.
-                let better = match &best {
-                    None => true,
-                    Some(b) => {
-                        (d, std::cmp::Reverse(gpout_div)) > (b.division() as f64, std::cmp::Reverse(b.gpout_div))
-                    }
-                };
-                if better {
+                // Clear of the PLL's spurs, then the highest VCO (smallest
+                // steps, least jitter), then the fewest dividers.
+                let rank =
+                    |p: &Plan| (boundary::rank(p.clearance_hz, target), p.division(), std::cmp::Reverse(p.gpout_div));
+                if best.as_ref().is_none_or(|b| rank(&p) > rank(b)) {
                     best = Some(p);
                 }
             }
@@ -206,9 +230,14 @@ mod tests {
     /// 6 MHz / 2 = 3 MHz updates, 18 per sample.
     const T: Timing = Timing { update_div: 2, sample_updates: 18 };
 
+    /// Whether `f` is within `d` of a multiple of `m`.
+    fn near(f: f64, m: f64, d: f64) -> bool {
+        (f / m - (f / m).round()).abs() * m < d
+    }
+
     #[test]
     fn whole_fm_band() {
-        let mut worst_step = 0f64;
+        let (mut worst_step, mut stuck) = (0f64, 0);
         for k in 8750..=10800 {
             let f = k as f64 * 10e3;
             let p = plan(f, 12e6, 100e3, T, 2).unwrap_or_else(|e| panic!("{f}: {e}"));
@@ -217,14 +246,40 @@ mod tests {
             assert!((x - (p.n - p.base as f64 - 1.0)).abs() < 1e-8);
             assert!(p.max_offset_hz() >= 100e3);
             assert!(p.resolution_hz < 3.2, "{f}: {}", p.resolution_hz);
+            // Clear of the PLL's spurs except next to a multiple of 1.5 or
+            // 2 MHz, where the carrier itself is on one (the VCO is on a
+            // multiple of 3 MHz then too, or the carrier on one of 2 MHz).
+            let clear = p.clearance_hz >= 12.5e3;
+            assert_eq!(clear, !(near(f, 1.5e6, 12.5e3) || near(f, 2e6, 12.5e3)), "{f}: {p:?}");
+            assert_eq!(p.spur_warning(100e3).is_some(), !clear, "{f}");
+            stuck += !clear as u32;
             worst_step = worst_step.max(p.step_hz);
         }
-        assert!(worst_step < 0.45e6, "{worst_step}");
+        // 62 of 2051 carriers; some others give up finer divisions to stay
+        // clear.
+        assert_eq!(stuck, 62);
+        assert!(worst_step < 0.7e6, "{worst_step}");
+    }
+
+    #[test]
+    fn plans_clear_of_the_spurs() {
+        // 145.5 MHz is a multiple of 1.5 MHz: with the 6 MHz reference
+        // every division is next to a spur, with the 12 MHz one division 9
+        // (VCO 1309.5 MHz) is clear.
+        assert!(plan(145.5e6, 12e6, 10e3, T, 2).unwrap().spur_warning(10e3).is_some());
+        let t12 = Timing { update_div: 4, sample_updates: 18 };
+        let p = plan(145.5e6, 12e6, 10e3, t12, 1).unwrap();
+        assert!(p.division() == 9 && p.clearance_hz > 50e3, "{p:?}");
+        // One channel up is clear with the 6 MHz reference, division 10.
+        let p = plan(145.5125e6, 12e6, 10e3, T, 2).unwrap();
+        assert!(p.division() == 10 && p.spur_warning(10e3).is_none(), "{p:?}");
+        // On a multiple of 3 MHz every VCO is on a spur.
+        assert!(plan(90e6, 12e6, 100e3, T, 2).unwrap().spur_warning(100e3).unwrap().contains("--synthesis pio"));
     }
 
     #[test]
     fn the_crystal_correction_fits() {
-        let p = plan(87.9e6, 12e6, 100e3, T, 2).unwrap();
+        let p = plan(87.6e6, 12e6, 100e3, T, 2).unwrap();
         // The largest division: the smallest steps (333 kHz).
         assert_eq!((p.post_div1, p.post_div2, p.gpout_div), (6, 3, 1), "{p:?}");
         for ppm in [-MAX_CLOCK_ERROR_PPM, 0.0, MAX_CLOCK_ERROR_PPM] {
@@ -234,7 +289,7 @@ mod tests {
             // The carrier lands where it should with the crystal off.
             let fref = 6e6 * (1.0 + ppm * 1e-6);
             let f = fref * (p.base as f64 + 1.0 + c / ONE) / p.division() as f64;
-            assert!((f - 87.9e6).abs() < 0.01, "{ppm}: {f}");
+            assert!((f - 87.6e6).abs() < 0.01, "{ppm}: {f}");
         }
     }
 

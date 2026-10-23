@@ -219,6 +219,9 @@ impl Backend for Pico {
             plan.max_offset_hz() / 1e3
         );
         println!("Sampling: {:.1} S/s ({} updates per sample)", plan.sample_rate(), plan.sample_updates);
+        if let Some(w) = plan.spur_warning(cfg.max_offset_hz) {
+            println!("Warning:  {w}");
+        }
         Ok(())
     }
 }

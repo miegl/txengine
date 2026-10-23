@@ -33,6 +33,7 @@ use super::gpio::{Drive, Gpio, PinRegs, gpclk_for_pin};
 use super::regs::{self, dmac::*, lli};
 use super::ticks::DmaTick;
 use crate::MAX_CLOCK_ERROR_PPM;
+use crate::boundary;
 use crate::error::{HalError, Result};
 use crate::guardian::Guardian;
 use crate::mem::pinned::PinnedMemory;
@@ -121,9 +122,18 @@ pub struct ClockPlan {
     /// Largest offset that keeps the fraction inside [0, 2^24) under any
     /// crystal error correction up to ±[`MAX_CLOCK_ERROR_PPM`].
     pub max_offset_hz: f64,
+    /// How far the carrier is from where the PLL puts a spur next to it
+    /// ([`boundary`]).
+    pub clearance_hz: f64,
 }
 
 impl ClockPlan {
+    /// A warning if the carrier is too close to a spur of the PLL for
+    /// quiet passages of a modulation up to ±`max_offset_hz`.
+    pub fn spur_warning(&self, max_offset_hz: f64) -> Option<String> {
+        boundary::warning(self.clearance_hz, self.carrier_hz, max_offset_hz, self.pll.name())
+    }
+
     /// Feedback fraction at the carrier centre and fraction units per Hz
     /// when the crystal runs `ppm` fast: the whole feedback divider shrinks
     /// by `1 + ppm · 10⁻⁶`, so that the VCO keeps its nominal frequency.
@@ -153,11 +163,13 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
     };
     // Room for correcting the crystal error at run time.
     let reserve_hz = carrier_hz * MAX_CLOCK_ERROR_PPM * 1e-6;
-    // The kernel runs pll_audio_core at 1536 MHz; stay in that region.
+    let target = boundary::target_hz(carrier_hz, max_offset_hz);
+    // The kernel runs pll_audio_core at 1536 MHz; stay in that region
+    // unless only a VCO outside keeps the carrier clear of the PLL's spurs.
     const PREFERRED_VCO: f64 = 1536e6;
     let windows = [(1000e6, 1600e6), (800e6, 2400e6)];
-    for (vmin, vmax) in windows {
-        let mut best: Option<(f64, ClockPlan)> = None;
+    let mut best: Option<((f64, bool, f64), ClockPlan)> = None;
+    for (window, (vmin, vmax)) in windows.into_iter().enumerate() {
         for gp_div in 1..=16u32 {
             for div1 in 1..=7u32 {
                 for div2 in 1..=div1 {
@@ -177,17 +189,22 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
                     if margin < 0.01 {
                         continue;
                     }
-                    // Prefer: no GPCLK division, VCO near the known-good
-                    // rate, fraction far from integer boundaries.
+                    // Prefer: clear of the PLL's spurs, then a VCO in the
+                    // first window, no GPCLK division, a VCO near the
+                    // known-good rate, the fraction far from whole numbers.
                     let score =
                         (gp_div - 1) as f64 * 10.0 + ((vco - PREFERRED_VCO) / PREFERRED_VCO).abs() * 5.0 - margin;
-                    if best.as_ref().is_none_or(|(s, _)| score < *s) {
+                    // Its spurs: the VCO at a half multiple of the reference.
+                    let spurs = boundary::Spurs { vco: &[ref_hz / 2.0], carrier: &[] };
+                    let clearance_hz = spurs.clearance_hz(carrier_hz, n as f64);
+                    let rank = (boundary::rank(clearance_hz, target), window == 0, -score);
+                    if best.as_ref().is_none_or(|(r, _)| rank > *r) {
                         let frac_center = (frac * FRAC_ONE).round();
                         let frac_per_hz = n as f64 / ref_hz * FRAC_ONE;
                         let achieved = (int + frac_center / FRAC_ONE) * ref_hz / n as f64;
                         let max_off = (frac_center.min(FRAC_ONE - 1.0 - frac_center)) / frac_per_hz - reserve_hz;
                         best = Some((
-                            score,
+                            rank,
                             ClockPlan {
                                 pll: pll.id(),
                                 gpclk,
@@ -204,15 +221,16 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
                                 frac_per_hz,
                                 carrier_hz: achieved,
                                 max_offset_hz: max_off,
+                                clearance_hz,
                             },
                         ));
                     }
                 }
             }
         }
-        if let Some((_, plan)) = best {
-            return Ok(plan);
-        }
+    }
+    if let Some((_, plan)) = best {
+        return Ok(plan);
     }
     Err(HalError::Config(format!("no PLL configuration can produce {:.4} MHz", carrier_hz / 1e6)))
 }
@@ -345,6 +363,9 @@ impl Rp1FmTransmitter {
         let clocks_clr = rp1.block_clr(regs::CLOCKS_MAIN);
         let pll = Pll::new(&clocks, cfg.pll.id(), xosc);
         let plan = plan_clocks(cfg.pll, gpclk, cfg.carrier_hz, pll.ref_hz(), cfg.max_offset_hz)?;
+        if let Some(w) = plan.spur_warning(cfg.max_offset_hz) {
+            warn!("{w}");
+        }
         let gp = ClockGen::new(&clocks, &clocks_set, &clocks_clr, gpclk);
         let gpio = Gpio::new(rp1.block(regs::IO_BANK0), rp1.block(regs::PADS_BANK0));
         let dmac = Dmac::new(rp1.block(regs::DMA));
@@ -809,6 +830,22 @@ impl Drop for Rp1FmTransmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every FM carrier that can be modulated (not within about 150 kHz of
+    /// 100 MHz, a multiple of the reference) is clear of the PLL's spurs.
+    #[test]
+    fn fm_carriers_clear_of_the_spurs() {
+        for k in 8750..=10800 {
+            let f = k as f64 * 10e3;
+            match plan_clocks(Rp1Pll::Audio, 0, f, 50e6, 100e3) {
+                Ok(p) => assert!(p.clearance_hz >= 12.5e3 && p.spur_warning(100e3).is_none(), "{f}: {p:?}"),
+                Err(e) => assert!((f - 100e6).abs() < 150e3, "{f}: {e}"),
+            }
+        }
+        // Division 10 would put the VCO at 29.5 x 50 MHz.
+        let p = plan_clocks(Rp1Pll::Audio, 0, 147.5e6, 50e6, 10e3).unwrap();
+        assert!(p.n != 10 && p.clearance_hz > 100e3, "{p:?}");
+    }
 
     #[test]
     fn plans_leave_room_to_correct_the_crystal() {

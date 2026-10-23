@@ -2,6 +2,7 @@
 
 pub mod am;
 pub mod bcm;
+pub mod boundary;
 pub mod cpufreq;
 pub mod error;
 pub mod guardian;

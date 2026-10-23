@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use log::{debug, info};
+use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 use txengine_pico_protocol::{Chip, Config, Retune, State};
 
@@ -152,6 +152,9 @@ impl PicoFmTransmitter {
                     )));
                 }
                 let plan = plan_for(cfg, pico.info.xosc_hz as f64, pico.info.max_update_hz as f64)?;
+                if let Some(w) = plan.spur_warning(cfg.max_offset_hz) {
+                    warn!("{w}");
+                }
                 let phase = cfg.phase.unwrap_or(Config::PHASE);
                 pico.configure(&plan.config(cfg.gpio, cfg.drive_ma, cfg.interpolate, phase, 0.0))?;
                 let fs = plan.sample_rate();
