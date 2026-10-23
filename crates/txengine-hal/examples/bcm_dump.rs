@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if last_measure.elapsed() > Duration::from_secs(1) {
                 last_measure = Instant::now();
-                let hz = c.measure(TCNT_GP0, plat.osc_hz, 0.001).unwrap_or(f64::NAN);
+                let hz = c.measure(tcnt_gp(0).expect("GPCLK0 is counted"), plat.osc_hz, 0.001).unwrap_or(f64::NAN);
                 println!("{:8.3} s  GP0 {:.3} MHz", t0.elapsed().as_secs_f64(), hz / 1e6);
             }
             std::thread::sleep(Duration::from_millis(1));

@@ -64,10 +64,17 @@ impl Cprman {
     }
 
     /// Program and start a clock generator: source, integer/fractional
-    /// divider and MASH order. Glitch free: stops it first.
+    /// divider and MASH order (a generator without a MASH control, see
+    /// [`has_mash`], only with a whole divider). Glitch free: stops it
+    /// first.
     pub fn clock_start(&self, ctl: usize, src: u32, divi: u32, divf: u32, mash: u32) -> Result<()> {
         if !(MIN_DIVI..=0xfff).contains(&divi) || divf > 0xfff || mash > 3 {
             return Err(HalError::Config(format!("invalid clock divider {divi}.{divf} / MASH {mash}")));
+        }
+        if !has_mash(ctl) && divf != 0 {
+            return Err(HalError::Config(format!(
+                "clock generator {ctl:#x} divides by whole numbers only (asked {divi}.{divf})"
+            )));
         }
         self.clock_stop(ctl)?;
         self.write(div(ctl), (divi << DIVI_SHIFT) | divf);
@@ -76,7 +83,8 @@ impl Cprman {
         self.write(ctl, base | ENAB);
         wait_until(TIMEOUT, "clock generator start", || self.read(ctl) & BUSY != 0)?;
         let (rc, rd) = (self.read(ctl) & 0x7ff, self.read(div(ctl)) & 0xff_ffff);
-        if rc & (SRC_MASK | MASH_MASK | ENAB) != base | ENAB || rd != (divi << DIVI_SHIFT) | divf {
+        let checked = SRC_MASK | ENAB | if has_mash(ctl) { MASH_MASK } else { 0 };
+        if rc & checked != (base | ENAB) & checked || rd != (divi << DIVI_SHIFT) | divf {
             return Err(HalError::Hardware(format!("clock generator {ctl:#x}: read-back ctl {rc:#x} div {rd:#x}")));
         }
         Ok(())

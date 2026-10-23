@@ -333,6 +333,12 @@ fn check_carrier(carrier: f64) -> Result<()> {
 /// Plan clock-divider modulation from the PER channel of `pll` (unchanged).
 pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Result<BcmPlan> {
     check_carrier(carrier)?;
+    if !cm::has_mash(cm::gp(gpclk)) {
+        return Err(HalError::Config(format!(
+            "--pll clkdiv needs a fractional clock divider: GPCLK{gpclk} divides by whole numbers only; use GPCLK0 \
+             (GPIO 4, 20) or GPCLK1 (GPIO 5, 21)"
+        )));
+    }
     let per = pll.per_divider().filter(|_| pll.is_powered() && pll.is_locked()).ok_or_else(|| {
         HalError::Hardware(format!("{} is not running; cannot use it as the clock divider source", pll.id.name()))
     })?;
@@ -701,8 +707,8 @@ pub struct BcmFmTransmitter {
     pll: Option<Pll>,
     /// The PLL as configured for transmission (checked for interference).
     pll_good: Option<PllConfig>,
-    /// Counts the carrier in the background.
-    carrier_watch: ClockWatch,
+    /// Counts the carrier in the background (GPCLK2 has no counter input).
+    carrier_watch: Option<ClockWatch>,
     /// Ring length in samples (a multiple of [`BLOCK`]).
     n: usize,
     layout: Layout,
@@ -1002,7 +1008,7 @@ impl BcmFmTransmitter {
             guardian: None,
             pll,
             pll_good: None,
-            carrier_watch: ClockWatch::new(cm::TCNT_GP0 + plan.gpclk as u32, bcm.osc_hz, plan.carrier_hz),
+            carrier_watch: cm::tcnt_gp(plan.gpclk).map(|mux| ClockWatch::new(mux, bcm.osc_hz, plan.carrier_hz)),
             n,
             layout,
             target_bus,
@@ -1213,7 +1219,11 @@ impl BcmFmTransmitter {
         }
         // Verify the generator output with the frequency counter (±1 kHz:
         // 10 ms gate time, plus the modulation-free carrier).
-        match self.cm.measure(cm::TCNT_GP0 + p.gpclk as u32, self.osc_hz, 0.01) {
+        let Some(mux) = cm::tcnt_gp(p.gpclk) else {
+            debug!("GPCLK{} has no frequency counter input: the carrier is not verified", p.gpclk);
+            return Ok(());
+        };
+        match self.cm.measure(mux, self.osc_hz, 0.01) {
             Ok(hz) if (hz - p.carrier_hz).abs() < 5_000.0 + p.carrier_hz * 2e-4 => {
                 debug!("GPCLK{} measured {:.4} MHz", p.gpclk, hz / 1e6)
             }
@@ -1428,7 +1438,7 @@ impl BcmFmTransmitter {
         // stereo pilot alone), so the registers are only read once the
         // frequency is wrong: another user of the counter can cause that too.
         if self.pll_good.is_some() {
-            let wrong_hz = self.carrier_watch.check(&self.cm);
+            let wrong_hz = self.carrier_watch.as_mut().and_then(|w| w.check(&self.cm));
             if let (Some(p), Some(good)) = (&self.pll, &self.pll_good)
                 && (!p.is_locked() || (wrong_hz.is_some() && !p.matches(good)))
             {
@@ -1802,6 +1812,14 @@ mod tests {
         assert!(p.gp_div >= MIN_DIVI, "{p:?}");
         let e = plan_a(446e6, 10e3).unwrap_err().to_string();
         assert!(e.contains("--harmonic 3"), "{e}");
+    }
+
+    /// GPCLK2 divides by whole numbers only and has no counter input.
+    #[test]
+    fn gpclk2_capabilities() {
+        assert!(cm::has_mash(cm::gp(0)) && cm::has_mash(cm::gp(1)) && !cm::has_mash(cm::gp(2)));
+        assert!(cm::has_mash(cm::PWM) && cm::has_mash(cm::PCM));
+        assert_eq!((cm::tcnt_gp(0), cm::tcnt_gp(1), cm::tcnt_gp(2)), (Some(20), Some(21), None));
     }
 
     #[test]

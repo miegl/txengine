@@ -47,6 +47,13 @@ pub mod cm {
     pub const fn gp(n: usize) -> usize {
         GP0 + 8 * n
     }
+    /// Whether the clock generator at `ctl` has a MASH control. GPCLK2 has
+    /// none: its MASH field takes no writes and reads 1 while it runs
+    /// (Raspberry Pi 2); txengine divides it by whole numbers only, which
+    /// it does exactly (its fractional division was not verified).
+    pub const fn has_mash(ctl: usize) -> bool {
+        ctl != gp(2)
+    }
     /// Divider register of the clock whose control register is at `ctl`.
     pub const fn div(ctl: usize) -> usize {
         ctl + 4
@@ -76,7 +83,16 @@ pub mod cm {
     pub const TCNTCTL: usize = 0x0c0;
     pub const TCNTCNT: usize = 0x0c4;
     pub const TCNT_SRC1_SHIFT: u32 = 12;
-    pub const TCNT_GP0: u32 = 20;
+    /// The frequency counter's input for GPCLK`n`, if it has one. GPCLK2
+    /// has none: input 22 counts another clock (163.68 MHz on a Raspberry
+    /// Pi 2), whatever GPCLK2 runs at.
+    pub const fn tcnt_gp(n: usize) -> Option<u32> {
+        match n {
+            0 => Some(20),
+            1 => Some(21),
+            _ => None,
+        }
+    }
     pub const TCNT_PWM: u32 = 24;
 
     // PLLs.

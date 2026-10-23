@@ -283,7 +283,9 @@ may already be in use: on the Pi 2 GPCLK1 clocks the Ethernet and USB chip
 (25 MHz), on the Zero 2 W GPCLK2 the WiFi chip's sleep clock (32.768 kHz).
 txengine refuses a clock generator that is already running (`txengine
 probe` shows it), so use GPCLK0 there; `--force-gpclk` takes it over until
-txengine stops, which cuts that connection meanwhile.
+txengine stops, which cuts that connection meanwhile. Their GPCLK2 divides
+by whole numbers only: `--pll clkdiv` needs GPCLK0 or GPCLK1 (see [Hardware
+notes](#raspberry-pi-24-and-zero-2-w)).
 
 `txengine devices` lists the transmitters found, and `txengine probe -f 87.6`
 (or `--mode nfm -f 446.00625`, `--mode am -f 999k`) shows what will be used,
@@ -810,6 +812,15 @@ txengine renders the samples on the computer; the firmware puts them out.
   fundamental was 8 dB short at 400 MHz and 29 dB short at 446 MHz, a
   Pi 2's 14 dB at 446 MHz. txengine plans carriers up to 400 MHz and
   transmits higher ones on a harmonic (`--harmonic 3`).
+* **GPCLK2 has no MASH control and no frequency counter input** (Pi 2):
+  its MASH field takes no writes and reads 1 while it runs, and the
+  counter's input for it (22, as for GPCLK0 and 1 at 20 and 21) counts
+  another clock, 163.68 MHz, whatever GPCLK2 does. txengine divides it by
+  whole numbers only (`--pll clkdiv` is refused there) and cannot count its
+  carrier, so on GPIO 6 the start-up check is skipped and a PLL changed
+  behind its back is noticed by the lock bit alone. On a Pi 2, GPIO 6
+  carried the carrier and the modulation as GPIO 4 does (the same crystal
+  offset, the 1 kHz tone within 0.02 %).
 * **A clock divider of 1 divides by 4096:** set to an integer divider of
   1, GPCLK0 and the PWM clock put out a 4096th of their input, from any
   source and with or without MASH (counted by the frequency counter on a

@@ -328,7 +328,10 @@ follow its width as the fundamental does.
 * The carrier is a PLL (A, C or D) → PER divider → GPCLK → GPIO, or a GPCLK
   fractional divider from PLLD (`clkdiv`). Clock generators divide by at
   least 2 (`cprman::MIN_DIVI`): set to 1, GPCLK0 and the PWM clock divide
-  by 4096, from any source (measured). The planner scans every clock
+  by 4096, from any source (measured). GPCLK2 has no MASH control and no
+  frequency counter input (`cm::has_mash`, `cm::tcnt_gp`): it divides by
+  whole numbers only (no `clkdiv`), and its carrier is neither verified at
+  start nor watched. The planner scans every clock
   generator to find out who else uses each PLL (`Pll::users`) and refuses
   changes of more than 3 % (or any change of a PER divider that others
   use): PLLC clocks the VPU (and through it the SD card host, SPI, I2C and
