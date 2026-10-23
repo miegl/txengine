@@ -50,10 +50,11 @@ Commands are grouped by transmission mode: `txengine wfm tx` transmits
 wide-band FM, `txengine wfm render` renders it to a file and
 `txengine wfm analyze` measures a multiplex recording; `txengine nfm tx`
 and `txengine nfm render` do the same for narrow-band FM, `txengine am tx`
-and `txengine am render` for AM. `txengine probe`, `txengine devices` and
-`txengine tone` need no mode. Every command lists its options with
-`--help`. Frequencies are in MHz, or carry a unit: `-f 87.6`, `-f 999k`,
-`-f 6.1M`.
+and `txengine am render` for AM. Each mode's `probe` shows the hardware and
+its plan for the mode without transmitting (`txengine am probe -f 999k`),
+and the FM modes' `tone` transmits raw test tones; `txengine devices` needs
+no mode. Every command lists its options with `--help`. Frequencies are in
+MHz, or carry a unit: `-f 87.6`, `-f 999k`, `-f 6.1M`.
 
 `-d`/`--device` picks the transmitter: `pi` (the Raspberry Pi txengine runs
 on), `pico` (the only Pico connected), `pico:SERIAL` or `pico:PORT` (its USB
@@ -153,7 +154,7 @@ channel is usually clear.
 sudo txengine am tx -f 999k -a music.flac                      # medium wave
 sudo txengine am tx -f 6.1M -a talk.mp3 --bandwidth 10000      # short wave (49 m, Pi 5), 10 kHz audio
 sudo txengine am tx -f 999k --tone 1000 --gain 6               # 1 kHz at the full depth (90 %)
-sudo txengine probe --mode am -f 999k                          # the clock plan
+sudo txengine am probe -f 999k                                 # the clock plan
 txengine am tx -d pico -f 1503k -a music.flac                  # through a Pico on USB
 txengine am render -a music.flac --duration 10 -o envelope.wav # the envelope as WAV
 ```
@@ -212,11 +213,11 @@ the crystal through the corrections.
 
 The system clock has to be synchronised by an NTP daemon (chrony,
 systemd-timesyncd, ...); until it is, txengine transmits uncorrected and
-says so (`txengine probe` shows the state). The reference is the frequency
-the daemon has measured for the system clock, so the result is as good as
-that. With chrony (polling a LAN server every 16–64 s) the carriers, pilots
-and playback speeds of the Raspberry Pis came within 0.4 ppm (35 Hz at
-87.6 MHz); a Pi 4 whose chrony polls internet servers came within 0.1 and
+says so (`txengine wfm probe` shows the state). The reference is the
+frequency the daemon has measured for the system clock, so the result is as
+good as that. With chrony (polling a LAN server every 16–64 s) the carriers,
+pilots and playback speeds of the Raspberry Pis came within 0.4 ppm (35 Hz
+at 87.6 MHz); a Pi 4 whose chrony polls internet servers came within 0.1 and
 1.0 ppm in two measurements, the latter while chrony removed a time offset
 of 0.3 ms by running the clock slightly fast. With systemd-timesyncd, which
 polls only every 34 minutes, the error can reach a few ppm (the Picos below,
@@ -230,13 +231,12 @@ crystal error +6.73 ppm (measured against the system clock): correcting the carr
 ```
 
 Without network time, give the error (`--ppm 6.44`, positive when the
-crystal runs fast; every transmission, and `txengine tone`, prints the
+crystal runs fast; every transmission, and `txengine wfm tone`, prints the
 measured value on a board that has NTP); txengine keeps measuring and
-reports it, but
-applies the given value. `--ppm off` turns the correction off (no
-measurement either). For GPS accuracy, let chrony discipline the system
-clock from a GPS receiver's PPS signal (gpsd + chrony's `refclock`); txengine
-then measures against GPS time.
+reports it, but applies the given value. `--ppm off` turns the correction
+off (no measurement either). For GPS accuracy, let chrony discipline the
+system clock from a GPS receiver's PPS signal (gpsd + chrony's `refclock`);
+txengine then measures against GPS time.
 
 ### Testing without hardware
 
@@ -269,9 +269,10 @@ for the deviation (narrow-band FM reaches further down) and for correcting
 the crystal; a few spots inside them cannot be modulated (see [Hardware
 notes](#hardware-notes)), and higher carriers go out on a harmonic
 (`--harmonic`). The Pi 4's FM and NFM ranges count on its firmware leaving
-PLLC to the GPU, as it did on the board tested; `txengine probe` shows the
-plans for a board. The AM ranges are at the default 100 kS/s; `txengine
-probe --mode am` shows the limit for another sample rate.
+PLLC to the GPU, as it did on the board tested; `txengine wfm probe` and
+`txengine nfm probe` show the plans for a board. The AM ranges are at the
+default 100 kS/s; `txengine am probe` shows the limit for another sample
+rate.
 
 ### Outputs
 
@@ -292,9 +293,9 @@ by whole numbers only: `--pll clkdiv` needs GPCLK0 or GPCLK1, and on the
 Pi 4 is not available at all (see [Hardware
 notes](#raspberry-pi-24-and-zero-2-w)).
 
-`txengine devices` lists the transmitters found, and `txengine probe -f 87.6`
-(or `--mode nfm -f 446.00625`, `--mode am -f 999k`) shows what will be used,
-without transmitting.
+`txengine devices` lists the transmitters found, and
+`txengine wfm probe -f 87.6` (or `txengine nfm probe -f 446.00625`,
+`txengine am probe -f 999k`) shows what will be used, without transmitting.
 
 FM and NFM are a square wave at the carrier: its odd harmonics are strong,
 so put a low-pass at the carrier between the pin and anything that can
@@ -333,7 +334,7 @@ PWM registers directly. Kernels built with `CONFIG_IO_STRICT_DEVMEM` (NixOS,
 for example; not Raspberry Pi OS) deny `/dev/mem` access to registers that a
 kernel driver owns, even to root. On those kernels add `iomem=relaxed` to the
 kernel command line (on NixOS: `boot.kernelParams = [ "iomem=relaxed" ];`).
-`txengine probe` reports when it is missing.
+`txengine wfm probe` reports when it is missing.
 
 `txengine -V` prints the version: `git describe --tags --always --dirty` of
 the source tree it was built from, that is the latest tag, the number of
@@ -363,7 +364,7 @@ The firmware uses the Pico SDK's USB IDs (2e8a:000a and 2e8a:0009), to which
 picotool's udev rules already give the logged-in user access: txengine needs
 no root for a Pico.
 
-The firmware's version has the same form as txengine's. `txengine probe`
+The firmware's version has the same form as txengine's. `txengine wfm probe`
 shows it, and `picotool info` reads it from the board even in its
 bootloader. A txengine refuses firmware that speaks another version of the
 USB protocol and asks for an update.
@@ -430,8 +431,8 @@ Mini, detected synchronously.
   others (−31 dBFS), read 68–69 dB mono and 50–53 dB stereo in two rounds
   and 74 / 59 dB an hour later, when its phase noise at 10 kHz was 7 dB
   lower too: most of the noise comes in with the reception.
-* **Modulation THD**: `txengine tone --tones 10000 --deviation 75000`, the
-  harmonics up to 100 kHz in the demodulated signal, without any of the
+* **Modulation THD**: `txengine wfm tone --tones 10000 --deviation 75000`,
+  the harmonics up to 100 kHz in the demodulated signal, without any of the
   programme's processing.
 * **Lines**: unmodulated carriers, 82–112 MHz at 20 MS/s, kept only where a
   line is at least 10 dB above the spectrum with the transmitter off, at the
@@ -899,7 +900,7 @@ txengine renders the samples on the computer; the firmware puts them out.
   peripheral register at an address ≡ 4 (mod 8) returns the register below
   it. All register accesses are explicit 32-bit integer loads and stores.
 * A weak power supply throttles the CPU; txengine reports the firmware's
-  under-voltage and throttling flags at start-up (`txengine probe` shows
+  under-voltage and throttling flags at start-up (`txengine wfm probe` shows
   them too).
 
 ### Pico and Pico 2
@@ -969,10 +970,11 @@ fault rather than a gap.
 
 **Safety.** If txengine dies, the firmware switches the carrier off after
 one second without samples. A watchdog (one second) reboots a hung
-firmware, which also stops the carrier; `txengine probe` then shows where
-it had stopped. Panics and hard faults, on either core, reboot into the USB
-bootloader. Over USB a status request takes 0.1–0.15 ms, and a request the
-host gives up does not block the device (txengine repeats it once).
+firmware, which also stops the carrier; `txengine wfm probe` then shows
+where it had stopped. Panics and hard faults, on either core, reboot into
+the USB bootloader. Over USB a status request takes 0.1–0.15 ms, and a
+request the host gives up does not block the device (txengine repeats it
+once).
 
 ## Documentation
 

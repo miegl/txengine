@@ -5,7 +5,7 @@ use txengine_am::envelope::{MAX_BANDWIDTH, MIN_BANDWIDTH};
 use txengine_am::{AmConfig, AmModulator};
 use txengine_core::{Modulator, SinkInfo};
 
-use crate::cli::{Render, Tx};
+use crate::cli::{ProbeArgs, Render, Tx};
 use crate::hw::Output;
 use crate::mode::Mode;
 use crate::programme::{self, ProgrammeArgs};
@@ -18,6 +18,8 @@ pub enum Command {
     Tx(Tx<AmArgs>),
     /// Render the signal to a file instead of transmitting (for testing).
     Render(Render<AmArgs>),
+    /// Show the detected hardware and its plan for AM, without transmitting.
+    Probe(ProbeArgs),
 }
 
 /// The broadcast bands (Hz): long wave, medium wave (ITU regions 1 and 3,

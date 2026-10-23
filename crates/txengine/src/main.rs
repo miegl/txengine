@@ -14,10 +14,8 @@ mod rt;
 mod sinks;
 mod wfm;
 
-use std::time::Duration;
-
 use clap::Parser;
-use log::{error, info};
+use log::error;
 
 use cli::{Cli, Command};
 
@@ -35,86 +33,10 @@ fn main() {
         Command::Wfm(c) => wfm::run(c),
         Command::Nfm(c) => nfm::run(c),
         Command::Am(c) => am::run(c),
-        Command::Probe(a) => hw::select(&a.hw).and_then(|d| d.probe(&a.hw, output(a.mode))),
         Command::Devices => hw::list_devices(),
-        Command::Tone(a) => tone(a),
     };
     if let Err(e) = result {
         error!("{e:#}");
         std::process::exit(1);
     }
-}
-
-/// What a mode needs from the transmitter, for commands that only name it.
-fn output(mode: cli::ModeName) -> hw::Output {
-    match mode {
-        cli::ModeName::Wfm => hw::Output::Frequency { max_offset_hz: wfm::MAX_OFFSET_HZ },
-        cli::ModeName::Nfm => hw::Output::Frequency { max_offset_hz: nfm::MAX_OFFSET_HZ },
-        cli::ModeName::Am => hw::Output::Amplitude,
-    }
-}
-
-fn tone(a: &cli::ToneArgs) -> anyhow::Result<()> {
-    if a.tones.iter().any(|&f| !(0.0..=120_000.0).contains(&f)) {
-        anyhow::bail!("--tones must be within 0-120000 Hz");
-    }
-    let device = hw::select(&a.hw)?;
-    let _lock = rt::instance_lock(&device.lock_name()?)?;
-    rt::install_signal_handlers();
-    // Planned as for the mode, so that the measurement applies to it.
-    let out = output(a.mode);
-    let hw::Output::Frequency { max_offset_hz } = out else {
-        anyhow::bail!("tone transmits frequency modulation: use --mode wfm or nfm");
-    };
-    if a.deviation * a.tones.len() as f64 > max_offset_hz {
-        anyhow::bail!("the tones together may deviate at most {max_offset_hz:.0} Hz in this mode");
-    }
-    let mut sink = device.open(&a.hw, out)?;
-    let fs = sink.info().sample_rate;
-    if a.tones.iter().any(|&f| f >= fs / 2.0) {
-        anyhow::bail!("tones must be below half the sample rate ({:.0} Hz)", fs / 2.0);
-    }
-    info!("tones {:?} Hz at ±{:.0} Hz each, sample rate {:.3} kS/s", a.tones, a.deviation, fs / 1e3);
-    // Only the carrier is corrected: the tones are raw test signals.
-    let mut clock = clock::ClockDiscipline::new(a.hw.ppm, Box::new(clock::SystemClock::default()));
-    clock.attach(sink.as_mut())?;
-    rt::make_realtime(30);
-    let table = txengine_dsp::SineTable::new();
-    let mut osc: Vec<_> = a.tones.iter().map(|&f| txengine_dsp::PhaseAccumulator::new(f, fs)).collect();
-    let dev = a.deviation as f32;
-    let mut buf = vec![0f32; 4096];
-    let mut fill = |buf: &mut [f32]| {
-        for x in buf.iter_mut() {
-            *x = osc
-                .iter_mut()
-                .map(|o| {
-                    let v = table.sin(o.harmonic_frac(1));
-                    o.advance();
-                    dev * v
-                })
-                .sum();
-        }
-    };
-    let p = sink.poll()?;
-    let k = p.writable.min(buf.len());
-    fill(&mut buf[..k]);
-    sink.write(&buf[..k])?;
-    sink.start()?;
-    let start = std::time::Instant::now();
-    let result = (|| -> anyhow::Result<u64> {
-        while !rt::stop_requested() && start.elapsed().as_secs_f64() < a.duration {
-            let p = clock.poll(sink.as_mut())?;
-            if p.writable >= 1024 {
-                let k = p.writable.min(buf.len());
-                fill(&mut buf[..k]);
-                sink.write(&buf[..k])?;
-            } else {
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        }
-        Ok(sink.poll()?.underruns)
-    })();
-    sink.stop().ok();
-    info!("stopped after {:.1} s, {} underruns; {}", start.elapsed().as_secs_f64(), result?, clock.describe());
-    Ok(())
 }

@@ -3,7 +3,8 @@
 //!
 //! Every mode transmits with [`Tx`] and renders to a file with [`Render`],
 //! which add the options shared by all modes (hardware, control, file
-//! output) to the mode's own.
+//! output) to the mode's own, and shows its plan with [`ProbeArgs`]; the
+//! FM modes also transmit raw test tones with [`ToneArgs`].
 
 use std::path::PathBuf;
 
@@ -45,11 +46,6 @@ pub enum Command {
     /// short wave.
     #[command(subcommand)]
     Am(Box<am::Command>),
-    /// Show the detected hardware and the frequency plan, without transmitting.
-    Probe(ProbeArgs),
-    /// Transmit test tones as raw frequency deviation (no audio processing,
-    /// no compensation), e.g. to measure the modulation response.
-    Tone(ToneArgs),
     /// List the transmitters found (for --device).
     Devices,
 }
@@ -267,31 +263,18 @@ pub struct OutputArgs {
     pub start_time: Option<f64>,
 }
 
-/// A transmission mode, for commands that need no mode's options.
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum ModeName {
-    Wfm,
-    Nfm,
-    Am,
-}
-
+/// `<mode> probe`: the hardware and its plan for the mode.
 #[derive(Debug, Clone, Args)]
 pub struct ProbeArgs {
     #[command(flatten)]
     pub hw: HardwareArgs,
-    /// The transmission mode to plan for.
-    #[arg(long, value_enum, default_value = "wfm")]
-    pub mode: ModeName,
 }
 
+/// `<mode> tone`: raw test tones from the transmitter planned for the mode.
 #[derive(Debug, Clone, Args)]
 pub struct ToneArgs {
     #[command(flatten)]
     pub hw: HardwareArgs,
-    /// The transmission mode to plan the transmitter for (wfm or nfm), so
-    /// that its plan applies to the measurement.
-    #[arg(long, value_enum, default_value = "wfm")]
-    pub mode: ModeName,
     /// Tone frequencies in Hz (comma separated), each at --deviation.
     #[arg(long, value_delimiter = ',', default_value = "1000", value_name = "HZ")]
     pub tones: Vec<f64>,

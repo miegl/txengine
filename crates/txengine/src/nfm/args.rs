@@ -7,7 +7,7 @@ use txengine_nfm::baseband::SUBAUDIO_SHARE;
 use txengine_nfm::{DcsCode, NfmConfig, NfmModulator, Subaudio};
 
 use super::MAX_OFFSET_HZ;
-use crate::cli::{Render, Tx};
+use crate::cli::{ProbeArgs, Render, ToneArgs, Tx};
 use crate::hw::Output;
 use crate::mode::Mode;
 use crate::programme::{self, ProgrammeArgs};
@@ -20,6 +20,12 @@ pub enum Command {
     Tx(Tx<NfmArgs>),
     /// Render the signal to a file instead of transmitting (for testing).
     Render(Render<NfmArgs>),
+    /// Show the detected hardware and its plan for narrow-band FM, without
+    /// transmitting.
+    Probe(ProbeArgs),
+    /// Transmit test tones as raw frequency deviation (no audio processing,
+    /// no compensation) from the transmitter planned for narrow-band FM.
+    Tone(ToneArgs),
 }
 
 // Programme and modulation options of `nfm tx` and `nfm render`.

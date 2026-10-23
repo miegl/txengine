@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 
-use crate::cli::{Render, Tx};
+use crate::cli::{ProbeArgs, Render, ToneArgs, Tx};
 use crate::programme::ProgrammeArgs;
 
 // Parsed once at start-up: the size of the variants does not matter.
@@ -17,6 +17,13 @@ pub enum Command {
     Render(Render<WfmArgs>),
     /// Measure an FM multiplex recording (WAV): levels, RDS decode.
     Analyze(AnalyzeArgs),
+    /// Show the detected hardware and its plan for wide-band FM, without
+    /// transmitting.
+    Probe(ProbeArgs),
+    /// Transmit test tones as raw frequency deviation (no audio processing,
+    /// no compensation) from the transmitter planned for wide-band FM, e.g.
+    /// to measure the modulation response.
+    Tone(ToneArgs),
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]

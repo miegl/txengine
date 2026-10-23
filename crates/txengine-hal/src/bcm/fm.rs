@@ -407,14 +407,14 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
 /// Modulation response of PLLA and PLLC on the BCM2836 (Raspberry Pi 2
 /// v1.1) beyond the zero-order hold, `(Hz, dB)`: retuned while running
 /// (feedback pre-divider on), with txengine's loop gain [`MODULATION_KI`].
-/// Measured over the air on PLLA at 2277.6 MHz (`txengine tone`, 13 probe
-/// tones of 2.5 and 5 kHz, USRP B210; three runs agree within ±0.01 dB).
-/// The loop lifts high modulation frequencies slightly, and delays them by
-/// at most 0.25° at 67 kHz. (With the firmware's KI 2 the lift was 0.40 dB
-/// at 38 kHz and 0.57 dB at 67 kHz, with 6° of phase lag.) PLLA from 1927
-/// to 2365 MHz and PLLC at 1927 MHz measure the same within 0.02 dB in
-/// one session; between sessions the whole response moved by up to
-/// 0.15 dB at 67 kHz (0.05 dB at 38 kHz), on both boards alike.
+/// Measured over the air on PLLA at 2277.6 MHz (`txengine wfm tone`, 13
+/// probe tones of 2.5 and 5 kHz, USRP B210; three runs agree within
+/// ±0.01 dB). The loop lifts high modulation frequencies slightly, and
+/// delays them by at most 0.25° at 67 kHz. (With the firmware's KI 2 the
+/// lift was 0.40 dB at 38 kHz and 0.57 dB at 67 kHz, with 6° of phase lag.)
+/// PLLA from 1927 to 2365 MHz and PLLC at 1927 MHz measure the same within
+/// 0.02 dB in one session; between sessions the whole response moved by up
+/// to 0.15 dB at 67 kHz (0.05 dB at 38 kHz), on both boards alike.
 const BCM2836_PLL_RESPONSE_DB: &[(f64, f64)] = &[
     (0.0, 0.0),
     (10e3, 0.005),

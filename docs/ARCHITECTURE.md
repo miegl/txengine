@@ -33,7 +33,7 @@ transmission mode or a hardware platform means implementing one side.
 | `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input; the programme the modes share (`Programme`, `AudioFeed`). |
 | `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backends and the RP1 (Pi 5) backends (FM and AM each), amplitude by pulse width (`am`), the shutdown guardian; usbfs (USB without libusb) and the Pico backend (planning, `RfSink`). |
 | `txengine-pico-protocol` | The USB protocol between txengine and the Pico firmware, and the arithmetic both sides share: the sigma-delta modulator of FM, the pulse quantiser of AM (`am`). `no_std`, no dependencies. |
-| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, `devices`, the hardware backends and their selection (`hw/`, also transmitting on a harmonic), the programme input options every mode shares, and per mode its options, set-up and tools (WFM: `analyze`). |
+| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, the modes' `probe` and `tone`, `devices`, the hardware backends and their selection (`hw/`, also transmitting on a harmonic), the programme input options every mode shares, and per mode its options, set-up and tools (WFM: `analyze`). |
 | `firmware/pico` | The RP2040/RP2350 firmware (embassy-rp), a cargo workspace of its own for the bare-metal targets. |
 
 ## The two interfaces
@@ -86,9 +86,11 @@ mode that needs a different kind of sample (I/Q, say) adds a `SampleFormat`
 variant, and sinks that can produce it advertise it.
 
 On the command line every mode is a command with its own subcommands
-(`txengine wfm tx | render | analyze`, `txengine nfm tx | render`,
-`txengine am tx | render`); `probe` and `tone` need no mode (they plan for
-one with `--mode`). A mode's options are a clap `Args` struct that
+(`txengine wfm tx | render | analyze | probe | tone`,
+`txengine nfm tx | render | probe | tone`,
+`txengine am tx | render | probe`); `probe` shows the plan for the mode
+and `tone` transmits raw tones from it (both in `mode.rs`), and only
+`devices` needs no mode. A mode's options are a clap `Args` struct that
 implements `Mode` (`txengine/src/mode.rs`): what it needs from the
 transmitter (`hw::Output`: frequency modulation over a range, or
 amplitude), a check of the options, and building its modulator for the
@@ -257,7 +259,7 @@ also the carrier at some fractions of it (`boundary::Spurs`; the module
 has the measurements). The clearance it aims for is an eighth of the
 largest offset planned (the quiet passages) plus 30 ppm (the crystal
 correction); a plan that falls short of the first part logs a warning (and
-`txengine probe` shows it).
+`txengine wfm probe` shows it).
 
 Each frequency-modulating backend makes carriers up to a limit of its
 clock outputs (`MAX_CARRIER_HZ`: 400 MHz on the BCM boards, 1 GHz on the
@@ -639,10 +641,10 @@ build a paced ring, implement `poll`/`write`, fill `SinkInfo` with the exact
 rate and the measured response) and a `Backend` in `txengine/src/hw/`
 (discovery, the options it accepts, opening the sink), and list it in
 `hw::BACKENDS`. Measure the modulation response with
-`txengine tone` and an SDR, and record it in `SinkInfo::response_db` if it
-deviates from a pure sample-and-hold. Plan the clocks from the nominal
-crystal frequency, leave room for a correction of ±`MAX_CLOCK_ERROR_PPM`,
-and implement `set_clock_error_ppm`.
+`txengine wfm tone` and an SDR, and record it in `SinkInfo::response_db`
+if it deviates from a pure sample-and-hold. Plan the clocks from the
+nominal crystal frequency, leave room for a correction of
+±`MAX_CLOCK_ERROR_PPM`, and implement `set_clock_error_ppm`.
 
 ## Crystal error (`txengine/src/clock.rs`)
 

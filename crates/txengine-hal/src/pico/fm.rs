@@ -80,14 +80,14 @@ fn response(fs: f64, interpolate: bool, loop_db_38k: f64) -> Vec<(f64, f64)> {
 /// How much the PLL method's loop lifts 38 kHz relative to low modulation
 /// frequencies (dB): the carrier follows the feedback divider through
 /// `PLL_USB`'s loop, which peaks far above the multiplex band (its noise
-/// hump is near 300 kHz). Measured over the air (`txengine tone`, 13 probe
-/// tones of 5 kHz up to 67 kHz, and the stereo separation of a left-only
-/// 1 kHz tone, USRP B210): the lift grows as f² within ±0.04 dB, and in
-/// proportion to the reference divider (the loop is slower with a lower
-/// comparison frequency): RP2040 +0.062 dB at 38 kHz with a 12 MHz
-/// reference, +0.113 to +0.122 dB with 6 MHz from 87.6 to 107.7 MHz;
-/// RP2350 +0.066 and +0.146 to +0.150 dB. Without it the separation is
-/// 41-44 dB (the PIO method, which has no loop, measures 73 dB).
+/// hump is near 300 kHz). Measured over the air (`txengine wfm tone`, 13
+/// probe tones of 5 kHz up to 67 kHz, and the stereo separation of a
+/// left-only 1 kHz tone, USRP B210): the lift grows as f² within ±0.04 dB,
+/// and in proportion to the reference divider (the loop is slower with a
+/// lower comparison frequency): RP2040 +0.062 dB at 38 kHz with a 12 MHz
+/// reference, +0.113 to +0.122 dB with 6 MHz from 87.6 to 107.7 MHz; RP2350
+/// +0.066 and +0.146 to +0.150 dB. Without it the separation is 41-44 dB
+/// (the PIO method, which has no loop, measures 73 dB).
 fn pll_loop_db_38k(chip: Chip, refdiv: u8) -> f64 {
     let per_refdiv = match chip {
         Chip::Rp2040 => 0.060,

@@ -1,5 +1,6 @@
 //! Running a transmission mode: transmitting, or rendering to a file. A mode
-//! plugs in by implementing [`Mode`] for its command line options.
+//! plugs in by implementing [`Mode`] for its command line options. Also the
+//! modes' hardware tools: the plan for a mode, and raw test tones.
 
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use anyhow::Context;
 use log::info;
 use txengine_core::{Modulator, RfSink, SinkInfo};
 
-use crate::cli::{ControlArgs, HardwareArgs, OutputArgs, RenderFormat};
+use crate::cli::{ControlArgs, HardwareArgs, OutputArgs, ProbeArgs, RenderFormat, ToneArgs};
 use crate::{clock, control, engine, hw, rt, sinks};
 
 /// A transmission mode, set up from its command line options.
@@ -144,4 +145,72 @@ impl RfSink for Limited<'_> {
     fn stop(&mut self) -> Result<(), txengine_core::SinkError> {
         self.inner.stop()
     }
+}
+
+/// Show the hardware and its plan for a mode that needs `out`.
+pub fn probe(a: &ProbeArgs, out: hw::Output) -> anyhow::Result<()> {
+    hw::select(&a.hw)?.probe(&a.hw, out)
+}
+
+/// Transmit raw test tones from the transmitter planned, as for an FM mode,
+/// for carrier offsets up to `max_offset_hz`, so that the measurement
+/// applies to that mode.
+pub fn tone(a: &ToneArgs, max_offset_hz: f64) -> anyhow::Result<()> {
+    if a.tones.iter().any(|&f| !(0.0..=120_000.0).contains(&f)) {
+        anyhow::bail!("--tones must be within 0-120000 Hz");
+    }
+    if a.deviation * a.tones.len() as f64 > max_offset_hz {
+        anyhow::bail!("the tones together may deviate at most {max_offset_hz:.0} Hz in this mode");
+    }
+    let device = hw::select(&a.hw)?;
+    let _lock = rt::instance_lock(&device.lock_name()?)?;
+    rt::install_signal_handlers();
+    let mut sink = device.open(&a.hw, hw::Output::Frequency { max_offset_hz })?;
+    let fs = sink.info().sample_rate;
+    if a.tones.iter().any(|&f| f >= fs / 2.0) {
+        anyhow::bail!("tones must be below half the sample rate ({:.0} Hz)", fs / 2.0);
+    }
+    info!("tones {:?} Hz at ±{:.0} Hz each, sample rate {:.3} kS/s", a.tones, a.deviation, fs / 1e3);
+    // Only the carrier is corrected: the tones are raw test signals.
+    let mut clock = clock::ClockDiscipline::new(a.hw.ppm, Box::new(clock::SystemClock::default()));
+    clock.attach(sink.as_mut())?;
+    rt::make_realtime(30);
+    let table = txengine_dsp::SineTable::new();
+    let mut osc: Vec<_> = a.tones.iter().map(|&f| txengine_dsp::PhaseAccumulator::new(f, fs)).collect();
+    let dev = a.deviation as f32;
+    let mut buf = vec![0f32; 4096];
+    let mut fill = |buf: &mut [f32]| {
+        for x in buf.iter_mut() {
+            *x = osc
+                .iter_mut()
+                .map(|o| {
+                    let v = table.sin(o.harmonic_frac(1));
+                    o.advance();
+                    dev * v
+                })
+                .sum();
+        }
+    };
+    let p = sink.poll()?;
+    let k = p.writable.min(buf.len());
+    fill(&mut buf[..k]);
+    sink.write(&buf[..k])?;
+    sink.start()?;
+    let start = std::time::Instant::now();
+    let result = (|| -> anyhow::Result<u64> {
+        while !rt::stop_requested() && start.elapsed().as_secs_f64() < a.duration {
+            let p = clock.poll(sink.as_mut())?;
+            if p.writable >= 1024 {
+                let k = p.writable.min(buf.len());
+                fill(&mut buf[..k]);
+                sink.write(&buf[..k])?;
+            } else {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        Ok(sink.poll()?.underruns)
+    })();
+    sink.stop().ok();
+    info!("stopped after {:.1} s, {} underruns; {}", start.elapsed().as_secs_f64(), result?, clock.describe());
+    Ok(())
 }
