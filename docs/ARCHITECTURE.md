@@ -258,7 +258,9 @@ pulse width per carrier cycle into a PWM (AM).
 ### Raspberry Pi 1-4 (BCM283x, BCM2711)
 
 * The carrier is a PLL (A, C or D) → PER divider → GPCLK → GPIO, or a GPCLK
-  fractional divider from PLLD (`clkdiv`). The planner scans every clock
+  fractional divider from PLLD (`clkdiv`). Clock generators divide by at
+  least 2 (`cprman::MIN_DIVI`): set to 1, GPCLK0 and the PWM clock divide
+  by 4096, from any source (measured). The planner scans every clock
   generator to find out who else uses each PLL (`Pll::users`) and refuses
   changes of more than 3 % (or any change of a PER divider that others
   use): PLLC clocks the VPU (and through it the SD card host, SPI, I2C and
@@ -372,7 +374,7 @@ pulse width per carrier cycle into a PWM (AM).
   swaps the pulses, which shifts the carrier by half a period.
 * The PWM clock divides a PLL's PER channel by an integer (a fractional
   divider would jitter by a whole source cycle), at most 250 MHz (500 MHz
-  does not run; measured on a Zero 2 W). The planner (`am::plan`) takes
+  fails from a range of 4, on a Zero 2 W). The planner (`am::plan`) takes
   the finest steps (`R = 2k`, the largest `k` with `4k · fc` ≤ 250 MHz)
   that the PLL can make within the limits its users allow
   (`cprman::PllRoom`, as for FM) with room for the crystal correction in

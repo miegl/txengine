@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
-use super::cprman::{ClockWatch, Cprman, Pll, PllConfig, PllId, PllRoom, PllState, PllUsers, pll_preference};
+use super::cprman::{ClockWatch, Cprman, MIN_DIVI, Pll, PllConfig, PllId, PllRoom, PllState, PllUsers, pll_preference};
 use super::dma::{ControlBlock, DmaChannel};
 use super::regs::{self, cm, dma as dmar, pwm};
 use super::{Bcm, PinState, pwm_for_pin, pwm_write_confirmed, set_pin_function};
@@ -65,7 +65,8 @@ use crate::mmio::{Mmio, barrier, store64};
 use crate::sys::wait_until;
 
 /// Highest PWM clock (Hz): measured on a Zero 2 W (BCM2837), the PWM runs
-/// at 250 MHz (PLLD_PER / 2), but not at 500 MHz.
+/// at 250 MHz (PLLD_PER / 2). At 500 MHz (PLLC_PER / 2) its counter fails
+/// from a range of 4 (a range of 2 or 3 still works).
 pub const MAX_PWM_CLOCK: f64 = 250e6;
 
 /// Lowest carrier (Hz).
@@ -190,7 +191,7 @@ fn plan_in(room: &PllRoom, id: PllId, carrier_hz: f64, osc: f64, sample_rate: f6
         let clk = 4.0 * k as f64 * carrier_hz;
         let mut best: Option<(f64, BcmAmPlan)> = None;
         for &per in &room.per_choices {
-            for clk_div in 1..=4095u32 {
+            for clk_div in MIN_DIVI..=4095u32 {
                 let vco = clk * (per * clk_div) as f64;
                 if vco > room.vco_max {
                     break;
@@ -1137,7 +1138,7 @@ mod tests {
                 // always make the finest steps at the highest carriers.
                 let k_min = if name == "PLLC" { k_max / 2 } else { k_max * 9 / 10 };
                 assert!(p.range.is_multiple_of(2) && (k_min..=k_max).contains(&p.steps()), "{what}");
-                assert!(p.clk_hz <= MAX_PWM_CLOCK, "{what}");
+                assert!(p.clk_hz <= MAX_PWM_CLOCK && p.clk_div >= MIN_DIVI, "{what}");
                 assert!((p.clk_hz / (2 * p.range) as f64 - p.carrier_hz).abs() < 1e-6, "{what}");
                 assert!((p.clk_hz * (p.per_div * p.clk_div) as f64 - p.vco_new).abs() < 1e-3, "{what}");
                 assert!(room.allows(p.vco_new, p.per_div) && room.per_choices.contains(&p.per_div), "{what}");
@@ -1158,6 +1159,18 @@ mod tests {
         assert_eq!((p.steps(), p.per_div * p.clk_div), (62, 9), "{p:?}");
         assert!(plan_in(&rooms()[0].0, PllId::A, 50e3, osc, 100e3).is_err());
         assert!(plan_in(&rooms()[0].0, PllId::A, 4.3e6, osc, 100e3).is_err());
+    }
+
+    /// From 166 kHz to 4.17 MHz an idle PLL's VCO is sometimes best at seven
+    /// times the PWM clock, which only the PER divider could divide alone
+    /// (undivided, the PER channel would run too fast).
+    #[test]
+    fn the_pwm_clock_divides_by_two_or_more() {
+        let idle = &rooms()[2].0;
+        for k in 100..=4200 {
+            let p = plan_in(idle, PllId::A, k as f64 * 1e3, 19.2e6, 100e3).unwrap();
+            assert!(p.clk_div >= MIN_DIVI, "{k} kHz: {p:?}");
+        }
     }
 
     #[test]

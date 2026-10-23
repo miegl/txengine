@@ -13,6 +13,12 @@ use crate::sys::wait_until;
 
 const TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Smallest integer divider of a clock generator. Set to 1, GPCLK0 and the
+/// PWM clock divide by 4096 instead, from any source and with or without
+/// MASH (counted on a Raspberry Pi 2 and a Zero 2 W from 19.2 MHz to
+/// 1.125 GHz). Linux never divides these clocks by less than 2 either.
+pub const MIN_DIVI: u32 = 2;
+
 /// The clock manager register block.
 #[derive(Debug, Clone)]
 pub struct Cprman {
@@ -60,7 +66,7 @@ impl Cprman {
     /// Program and start a clock generator: source, integer/fractional
     /// divider and MASH order. Glitch free: stops it first.
     pub fn clock_start(&self, ctl: usize, src: u32, divi: u32, divf: u32, mash: u32) -> Result<()> {
-        if !(1..=0xfff).contains(&divi) || divf > 0xfff || mash > 3 {
+        if !(MIN_DIVI..=0xfff).contains(&divi) || divf > 0xfff || mash > 3 {
             return Err(HalError::Config(format!("invalid clock divider {divi}.{divf} / MASH {mash}")));
         }
         self.clock_stop(ctl)?;

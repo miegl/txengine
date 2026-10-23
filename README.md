@@ -597,6 +597,11 @@ txengine renders the samples on the computer; the firmware puts them out.
   −12 %), and the response, noise and separation measure the same at −14 %
   (VCO 1927 MHz) as at +1.2 %. PLLC moved by −3.6 % caused no SD or WiFi
   errors and no lost packets on either board.
+* **A clock divider of 1 divides by 4096:** set to an integer divider of
+  1, GPCLK0 and the PWM clock put out a 4096th of their input, from any
+  source and with or without MASH (counted by the frequency counter on a
+  Pi 2 and a Zero 2 W, from 19.2 MHz to 1.125 GHz). txengine divides by
+  at least 2, as Linux does.
 * **CPU clock changes:** the firmware changes the ARM clock over the same
   slow PLL register bus that the DMA engine keeps busy. When the two
   collide, the firmware's write lands in the modulated PLL instead: on the

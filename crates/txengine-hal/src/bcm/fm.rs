@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
-use super::cprman::{ClockWatch, Cprman, Pll, PllConfig, PllId, PllRoom, PllState, PllUsers, pll_preference};
+use super::cprman::{ClockWatch, Cprman, MIN_DIVI, Pll, PllConfig, PllId, PllRoom, PllState, PllUsers, pll_preference};
 use super::dma::{ControlBlock, DmaChannel};
 use super::regs::{self, cm, dma as dmar, pcm, pwm};
 use super::{Bcm, PinState, gpclk_for_pin, pwm_write_confirmed, set_pin_function};
@@ -182,12 +182,26 @@ pub fn modulation_ki(pll: &Pll) -> Option<u32> {
 /// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
 pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64, max_change: f64) -> Result<BcmPlan> {
     let room = PllRoom::of(pll, cm::gp(gpclk), max_change);
+    plan_in_room(&room, pll.id, modulation_ki(pll), gpclk, carrier, osc, max_offset)
+}
+
+/// [`plan_pll`] for a PLL with the `room` its users leave, whose loop gain
+/// is set to `loop_ki` while modulating.
+fn plan_in_room(
+    room: &PllRoom,
+    id: PllId,
+    loop_ki: Option<u32>,
+    gpclk: usize,
+    carrier: f64,
+    osc: f64,
+    max_offset: f64,
+) -> Result<BcmPlan> {
     let unit_hz = osc * room.fb / (1u64 << cm::A2W_FRAC_BITS) as f64;
     // Room for correcting the crystal error at run time.
     let reserve_hz = carrier * MAX_CLOCK_ERROR_PPM * 1e-6;
     let mut best: Option<(f64, BcmPlan)> = None;
     for &per in &room.per_choices {
-        for gp in 1..=4095u32 {
+        for gp in MIN_DIVI..=4095u32 {
             let n = per * gp;
             let vco = carrier * n as f64;
             if vco > 2.4e9 {
@@ -214,9 +228,9 @@ pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64
                 best = Some((
                     score,
                     BcmPlan {
-                        method: BcmMethod::Pll(pll.id),
+                        method: BcmMethod::Pll(id),
                         gpclk,
-                        gpclk_src: pll.id.gpclk_source(),
+                        gpclk_src: id.gpclk_source(),
                         power_up: !room.running,
                         set_per: room.per_now != Some(per) || !room.running,
                         ndiv: ndiv as u32,
@@ -231,13 +245,13 @@ pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64
                             - reserve_hz,
                         users: room.users.clone(),
                         step_hz: 1.0 / units_per_hz,
-                        loop_ki: modulation_ki(pll),
+                        loop_ki,
                     },
                 ));
             }
         }
     }
-    best.map(|b| b.1).ok_or_else(|| room.exhausted(pll.id, &format!("{:.4} MHz", carrier / 1e6)))
+    best.map(|b| b.1).ok_or_else(|| room.exhausted(id, &format!("{:.4} MHz", carrier / 1e6)))
 }
 
 /// Plan clock-divider modulation from the PER channel of `pll` (unchanged).
@@ -424,7 +438,7 @@ const MASH_MIN_SOURCE_HZ: f64 = 250e6;
 /// (BCM2835 peripherals, PWM `STA.BERR`).
 pub fn plan_pacer(src_hz: f64, target: f64, min_rng: u32, max_rng: u32, max_clk_hz: f64) -> Option<PacerClock> {
     let mut candidates = Vec::new();
-    for divi in 2..=4095u32 {
+    for divi in MIN_DIVI..=4095u32 {
         let clk = src_hz / divi as f64;
         if clk > max_clk_hz || clk < 5e6 {
             continue;
@@ -440,7 +454,7 @@ pub fn plan_pacer(src_hz: f64, target: f64, min_rng: u32, max_rng: u32, max_clk_
             let c = PacerClock::new(src_hz, (src_hz * 4096.0 / (target * rng as f64)).round() as u32, rng);
             // MASH 1 alternates between DIVI and DIVI + 1 source cycles.
             if c.divf != 0
-                && (2..=4095).contains(&c.divi)
+                && (MIN_DIVI..=4095).contains(&c.divi)
                 && src_hz / c.divi as f64 <= max_clk_hz
                 && src_hz / c.divider() >= 5e6
             {
@@ -1574,6 +1588,41 @@ mod tests {
             users: PllUsers::default(),
             step_hz: 1.0 / units_per_hz.abs(),
             loop_ki: None,
+        }
+    }
+
+    /// A PLL that is powered down: the planner may start it anywhere from
+    /// 1 to 1.75 GHz, and prefers 1.5 GHz.
+    fn idle_room() -> PllRoom {
+        PllRoom {
+            running: false,
+            users: PllUsers::default(),
+            vco_old: 0.0,
+            fb: 1.0,
+            per_choices: (1..=8).collect(),
+            per_now: None,
+            vco_min: 1.0e9,
+            vco_max: 1.75e9,
+            max_decrease: 0.0,
+            max_increase: 0.0,
+        }
+    }
+
+    /// From 189.5 to 246.6 MHz an idle PLL's VCO is often best at seven
+    /// times the carrier, which only the PER divider could divide alone
+    /// (undivided, the PER channel would run too fast).
+    #[test]
+    fn the_gpclk_divides_by_two_or_more() {
+        for k in 1800..=2500 {
+            let f = k as f64 * 100e3;
+            // Near a multiple of the crystal, every division puts the
+            // fraction near a whole number.
+            if (f / 19.2e6 - (f / 19.2e6).round()).abs() * 19.2e6 < 200e3 {
+                continue;
+            }
+            let p =
+                plan_in_room(&idle_room(), PllId::D, None, 0, f, 19.2e6, 100e3).unwrap_or_else(|e| panic!("{f}: {e}"));
+            assert!((p.carrier_hz - f).abs() <= p.step_hz / 2.0 && p.gp_div >= MIN_DIVI, "{f}: {p:?}");
         }
     }
 
