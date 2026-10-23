@@ -35,7 +35,10 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
-use super::cprman::{ClockWatch, Cprman, MIN_DIVI, Pll, PllConfig, PllId, PllRoom, PllState, PllUsers, pll_preference};
+use super::cprman::{
+    ClockWatch, Cprman, MIN_DIVI, Pll, PllConfig, PllId, PllRoom, PllState, PllUsers, max_gpclk_input_hz,
+    pll_preference,
+};
 use super::dma::{ControlBlock, DmaChannel};
 use super::regs::{self, cm, dma as dmar, pcm, pwm};
 use super::{Bcm, PinState, gpclk_for_pin, pwm_write_confirmed, set_pin_function};
@@ -227,7 +230,10 @@ pub const MODULATION_KI: u32 = 5;
 
 /// The loop filter integral gain for modulating `pll`, if it differs from
 /// the PLL's current setting: PLLA and PLLC of the BCM2836/7. (PLLD, which
-/// clocks the UART and HDMI, and the BCM2711 have not been measured.)
+/// clocks the UART and HDMI, has not been measured. The BCM2711's PLLC
+/// keeps the firmware's KI 2: on a Raspberry Pi 4 its response was flat
+/// within 0.04 dB up to 45 kHz, and single tones at 53 and 67 kHz within
+/// 0.15 dB.)
 pub fn modulation_ki(pll: &Pll) -> Option<u32> {
     (matches!(pll.id, PllId::A | PllId::C) && !pll.is_bcm2711()).then_some(MODULATION_KI)
 }
@@ -238,17 +244,26 @@ pub fn modulation_ki(pll: &Pll) -> Option<u32> {
 /// fundamental, a Zero 2 W's fundamental was 8 dB short of that at
 /// 400 MHz and 29 dB short at 446 MHz (Raspberry Pi 2: 14 dB), while up
 /// to 380 MHz it was within 1 dB. Above, a harmonic carries the signal
-/// better (`--harmonic 3`).
+/// better (`--harmonic 3`). The BCM2711's are limited by their input
+/// (see [`max_gpclk_input_hz`]) to 300 MHz.
 pub const MAX_CARRIER_HZ: f64 = 400e6;
 
 /// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
 pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64, max_change: f64) -> Result<BcmPlan> {
     let room = PllRoom::of(pll, cm::gp(gpclk), max_change);
-    plan_in_room(&room, pll.id, modulation_ki(pll), gpclk, carrier, osc, max_offset)
+    // The PLLs of the BCM283x make a spur with the VCO at a half multiple
+    // of the crystal (at which the phase detector compares; see
+    // `boundary`). The BCM2711's showed none: with the VCO at a half or a
+    // quarter of a multiple of 54 MHz, or 1.4 MHz from one, a tone's
+    // harmonics stayed below -76 dB (Raspberry Pi 4, PLLC).
+    let spurs: &[f64] = if pll.is_bcm2711() { &[] } else { &[osc / 2.0] };
+    plan_in_room(&room, pll.id, modulation_ki(pll), gpclk, carrier, osc, max_offset, spurs)
 }
 
 /// [`plan_pll`] for a PLL with the `room` its users leave, whose loop gain
-/// is set to `loop_ki` while modulating.
+/// is set to `loop_ki` while modulating, and which makes spurs with its VCO
+/// at multiples of `vco_spurs`.
+#[allow(clippy::too_many_arguments)]
 fn plan_in_room(
     room: &PllRoom,
     id: PllId,
@@ -257,8 +272,9 @@ fn plan_in_room(
     carrier: f64,
     osc: f64,
     max_offset: f64,
+    vco_spurs: &[f64],
 ) -> Result<BcmPlan> {
-    check_carrier(carrier)?;
+    check_carrier(carrier, room.max_per_hz)?;
     let unit_hz = osc * room.fb / (1u64 << cm::A2W_FRAC_BITS) as f64;
     // Room for correcting the crystal error at run time.
     let reserve_hz = carrier * MAX_CLOCK_ERROR_PPM * 1e-6;
@@ -268,7 +284,7 @@ fn plan_in_room(
         for gp in MIN_DIVI..=4095u32 {
             let n = per * gp;
             let vco = carrier * n as f64;
-            if vco > 2.4e9 {
+            if vco > room.vco_max {
                 break;
             }
             if !room.allows(vco, per) {
@@ -282,13 +298,12 @@ fn plan_in_room(
             if margin < 0.005 || !(1.0..=1023.0).contains(&ndiv) {
                 continue;
             }
-            // Prefer: clear of the PLL's spurs (the VCO at a half multiple
-            // of the crystal, at which its phase detector compares), then
-            // the least disturbance, then a VCO near 1.5 GHz if it is idle,
-            // then the fraction far from whole numbers.
+            // Prefer: clear of the PLL's spurs, then the least disturbance,
+            // then a VCO near 1.5 GHz if it is idle, then the fraction far
+            // from whole numbers.
             let score =
                 room.change(vco) * 100.0 + if room.running { 0.0 } else { (vco - 1.5e9).abs() / 1e9 } - margin * 0.01;
-            let clearance_hz = boundary::Spurs { vco: &[osc / 2.0], carrier: &[] }.clearance_hz(carrier, n as f64);
+            let clearance_hz = boundary::Spurs { vco: vco_spurs, carrier: &[] }.clearance_hz(carrier, n as f64);
             let rank = (boundary::rank(clearance_hz, target), -score);
             if best.as_ref().is_none_or(|(r, _)| rank > *r) {
                 let center = units.round();
@@ -323,16 +338,20 @@ fn plan_in_room(
     best.map(|b| b.1).ok_or_else(|| room.exhausted(id, &format!("{:.4} MHz", carrier / 1e6)))
 }
 
-fn check_carrier(carrier: f64) -> Result<()> {
-    if carrier > MAX_CARRIER_HZ {
-        return Err(crate::beyond_fundamental(carrier, MAX_CARRIER_HZ, "the clock generators"));
+/// Refuse a carrier above what a clock generator whose input runs at most
+/// at `max_input_hz` puts out.
+fn check_carrier(carrier: f64, max_input_hz: f64) -> Result<()> {
+    let max = MAX_CARRIER_HZ.min(max_input_hz / MIN_DIVI as f64);
+    if carrier > max {
+        return Err(crate::beyond_fundamental(carrier, max, "the clock generators"));
     }
     Ok(())
 }
 
 /// Plan clock-divider modulation from the PER channel of `pll` (unchanged).
 pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Result<BcmPlan> {
-    check_carrier(carrier)?;
+    let max_input = max_gpclk_input_hz(pll.is_bcm2711());
+    check_carrier(carrier, max_input)?;
     if !cm::has_mash(cm::gp(gpclk)) {
         return Err(HalError::Config(format!(
             "--pll clkdiv needs a fractional clock divider: GPCLK{gpclk} divides by whole numbers only; use GPCLK0 \
@@ -343,6 +362,14 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
         HalError::Hardware(format!("{} is not running; cannot use it as the clock divider source", pll.id.name()))
     })?;
     let src = pll.vco_hz() / per as f64;
+    if src > max_input {
+        return Err(HalError::Config(format!(
+            "--pll clkdiv: {}_PER runs at {:.1} MHz, faster than the clock generators take ({:.0} MHz)",
+            pll.id.name(),
+            src / 1e6,
+            max_input / 1e6
+        )));
+    }
     let d = src / carrier;
     // MASH 1 needs an integer part of at least 2.
     if !(2.0..4095.0).contains(&d) {
@@ -1642,6 +1669,7 @@ impl Drop for BcmFmTransmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bcm::cprman::MAX_PER_HZ;
 
     #[test]
     fn pacer_is_exact_with_a_fast_clock() {
@@ -1706,6 +1734,7 @@ mod tests {
             vco_max: 1.75e9,
             max_decrease: 0.0,
             max_increase: 0.0,
+            max_per_hz: MAX_PER_HZ,
         }
     }
 
@@ -1721,8 +1750,8 @@ mod tests {
             if (f / 19.2e6 - (f / 19.2e6).round()).abs() * 19.2e6 < 200e3 {
                 continue;
             }
-            let p =
-                plan_in_room(&idle_room(), PllId::D, None, 0, f, 19.2e6, 100e3).unwrap_or_else(|e| panic!("{f}: {e}"));
+            let p = plan_in_room(&idle_room(), PllId::D, None, 0, f, 19.2e6, 100e3, &[9.6e6])
+                .unwrap_or_else(|e| panic!("{f}: {e}"));
             assert!((p.carrier_hz - f).abs() <= p.step_hz / 2.0 && p.gp_div >= MIN_DIVI, "{f}: {p:?}");
         }
     }
@@ -1743,11 +1772,12 @@ mod tests {
             vco_max: vco * 1.03,
             max_decrease: GPU_PLL_MAX_DECREASE,
             max_increase: 0.03,
+            max_per_hz: MAX_PER_HZ,
         }
     }
 
     fn plan_a(carrier: f64, max_offset: f64) -> Result<BcmPlan> {
-        plan_in_room(&plla_room(), PllId::A, Some(MODULATION_KI), 0, carrier, 19.2e6, max_offset)
+        plan_in_room(&plla_room(), PllId::A, Some(MODULATION_KI), 0, carrier, 19.2e6, max_offset, &[9.6e6])
     }
 
     /// Every FM carrier, clear of the PLL's spurs except next to a multiple
@@ -1812,6 +1842,85 @@ mod tests {
         assert!(p.gp_div >= MIN_DIVI, "{p:?}");
         let e = plan_a(446e6, 10e3).unwrap_err().to_string();
         assert!(e.contains("--harmonic 3"), "{e}");
+    }
+
+    /// PLLC as the firmware leaves it on a Raspberry Pi 4: 2592 MHz, its
+    /// channels clocking nothing (the VPU runs from PLLA).
+    fn bcm2711_pllc_room() -> PllRoom {
+        use super::super::cprman::GPU_PLL_MAX_DECREASE;
+        let vco = 2592e6;
+        PllRoom {
+            running: true,
+            users: PllUsers { per: vec![], other: vec!["PLLC_CORE0".into()], gpu_only: true },
+            vco_old: vco,
+            fb: 1.0,
+            per_choices: (1..=8).collect(),
+            per_now: Some(4),
+            vco_min: vco * (1.0 - GPU_PLL_MAX_DECREASE),
+            vco_max: vco * 1.03,
+            max_decrease: GPU_PLL_MAX_DECREASE,
+            max_increase: 0.03,
+            max_per_hz: max_gpclk_input_hz(true),
+        }
+    }
+
+    fn plan_bcm2711(carrier: f64, max_offset: f64) -> Result<BcmPlan> {
+        plan_in_room(&bcm2711_pllc_room(), PllId::C, None, 0, carrier, 54e6, max_offset, &[])
+    }
+
+    /// Near a multiple of the crystal every division puts the fraction near
+    /// a whole number.
+    fn near_54_mhz(f: f64, within: f64) -> bool {
+        (f / 54e6 - (f / 54e6).round()).abs() * 54e6 <= within
+    }
+
+    /// Every FM carrier but those next to 108 MHz, with a GPCLK input of at
+    /// most 600 MHz.
+    #[test]
+    fn bcm2711_pllc_reaches_the_fm_band() {
+        for k in 8750..=10800 {
+            let f = k as f64 * 10e3;
+            match plan_bcm2711(f, 100e3) {
+                Ok(p) => {
+                    assert!((p.carrier_hz - f).abs() <= p.step_hz / 2.0 && p.max_offset_hz >= 100e3, "{f}: {p:?}");
+                    assert!(p.vco_new / p.per_div as f64 <= 600e6 && p.gp_div >= MIN_DIVI, "{f}: {p:?}");
+                    assert!(p.spur_warning(100e3).is_none(), "{f}");
+                }
+                Err(e) => assert!(near_54_mhz(f, 140e3), "{f}: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bcm2711_pllc_reaches_narrow_fm_bands() {
+        let bands: [(f64, f64, f64); _] = [
+            (26.965e6, 27.405e6, 10e3),
+            (29.51e6, 29.69e6, 10e3),
+            (51.0e6, 54.0e6, 20e3),
+            (69.9e6, 70.5e6, 12.5e3),
+            (144.0e6, 148.0e6, 12.5e3),
+            (148.0e6, 174.0e6, 12.5e3),
+            (222.0e6, 225.0e6, 20e3),
+        ];
+        for (lo, hi, step) in bands {
+            let n = ((hi - lo) / step).round() as u32;
+            for k in 0..=n {
+                let f = lo + k as f64 * step;
+                match plan_bcm2711(f, 10e3) {
+                    Ok(p) => assert!((p.carrier_hz - f).abs() <= p.step_hz / 2.0 && p.max_offset_hz >= 10e3, "{f}"),
+                    Err(e) => assert!(near_54_mhz(f, 50e3), "{f}: {e}"),
+                }
+            }
+        }
+    }
+
+    /// The BCM2711's GPCLKs take at most 600 MHz, and divide by two or more.
+    #[test]
+    fn bcm2711_clock_generators_stop_at_300_mhz() {
+        let p = plan_bcm2711(300e6, 10e3).unwrap();
+        assert_eq!((p.per_div, p.gp_div), (4, 2), "{p:?}");
+        let e = plan_bcm2711(300.1e6, 10e3).unwrap_err().to_string();
+        assert!(e.contains("at most 300 MHz") && e.contains("--harmonic 3"), "{e}");
     }
 
     /// GPCLK2 divides by whole numbers only and has no counter input.

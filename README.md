@@ -253,7 +253,7 @@ txengine wfm analyze mpx.wav                                 # levels, pilot pha
 | Board | SoC | FM | NFM | AM |
 |---|---|---|---|---|
 | Raspberry Pi 5 | BCM2712 + RP1 | 4.2 MHz – 1 GHz, tested (64-bit build) | 1.2 MHz – 1 GHz, tested | 100 kHz – 6.2 MHz, tested |
-| Raspberry Pi 4, 400 | BCM2711 | 11 – 400 MHz, supported, not tested | 1.1 – 400 MHz, not tested | 100 kHz – 4.2 MHz, not tested |
+| Raspberry Pi 4, 400 | BCM2711 | 9.1 – 300 MHz, tested on a Pi 4 (64- and 32-bit builds) | 0.8 – 300 MHz, tested on a Pi 4 | 100 kHz – 2.2 MHz, tested on a Pi 4 |
 | Raspberry Pi 2 v1.2, 3, 3+ | BCM2837 | 11 – 400 MHz, supported, not tested | 1.1 – 400 MHz, not tested | 100 kHz – 4.2 MHz, not tested |
 | Raspberry Pi 2 v1.1 | BCM2836 | 11 – 400 MHz, tested | 1.1 – 400 MHz, tested | 100 kHz – 4.2 MHz, not tested |
 | Raspberry Pi 1 | BCM2835 (ARMv6) | not supported | not supported | not supported |
@@ -266,8 +266,10 @@ The FM and NFM ranges are the carriers the board makes itself, with room
 for the deviation (narrow-band FM reaches further down) and for correcting
 the crystal; a few spots inside them cannot be modulated (see [Hardware
 notes](#hardware-notes)), and higher carriers go out on a harmonic
-(`--harmonic`). The AM ranges are at the default 100 kS/s; `txengine probe
---mode am` shows the limit for another sample rate.
+(`--harmonic`). The Pi 4's FM and NFM ranges count on its firmware leaving
+PLLC to the GPU, as it did on the board tested; `txengine probe` shows the
+plans for a board. The AM ranges are at the default 100 kS/s; `txengine
+probe --mode am` shows the limit for another sample rate.
 
 ### Outputs
 
@@ -284,7 +286,8 @@ may already be in use: on the Pi 2 GPCLK1 clocks the Ethernet and USB chip
 txengine refuses a clock generator that is already running (`txengine
 probe` shows it), so use GPCLK0 there; `--force-gpclk` takes it over until
 txengine stops, which cuts that connection meanwhile. Their GPCLK2 divides
-by whole numbers only: `--pll clkdiv` needs GPCLK0 or GPCLK1 (see [Hardware
+by whole numbers only: `--pll clkdiv` needs GPCLK0 or GPCLK1, and on the
+Pi 4 is not available at all (see [Hardware
 notes](#raspberry-pi-24-and-zero-2-w)).
 
 `txengine devices` lists the transmitters found, and `txengine probe -f 87.6`
@@ -643,27 +646,30 @@ frequency are milder (−50 to −60 dB) and not avoided.
 #### Raspberry Pi 2–4 and Zero 2 W (BCM283x, BCM2711)
 
 * **FM**: fractional-N modulation of PLLA, PLLC or PLLD (20-bit fraction,
-  1–3 Hz steps), or a dithered fractional clock divider (`--pll clkdiv`),
-  at 190 kS/s. The PLL is chosen automatically: on the Pi 2/3 and Zero 2 W
-  PLLA, which only clocks the GPU's video and 3D blocks and may therefore
-  move down by up to 25 % (12 % reach the whole FM band); PLLs that clock
-  the rest of the system (VPU, SD card, WiFi, UARTs) are only retuned
-  within ±3 %. PLLA and PLLC run with a wider loop than the firmware gives
-  them (loop gain KI 5 instead of 2), which removes most of their phase
-  noise from the multiplex band. Carriers up to 400 MHz, above which the
-  clock generators' output fades (see [Hardware
-  notes](#raspberry-pi-24-and-zero-2-w)), from 11 MHz in wide-band FM and
-  1.1 MHz in narrow-band FM.
+  1–3 Hz steps), or a dithered fractional clock divider (`--pll clkdiv`), at
+  190 kS/s (Pi 4: 228 kS/s). The PLL is chosen automatically: on the Pi 2/3
+  and Zero 2 W PLLA, on the Pi 4 PLLC, which only clock the GPU's video and
+  3D blocks there and may therefore move down by up to 25 % (12 % reach the
+  whole FM band on the Pi 2/3 and Zero 2 W); PLLs that clock the rest of the
+  system (VPU, SD card, WiFi, UARTs) are only retuned within ±3 %. On the
+  Pi 2/3 and Zero 2 W, PLLA and PLLC run with a wider loop than the firmware
+  gives them (loop gain KI 5 instead of 2), which removes most of their
+  phase noise from the multiplex band. Carriers up to 400 MHz, above which
+  the clock generators' output fades, from 11 MHz in wide-band FM and
+  1.1 MHz in narrow-band FM; on the Pi 4, whose clock generators take at
+  most 600 MHz, up to 300 MHz, from 9.1 and 0.8 MHz (see [Hardware
+  notes](#raspberry-pi-24-and-zero-2-w)).
 * **AM**: this PWM has no phase-correct mode. In mark-space mode it puts out
   one pulse at the start of each range period, so it runs two periods per
   carrier cycle with pulses of `P/4 − u` and `P/4 + u` clocks: their
   fundamental is `sin(2π u / P)`, the law of one centred pulse of width
   `2u`, again with a constant phase. The PWM clock is a PLL (an idle one,
-  else PLLA) divided by an integer at up to 250 MHz, retuned so that the
-  carrier period is a whole number of clocks: 62 steps up to the full output
-  at 999 kHz, 27 at 2.3 MHz. Carriers run from 100 kHz to 4.2 MHz (two words
-  per cycle: 8.4 million words per second; on a Zero 2 W the DMA engine kept
-  up to 10).
+  else PLLA, on the Pi 4 PLLC) divided by an integer at up to 250 MHz,
+  retuned so that the carrier period is a whole number of clocks: 62 steps
+  up to the full output at 999 kHz, 27 at 2.3 MHz. Carriers run from 100 kHz
+  to 4.2 MHz (two words per cycle: 8.4 million words per second; on a
+  Zero 2 W the DMA engine kept up to 10), on the Pi 4, whose DMA engine is
+  slower, to 2.2 MHz.
 
 #### Pico and Pico 2 (RP2040, RP2350) on USB
 
@@ -738,7 +744,9 @@ txengine renders the samples on the computer; the firmware puts them out.
   sample rate at about 231 kS/s. txengine measures the capacity at start-up
   and picks the highest even multiple of 19 kHz within 85 % of it, 190 kS/s
   (`--sample-rate` above the capacity is refused), and it watches the
-  achieved rate while running.
+  achieved rate while running. The Pi 4's engine writes in about 1.5 µs
+  (646 kS/s), so it runs at 228 kS/s, the highest such rate up to the
+  250 kS/s txengine plans by default.
 * **Sample rate and stereo decoders:** the output holds each sample, so the
   multiplex is repeated around multiples of the sample rate, attenuated
   only by the hold: the pilot's images at `fs ± 19 kHz` are 19 dB below it.
@@ -842,6 +850,38 @@ txengine renders the samples on the computer; the firmware puts them out.
   the PWM's FIFO lasts, and the PWM drops carrier cycles (0.4–1 % with the
   `schedutil` governor, which also shifts the carrier's phase); the CPU
   clock is held there too, and txengine warns if the PWM misses cycles.
+* **Pi 4: the clock generators' input.** The BCM2711's GPCLKs divide wrongly
+  when fed faster than about 670 MHz, even divisors first: GPCLK0 counted
+  exact up to 662.5 MHz, at 675 MHz exact or 0.015 % slow, at 725 MHz 0.5 %
+  slow; from 750 MHz the divisor 4 gave nothing, and from 864 MHz every
+  divisor beyond 3 about 0.22 MHz (the carrier check stopped the first
+  transmissions there). txengine feeds them at most 600 MHz, so carriers
+  reach 300 MHz (higher ones go out on a harmonic), and `--pll clkdiv` is
+  refused: it would divide PLLD_PER, which runs at 750 MHz. The PWM and PCM
+  clocks take 1.3 GHz.
+* **Pi 4: the PLLs.** The firmware runs the VCOs at 2.6–3.25 GHz, without
+  the BCM283x's feedback pre-divider (its control bits select a VCO range
+  here, set differently on each PLL), so txengine moves a running VCO only
+  within the limits above. On the board tested the VPU, and with it the
+  UARTs, SPI and I2C, runs from PLLA, and PLLC clocks nothing: txengine uses
+  PLLC and lets it move down by 25 %. It locked and divided exactly from
+  −25 % to +3 % of its 2592 MHz, and a tone at 145.5125 MHz measured the
+  same from −21 % to +1 % (harmonics below −74 dB). That reaches every FM
+  carrier but those within 140 kHz of 108 MHz, and every narrow-band channel
+  of the bands above but those within 50 kHz of 54 and 162 MHz (multiples of
+  the 54 MHz crystal, where every division puts the fraction at a whole
+  number). Its PLLs make none of the BCM283x's spurs (below −76 dB with the
+  VCO at a half or a quarter of a multiple of 54 MHz, or 1.4 MHz from one).
+  They keep the firmware's loop gain, whose modulation response is flat
+  within 0.04 dB up to 45 kHz (stereo separation 53 dB).
+* **Pi 4: AM.** The BCM2711's DMA engine is slower to write to the PWM: fed
+  as on the BCM283x (each burst waiting for its writes' responses, requested
+  from 8 words in the FIFO on), the PWM missed carrier cycles from 1.8 MHz
+  on (0.06 % at 2.5 MHz, 2 % at 3.5 MHz, where a 1 kHz tone at 90 % read
+  10 %), from a lite channel or a full one, at the same 250 MHz core clock
+  as a Zero 2 W. txengine sends the bursts without waiting and requests them
+  from 12 words on, which kept every cycle up to 2.2 MHz (and all but 30 ppm
+  at 3 MHz, 0.5 % at 4.2 MHz): the Pi 4 makes AM carriers up to 2.2 MHz.
 * **Zero 2 W (Cortex-A53):** a floating-point register load from a
   peripheral register at an address ≡ 4 (mod 8) returns the register below
   it. All register accesses are explicit 32-bit integer loads and stores.

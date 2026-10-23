@@ -135,10 +135,10 @@ pub struct HardwareArgs {
     pub pll: Option<String>,
     /// Transmit on the Nth harmonic of the carrier the hardware makes (FM
     /// and NFM): it makes FREQ / N, and the modulation is scaled to it. For
-    /// carriers above what the board makes directly (400 MHz on the Pi 2-4
-    /// and Zero 2 W, 1 GHz on the Pi 5 and the Pico). The fundamental is
-    /// far stronger than the wanted harmonic: band-pass filter the output
-    /// at FREQ.
+    /// carriers above what the board makes directly (400 MHz on the Pi 2, 3
+    /// and Zero 2 W, 300 MHz on the Pi 4, 1 GHz on the Pi 5 and the Pico).
+    /// The fundamental is far stronger than the wanted harmonic: band-pass
+    /// filter the output at FREQ.
     #[arg(long, default_value_t = 1, value_name = "N", help_heading = "Hardware")]
     pub harmonic: u32,
     /// Output drive strength 0-7 (2-16 mA; the Pi 5 and the Pico have 4

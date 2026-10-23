@@ -339,7 +339,7 @@ follow its width as the fundamental does.
   HDMI; the UARTs tolerate about ±3 % of baud rate error, and the SD and
   SDIO buses run at their 50 MHz maximum. A PLL whose only users are the
   GPU's video and 3D blocks (`h264`, `isp`, `v3d` on its CORE channel:
-  normally PLLA) may move down by up to 25 % on the BCM2836/7
+  normally PLLA) may move down by up to 25 %
   (`cprman::GPU_PLL_MAX_DECREASE`): from 2250 MHz −12 % reach every carrier
   in 87.5–108 MHz, where ±3 % reaches 76 % of the band (PLLC at ±3 %:
   50 %), and −25 % the narrow-band FM channels (all of CB, the amateur
@@ -350,8 +350,21 @@ follow its width as the fundamental does.
   to −22 %). The
   carrier stays at or below 400 MHz, above which the generators' output
   fades (`fm::MAX_CARRIER_HZ`). Idle PLLs are preferred and powered up with
-  the kernel's loop settings; otherwise, on the BCM2836/7, PLLA, then PLLC
-  (the BCM2711, not measured, keeps PLLC first).
+  the kernel's loop settings; otherwise, on the BCM2836/7, PLLA, then PLLC.
+* The BCM2711 (Pi 4) differs. Its firmware runs the VCOs at 2.6–3.25 GHz
+  without a feedback pre-divider (ANA1 bits 13–14 select a VCO range
+  instead, and differ between the PLLs), so a running VCO only moves
+  within the limits above. On a Pi 4 the VPU runs from PLLA and PLLC
+  clocks nothing: PLLC comes first and may move down by 25 % (it locked,
+  divided exactly and modulated equally cleanly from −21 % to +1 %), which
+  reaches every FM carrier but those within 140 kHz of 108 MHz (twice the
+  54 MHz crystal). Its GPCLKs take at most 600 MHz
+  (`cprman::max_gpclk_input_hz`): fed faster, from 675 MHz, they divide
+  wrongly, even divisors first (from 864 MHz most give 0.22 MHz), so the
+  carrier stays at or below 300 MHz, and `clkdiv` from PLLD_PER (750 MHz)
+  is refused; the PWM and PCM clocks take 1.3 GHz. Its PLLs made no
+  integer-boundary spurs. It keeps the firmware's loop (KI 2, KP 3),
+  whose modulation response is flat within 0.04 dB to 45 kHz.
 * Loop gain of PLLA and PLLC: the firmware and Linux run every PLL with the loop
   filter gains KI 2, KP 8, KA 2 (`A2W_PLLx_ANA1/3`), which give PLLA a
   loop bandwidth of about 125 kHz (natural frequency fitted to the
@@ -385,9 +398,10 @@ follow its width as the fundamental does.
   (MASH 1, at most 2 ns of jitter), which hits any rate within a fraction of
   a hertz.
 * The DMA engine's write rate to the PLL registers is limited (≈ 231 k
-  writes/s on the Pi 2 and the Zero 2 W), so the sample rate is chosen from
-  a measurement at start-up: the highest even multiple of 19 kHz within
-  85 % of it (`fm::RATE_STEP`), which puts the images of the hold onto
+  writes/s on the Pi 2 and the Zero 2 W, 646 k on the Pi 4), so the sample
+  rate is chosen from a measurement at start-up: the highest even multiple
+  of 19 kHz within 85 % of it and at most 250 kS/s (`fm::RATE_STEP`; the
+  Pi 4: 228 kS/s), which puts the images of the hold onto
   harmonics of 19 kHz, where a switching stereo decoder makes no tones of
   them. The achieved rate is checked continuously.
 * The PLL registers sit behind the slow A2W bus, which the firmware also
@@ -467,19 +481,23 @@ follow its width as the fundamental does.
   memory into the FIFO, in bursts of four words requested while the FIFO
   holds fewer than 8, with panic priority. On a Zero 2 W a lite channel
   kept the PWM supplied up to 10 M words/s (5 MHz) and missed 1.7 % at
-  12; 8.4 (4.2 MHz) is allowed. After each block a marker control block
-  writes the block's sequence number to a progress word: exact
-  bookkeeping, as the RP1's VALID bits give, and within a block the
-  engine's source address. The newest block links to an idle loop of 16
-  cycles at the mean amplitude of the samples (an unmodulated carrier: an
-  underrun is silent). A parked engine is sent on through a jump control
-  block, which first closes the idle loop again (a DMA write to the idle
-  block's `next`) and then continues at the first unplayed block, so the
-  idle loop never points into the ring when the engine comes back to it.
-  The jump is armed only when the idle loop is found closed and the engine
-  then seen in it: an armed jump stays armed until the engine takes it,
-  and arming it again before the engine has been seen back in the ring
-  would send it into a block already played.
+  12; 8.4 (4.2 MHz) is allowed. The BCM2711's engine is slower: so fed,
+  a Pi 4's PWM missed cycles from 1.8 MHz on (2 % at 3.5 MHz), from a
+  lite channel or a full one. Bursts that do not wait for their writes'
+  responses, requested from 12 words on, keep it supplied up to 2.2 MHz,
+  the Pi 4's limit (`am::BCM2711_MAX_CARRIER`). After each block a
+  marker control block writes the block's sequence number to a progress
+  word: exact bookkeeping, as the RP1's VALID bits give, and within a
+  block the engine's source address. The newest block links to an idle
+  loop of 16 cycles at the mean amplitude of the samples (an unmodulated
+  carrier: an underrun is silent). A parked engine is sent on through a
+  jump control block, which first closes the idle loop again (a DMA
+  write to the idle block's `next`) and then continues at the first
+  unplayed block, so the idle loop never points into the ring when the
+  engine comes back to it. The jump is armed only when the idle loop is
+  found closed and the engine then seen in it: an armed jump stays armed
+  until the engine takes it, and arming it again before the engine has
+  been seen back in the ring would send it into a block already played.
 * The CPU clock is held (`cpufreq`) here too: the firmware's ARM clock
   changes stall the DMA engine for longer than the words in the FIFO last
   (8 to 11 of them: 4 µs at 1 MHz), and a PWM without a word holds its

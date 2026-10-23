@@ -424,12 +424,13 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::
         }
     }
     let plld = Pll::new(&cm, PllId::D, osc, b.bcm2711);
-    if let Ok(plan) = bcm::fm::plan_clkdiv(&plld, gpclk, cfg.carrier_hz, cfg.max_offset_hz) {
-        println!(
+    match bcm::fm::plan_clkdiv(&plld, gpclk, cfg.carrier_hz, cfg.max_offset_hz) {
+        Ok(plan) => println!(
             "clkdiv:   GPCLK divider {:.4} from PLLD_PER, step {:.0} Hz (dithered)",
             plan.center / 4096.0,
             plan.step_hz
-        );
+        ),
+        Err(e) => println!("clkdiv:   {e}"),
     }
     Ok(())
 }

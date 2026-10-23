@@ -73,14 +73,15 @@ pub const MAX_PWM_CLOCK: f64 = 250e6;
 pub const MIN_CARRIER: f64 = 100e3;
 
 /// Words per second the DMA engine moves into the PWM FIFO, with a margin:
-/// on a Zero 2 W (core clock 400 MHz) a lite channel, in bursts of four
-/// words, gave the PWM every word up to 10 M words/s (a 5 MHz carrier) and
-/// missed 1.7 % at 12 M words/s. Two words per carrier cycle: the highest
-/// carrier, which takes in the 75 m band. (Boards with a slower core clock
-/// may not keep up; [`BcmAmTransmitter`] warns when the PWM misses cycles.)
+/// on a Zero 2 W a lite channel, in bursts of four words, gave the PWM
+/// every word up to 10 M words/s (a 5 MHz carrier) and missed 1.7 % at
+/// 12 M words/s. Two words per carrier cycle: the highest carrier, which
+/// takes in the 75 m band. (The BCM2711 is slower, see
+/// [`BCM2711_DREQ_LEVEL`]; [`BcmAmTransmitter`] warns when the PWM misses
+/// cycles.)
 const MAX_WORD_RATE: f64 = 8.4e6;
 
-/// Highest carrier (Hz).
+/// Highest carrier (Hz) on the BCM283x.
 pub const MAX_CARRIER: f64 = MAX_WORD_RATE / 2.0;
 
 /// The DMA engine moves bursts (BURST_LENGTH 3) while the FIFO holds fewer
@@ -88,6 +89,20 @@ pub const MAX_CARRIER: f64 = MAX_WORD_RATE / 2.0;
 /// for another one in flight, and the PWM has 8 words in hand while the
 /// engine waits.
 const DREQ_LEVEL: u32 = 8;
+
+/// The BCM2711's DMA engine is slower to write to the PWM: on a Raspberry
+/// Pi 4 (whose core clock, 250 MHz, a Zero 2 W also runs at), with each
+/// burst waiting for its writes' responses and requested from 8 words on,
+/// the PWM missed 10 ppm of the carrier cycles at 1.8 MHz, 0.06 % at
+/// 2.5 MHz and 2 % at 3.5 MHz, from a lite or a full channel (counted by
+/// the crystal estimate, which then reads that much slow). Bursts that do
+/// not wait, requested from 12 words on, kept every cycle up to 2.2 MHz
+/// (60 s, no FIFO errors), and all but 30 ppm at 3 MHz; at 4.2 MHz they
+/// still fall 0.5 % short.
+const BCM2711_DREQ_LEVEL: u32 = 12;
+
+/// Highest carrier (Hz) on the BCM2711 (see [`BCM2711_DREQ_LEVEL`]).
+pub const BCM2711_MAX_CARRIER: f64 = 2.2e6;
 
 /// Carrier cycles in the idle loop's block.
 const IDLE_CYCLES: usize = 16;
@@ -159,12 +174,17 @@ impl BcmAmPlan {
     }
 }
 
-fn check_carrier(carrier_hz: f64) -> Result<()> {
-    if !(MIN_CARRIER..=MAX_CARRIER).contains(&carrier_hz) {
+fn check_carrier(carrier_hz: f64, bcm2711: bool) -> Result<()> {
+    let (boards, max) = if bcm2711 {
+        ("Raspberry Pi 4 makes", BCM2711_MAX_CARRIER)
+    } else {
+        ("Raspberry Pi 2, 3 and Zero 2 W make", MAX_CARRIER)
+    };
+    if !(MIN_CARRIER..=max).contains(&carrier_hz) {
         return Err(HalError::Config(format!(
-            "the Raspberry Pi 2-4 and Zero 2 W make AM carriers of {:.0} kHz to {:.1} MHz",
+            "the {boards} AM carriers of {:.0} kHz to {:.1} MHz",
             MIN_CARRIER / 1e3,
-            MAX_CARRIER / 1e6
+            max / 1e6
         )));
     }
     Ok(())
@@ -177,12 +197,12 @@ fn check_carrier(carrier_hz: f64) -> Result<()> {
 /// correcting the crystal; for those, the least change of a PLL that
 /// others use (`max_change` at most, see [`PllRoom`]).
 pub fn plan(pll: &Pll, carrier_hz: f64, osc: f64, sample_rate: f64, max_change: f64) -> Result<BcmAmPlan> {
+    check_carrier(carrier_hz, pll.is_bcm2711())?;
     plan_in(&PllRoom::of(pll, cm::PWM, max_change), pll.id, carrier_hz, osc, sample_rate)
 }
 
-/// [`plan`] within `room` on the PLL `id`.
+/// [`plan`] within `room` on the PLL `id`, for a carrier the board makes.
 fn plan_in(room: &PllRoom, id: PllId, carrier_hz: f64, osc: f64, sample_rate: f64) -> Result<BcmAmPlan> {
-    check_carrier(carrier_hz)?;
     let unit_hz = osc * room.fb / FRAC_ONE;
     // `range = 2k`: k steps. Down to half the finest steps (6 dB more
     // quantisation noise) for a plan the PLL can make.
@@ -245,7 +265,7 @@ fn plan_in(room: &PllRoom, id: PllId, carrier_hz: f64, osc: f64, sample_rate: f6
 /// Plan on `cfg.pll`, or on the first PLL of [`pll_preference`] that can
 /// make the carrier.
 pub fn choose_plan(cfg: &BcmAmConfig, bcm: &Bcm) -> Result<BcmAmPlan> {
-    check_carrier(cfg.carrier_hz)?;
+    check_carrier(cfg.carrier_hz, bcm.bcm2711)?;
     let cpr = Cprman::new(bcm.cm.clone());
     let plan_on = |id| {
         plan(
@@ -413,6 +433,9 @@ pub struct BcmAmTransmitter {
     running: bool,
     stopped: bool,
     last_health: Instant,
+    /// The DMA engine feeds the FIFO as the BCM2711 needs it (see
+    /// [`BCM2711_DREQ_LEVEL`]).
+    bcm2711: bool,
 }
 
 impl std::fmt::Debug for BcmAmTransmitter {
@@ -572,6 +595,7 @@ impl BcmAmTransmitter {
             running: false,
             stopped: false,
             last_health: Instant::now(),
+            bcm2711: bcm.bcm2711,
         };
         tx.init_ring();
         tx.spawn_guardian()?;
@@ -585,6 +609,11 @@ impl BcmAmTransmitter {
 
     pub fn plan(&self) -> &BcmAmPlan {
         &self.plan
+    }
+
+    /// The FIFO level below which the PWM requests words.
+    fn dreq_level(&self) -> u32 {
+        if self.bcm2711 { BCM2711_DREQ_LEVEL } else { DREQ_LEVEL }
     }
 
     fn bus(&self, off: usize) -> u32 {
@@ -610,7 +639,7 @@ impl BcmAmTransmitter {
             | dmar::TI_DEST_DREQ
             | (pwm::DREQ << dmar::TI_PERMAP_SHIFT)
             | (3 << dmar::TI_BURST_LENGTH_SHIFT)
-            | dmar::TI_WAIT_RESP
+            | if self.bcm2711 { 0 } else { dmar::TI_WAIT_RESP }
             | dmar::TI_NO_WIDE_BURSTS;
         let plain = dmar::TI_WAIT_RESP | dmar::TI_NO_WIDE_BURSTS;
         let l = self.layout;
@@ -715,7 +744,8 @@ impl BcmAmTransmitter {
         self.pwm.write(pwm::CTL, pwm::CTL_CLRF1);
         wait_until(Duration::from_millis(5), "PWM FIFO clear", || self.pwm.read(pwm::STA) & pwm::STA_EMPT1 != 0)?;
         self.pwm.write(pwm::STA, pwm::STA_ERRORS);
-        pwm_write_confirmed(&self.pwm, pwm::DMAC, pwm::DMAC_ENAB | (DREQ_LEVEL << pwm::DMAC_PANIC_SHIFT) | DREQ_LEVEL)?;
+        let dreq = self.dreq_level();
+        pwm_write_confirmed(&self.pwm, pwm::DMAC, pwm::DMAC_ENAB | (dreq << pwm::DMAC_PANIC_SHIFT) | dreq)?;
         Ok(())
     }
 
@@ -982,7 +1012,7 @@ impl RfSink for BcmAmTransmitter {
         wait_until(
             Duration::from_millis(20),
             "PWM FIFO fill",
-            || matches!(self.place(), Ok(Place::Ring(c)) if 2 * c >= DREQ_LEVEL as usize),
+            || matches!(self.place(), Ok(Place::Ring(c)) if 2 * c >= self.dreq_level() as usize),
         )?;
         let (gpio, chan, alt) = self.pin;
         let bits = pwm::CTL_USEF1 | pwm::CTL_MSEN1 | pwm::CTL_PWEN1;
@@ -1086,6 +1116,7 @@ impl Drop for BcmAmTransmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bcm::cprman::MAX_PER_HZ;
 
     /// The PLLs of a Zero 2 W as found: PLLA clocks only the GPU's 3D
     /// block, PLLC_PER the EMMC (WiFi), and an idle PLL.
@@ -1101,6 +1132,7 @@ mod tests {
             vco_max: vco * 1.03,
             max_decrease: down,
             max_increase: 0.03,
+            max_per_hz: MAX_PER_HZ,
         };
         let gpu = PllUsers { per: vec![], other: vec!["PLLA_CORE (v3d)".into()], gpu_only: true };
         let emmc = PllUsers { per: vec!["emmc".into()], other: vec!["PLLC_CORE0 (vpu)".into()], gpu_only: false };
@@ -1115,6 +1147,7 @@ mod tests {
             vco_max: 1.75e9,
             max_decrease: 0.03,
             max_increase: 0.03,
+            max_per_hz: MAX_PER_HZ,
         };
         [
             (running(2250e6, gpu, (1..=8).collect(), 0.15), "PLLA"),
@@ -1157,8 +1190,15 @@ mod tests {
         // PLLA, retuned least for the finest steps: 999 kHz at 2229.8 MHz (-0.9 %).
         let p = plan_in(&rooms()[0].0, PllId::A, 999e3, osc, 100e3).unwrap();
         assert_eq!((p.steps(), p.per_div * p.clk_div), (62, 9), "{p:?}");
-        assert!(plan_in(&rooms()[0].0, PllId::A, 50e3, osc, 100e3).is_err());
-        assert!(plan_in(&rooms()[0].0, PllId::A, 4.3e6, osc, 100e3).is_err());
+    }
+
+    #[test]
+    fn carriers_per_soc() {
+        assert!(check_carrier(50e3, false).is_err() && check_carrier(100e3, false).is_ok());
+        assert!(check_carrier(4.2e6, false).is_ok() && check_carrier(4.3e6, false).is_err());
+        assert!(check_carrier(2.2e6, true).is_ok());
+        let e = check_carrier(2.3e6, true).unwrap_err().to_string();
+        assert!(e.contains("Raspberry Pi 4") && e.contains("2.2 MHz"), "{e}");
     }
 
     /// From 166 kHz to 4.17 MHz an idle PLL's VCO is sometimes best at seven

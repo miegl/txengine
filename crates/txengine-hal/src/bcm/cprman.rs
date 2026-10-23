@@ -377,15 +377,22 @@ impl PllUsers {
 /// prefer the least change, so a VCO this far down only serves carriers
 /// that need it. The loop's response and noise measure the same from 1927
 /// to 2365 MHz (−14 % to +5 %). Upwards, which would overclock the
-/// blocks, the general limit applies.
+/// blocks, the general limit applies. The same holds for the BCM2711,
+/// whose firmware left PLLC with nothing on it on a Raspberry Pi 4 (the
+/// VPU runs from PLLA): from its 2592 MHz, PLLC locked and fed GPCLK0
+/// exactly from −25 % to +3 %, and a tone modulated it equally cleanly
+/// from −21 % to +1 % (harmonics below −74 dB). There, with the GPCLK
+/// input limited to 600 MHz, the full −25 % reaches every FM carrier but
+/// those within 140 kHz of 108 MHz (twice the crystal), and every
+/// narrow-band channel above but those within 50 kHz of 54 and 162 MHz.
 pub const GPU_PLL_MAX_DECREASE: f64 = 0.25;
 
 /// The PLLs to try for a clock generator at `own_ctl`, best first: an idle
 /// PLL is ideal (no other user, or not running). Otherwise, on the
 /// BCM2836/7, PLLA, which normally clocks only the GPU's blocks and may
 /// move furthest (see [`GPU_PLL_MAX_DECREASE`]), then PLLC, which clocks
-/// the VPU, the SD card and the WiFi. The BCM2711 has not been measured and
-/// keeps PLLC first.
+/// the VPU, the SD card and the WiFi. On the BCM2711 PLLC, which the
+/// firmware leaves to the GPU, then PLLA, which clocks the VPU.
 pub fn pll_preference(cm: &Cprman, osc_hz: f64, bcm2711: bool, own_ctl: usize) -> Vec<PllId> {
     let idle = [PllId::A, PllId::C, PllId::D].into_iter().find(|&id| {
         let p = Pll::new(cm, id, osc_hz, bcm2711);
@@ -397,7 +404,20 @@ pub fn pll_preference(cm: &Cprman, osc_hz: f64, bcm2711: bool, own_ctl: usize) -
 
 /// Fastest PER channel output planned: the firmware never runs one faster
 /// than ~1 GHz (PLLC_PER feeds EMMC at 1 GHz); stay in that region.
-const MAX_PER_HZ: f64 = 1.25e9;
+pub const MAX_PER_HZ: f64 = 1.25e9;
+
+/// Fastest input planned for a BCM2711 GPCLK. Fed faster, its output goes
+/// wrong, at even divisors first: on a Raspberry Pi 4 GPCLK0 counted exact
+/// up to 662.5 MHz, at 675 MHz exact or 0.015 % slow, from 687.5 MHz
+/// 0.06 % slow, at 725 MHz 0.5 %; from 750 MHz the divisor 4 gave nothing,
+/// from 864 MHz every divisor beyond 3 about 0.22 MHz. (The PWM clock was
+/// exact from 1320 MHz, the PCM clock from 750 MHz.)
+const BCM2711_MAX_GPCLK_INPUT_HZ: f64 = 600e6;
+
+/// Fastest input planned for a GPCLK.
+pub fn max_gpclk_input_hz(bcm2711: bool) -> f64 {
+    if bcm2711 { BCM2711_MAX_GPCLK_INPUT_HZ } else { MAX_PER_HZ }
+}
 
 /// What a frequency planner may do with a PLL, given who else uses it: the
 /// VCO frequencies and PER dividers it may choose.
@@ -423,6 +443,8 @@ pub struct PllRoom {
     /// Largest relative decrease and increase of a shared VCO (for messages).
     pub max_decrease: f64,
     pub max_increase: f64,
+    /// Fastest PER channel output the planned clock generator takes.
+    pub max_per_hz: f64,
 }
 
 impl PllRoom {
@@ -433,8 +455,7 @@ impl PllRoom {
     pub fn of(pll: &Pll, own_ctl: usize, max_change: f64) -> PllRoom {
         let running = pll.is_powered() && pll.is_locked();
         let users = if running { pll.users(own_ctl) } else { PllUsers::default() };
-        let max_decrease =
-            if users.gpu_only && !pll.is_bcm2711() { max_change.max(GPU_PLL_MAX_DECREASE) } else { max_change };
+        let max_decrease = if users.gpu_only { max_change.max(GPU_PLL_MAX_DECREASE) } else { max_change };
         let fb = if running { pll.fb_mult() } else { 1.0 };
         let vco_old = if running { pll.vco_hz() } else { 0.0 };
         let per_now = pll.per_divider();
@@ -444,8 +465,11 @@ impl PllRoom {
             _ => (1..=8).collect(),
         };
         // VCO limits; BCM2835/6/7 switch the feedback pre-divider above
-        // 1.75 GHz, which is never changed on a running PLL.
-        let (vco_min, vco_max) = if running && !users.is_empty() {
+        // 1.75 GHz, which is never changed on a running PLL. The BCM2711 has
+        // no pre-divider, and its firmware runs the VCOs at 2.6-3.25 GHz
+        // with ANA1 bits 13-14 set for a VCO range instead (Linux), which
+        // differ between PLLs: a running VCO stays near its frequency.
+        let (vco_min, vco_max) = if running && (!users.is_empty() || pll.is_bcm2711()) {
             (vco_old * (1.0 - max_decrease), vco_old * (1.0 + max_change))
         } else if running {
             (600e6, if fb > 1.0 { 2.4e9 } else { 1.75e9 })
@@ -463,13 +487,18 @@ impl PllRoom {
             vco_max,
             max_decrease,
             max_increase: max_change,
+            max_per_hz: if (0..3).any(|n| gp(n) == own_ctl) {
+                max_gpclk_input_hz(pll.is_bcm2711())
+            } else {
+                MAX_PER_HZ
+            },
         }
     }
 
     /// Whether the VCO may run at `vco` with the PER divider `per` (one of
     /// [`PllRoom::per_choices`]).
     pub fn allows(&self, vco: f64, per: u32) -> bool {
-        (self.vco_min..=self.vco_max).contains(&vco) && vco / per as f64 <= MAX_PER_HZ
+        (self.vco_min..=self.vco_max).contains(&vco) && vco / per as f64 <= self.max_per_hz
     }
 
     /// The relative change of the VCO's frequency to `vco` (0 if it is not running).
@@ -479,6 +508,18 @@ impl PllRoom {
 
     /// The error for a planner that found nothing in this room.
     pub fn exhausted(&self, id: PllId, what: &str) -> HalError {
+        if let [per] = self.per_choices[..]
+            && self.vco_min / per as f64 > self.max_per_hz
+        {
+            return HalError::Config(format!(
+                "{}_PER, which also drives {}, runs at {:.0} MHz (/{per}), faster than the clock generator takes \
+                 ({:.0} MHz); choose another --pll",
+                id.name(),
+                self.users.per.join(", "),
+                self.vco_old / per as f64 / 1e6,
+                self.max_per_hz / 1e6
+            ));
+        }
         HalError::Config(format!(
             "{} cannot produce {what} with its VCO within -{:.0} % / +{:.0} % of {:.1} MHz \
              (it also drives: {}); choose another --pll",

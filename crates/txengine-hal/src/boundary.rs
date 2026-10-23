@@ -8,8 +8,10 @@
 //! passages, by some 10–30 Hz of deviation. Measured with a 1 kHz tone at
 //! 1.25 kHz deviation near 145 MHz, the worst of the tone's harmonics:
 //!
-//! * Raspberry Pi 2–4, Zero 2 W (19.2 MHz): −42 dB with the VCO at a half
-//!   multiple, −50 dB at a quarter.
+//! * Raspberry Pi 2, 3, Zero 2 W (19.2 MHz): −42 dB with the VCO at a half
+//!   multiple, −50 dB at a quarter. The Raspberry Pi 4 (54 MHz) showed
+//!   none: below −76 dB at a half, a quarter, and 1.4 MHz from a whole
+//!   multiple.
 //! * Raspberry Pi 5 (50 MHz): −51 dB at a half, −60 dB at a quarter.
 //! * Pico, Pico 2 with the 6 MHz reference (the crystal / 2): −33 to
 //!   −42 dB with the VCO at a multiple of 3 MHz (a half), or the carrier at
