@@ -7,11 +7,12 @@
 //! an [`RfSink`]. Without `--device`, txengine uses the only device found.
 //! A new backend implements [`Backend`] and is added to [`BACKENDS`].
 
+mod harmonic;
 mod pi;
 mod pico;
 
 use anyhow::bail;
-use log::info;
+use log::{info, warn};
 use txengine_core::{RfSink, SampleFormat};
 
 use crate::cli::HardwareArgs;
@@ -27,6 +28,15 @@ pub enum Output {
 }
 
 impl Output {
+    /// The output that makes the `n`-th harmonic's modulation from the
+    /// fundamental: offsets `n` times smaller.
+    fn at_fundamental(self, n: u32) -> Output {
+        match self {
+            Output::Frequency { max_offset_hz } => Output::Frequency { max_offset_hz: max_offset_hz / n as f64 },
+            Output::Amplitude => Output::Amplitude,
+        }
+    }
+
     /// The kind of samples the modulator renders.
     pub fn format(self) -> SampleFormat {
         match self {
@@ -109,13 +119,33 @@ pub fn select(hw: &HardwareArgs) -> anyhow::Result<Selected> {
 }
 
 fn check_common(hw: &HardwareArgs) -> anyhow::Result<()> {
-    if !(100e3..=250e6).contains(&hw.freq_hz) {
-        bail!("--freq must be 100 kHz to 250 MHz (e.g. 87.6 in MHz, or 999k)");
+    if !(1..=15).contains(&hw.harmonic) {
+        bail!("--harmonic must be 1-15");
+    }
+    if !(100e3..=3e9).contains(&hw.freq_hz) {
+        bail!("--freq must be 100 kHz to 3 GHz (e.g. 87.6 in MHz, or 999k)");
+    }
+    if hw.freq_hz / (hw.harmonic as f64) < 100e3 {
+        bail!("--harmonic {} would make {:.1} kHz, below 100 kHz", hw.harmonic, hw.freq_hz / hw.harmonic as f64 / 1e3);
     }
     if hw.power > 7 {
         bail!("--power must be 0-7");
     }
     Ok(())
+}
+
+/// The options the hardware is opened with: for `--harmonic N` the
+/// fundamental `--freq / N`.
+fn fundamental(hw: &HardwareArgs, output: Output) -> anyhow::Result<(HardwareArgs, Output)> {
+    if hw.harmonic == 1 {
+        return Ok((hw.clone(), output));
+    }
+    if output == Output::Amplitude {
+        bail!("AM is transmitted on the fundamental (--harmonic 1): a pulse's harmonics do not follow its width");
+    }
+    let mut at = hw.clone();
+    at.freq_hz = hw.freq_hz / hw.harmonic as f64;
+    Ok((at, output.at_fundamental(hw.harmonic)))
 }
 
 impl Selected {
@@ -125,11 +155,32 @@ impl Selected {
 
     pub fn open(&self, hw: &HardwareArgs, output: Output) -> anyhow::Result<Box<dyn RfSink>> {
         info!("txengine {}", crate::VERSION);
-        self.backend.open(&self.args, hw, output)
+        let (at, output) = fundamental(hw, output)?;
+        let sink = self.backend.open(&self.args, &at, output)?;
+        if hw.harmonic == 1 {
+            return Ok(sink);
+        }
+        warn!(
+            "transmitting on harmonic {} of {:.6} MHz: the fundamental is stronger than {:.6} MHz; band-pass \
+             filter the output",
+            hw.harmonic,
+            sink.info().carrier_hz / 1e6,
+            sink.info().carrier_hz * hw.harmonic as f64 / 1e6
+        );
+        Ok(Box::new(harmonic::HarmonicSink::new(sink, hw.harmonic)))
     }
 
     pub fn probe(&self, hw: &HardwareArgs, output: Output) -> anyhow::Result<()> {
-        self.backend.probe(&self.args, hw, output)
+        let (at, output) = fundamental(hw, output)?;
+        if hw.harmonic > 1 {
+            println!(
+                "Harmonic: {} of {:.6} MHz carries {:.6} MHz (band-pass filter the output)",
+                hw.harmonic,
+                at.freq_hz / 1e6,
+                hw.freq_hz / 1e6
+            );
+        }
+        self.backend.probe(&self.args, &at, output)
     }
 }
 

@@ -190,6 +190,15 @@ pub fn modulation_ki(pll: &Pll) -> Option<u32> {
     (matches!(pll.id, PllId::A | PllId::C) && !pll.is_bcm2711()).then_some(MODULATION_KI)
 }
 
+/// Highest carrier planned (Hz). Above about 400 MHz the clock generators'
+/// output fades: measured against the third harmonic of a carrier at a
+/// third of the frequency, which a square wave has 9.5 dB below its
+/// fundamental, a Zero 2 W's fundamental was 8 dB short of that at
+/// 400 MHz and 29 dB short at 446 MHz (Raspberry Pi 2: 14 dB), while up
+/// to 380 MHz it was within 1 dB. Above, a harmonic carries the signal
+/// better (`--harmonic 3`).
+pub const MAX_CARRIER_HZ: f64 = 400e6;
+
 /// Plan PLL modulation for `pll`, from a crystal of nominally `osc` Hz.
 pub fn plan_pll(pll: &Pll, gpclk: usize, carrier: f64, osc: f64, max_offset: f64, max_change: f64) -> Result<BcmPlan> {
     let room = PllRoom::of(pll, cm::gp(gpclk), max_change);
@@ -207,6 +216,7 @@ fn plan_in_room(
     osc: f64,
     max_offset: f64,
 ) -> Result<BcmPlan> {
+    check_carrier(carrier)?;
     let unit_hz = osc * room.fb / (1u64 << cm::A2W_FRAC_BITS) as f64;
     // Room for correcting the crystal error at run time.
     let reserve_hz = carrier * MAX_CLOCK_ERROR_PPM * 1e-6;
@@ -271,8 +281,16 @@ fn plan_in_room(
     best.map(|b| b.1).ok_or_else(|| room.exhausted(id, &format!("{:.4} MHz", carrier / 1e6)))
 }
 
+fn check_carrier(carrier: f64) -> Result<()> {
+    if carrier > MAX_CARRIER_HZ {
+        return Err(crate::beyond_fundamental(carrier, MAX_CARRIER_HZ, "the clock generators"));
+    }
+    Ok(())
+}
+
 /// Plan clock-divider modulation from the PER channel of `pll` (unchanged).
 pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Result<BcmPlan> {
+    check_carrier(carrier)?;
     let per = pll.per_divider().filter(|_| pll.is_powered() && pll.is_locked()).ok_or_else(|| {
         HalError::Hardware(format!("{} is not running; cannot use it as the clock divider source", pll.id.name()))
     })?;
@@ -1696,6 +1714,43 @@ mod tests {
         let p = plan_a(144e6, 10e3).unwrap();
         assert!(p.spur_warning(10e3).unwrap().contains("the carrier is 0 Hz from a point where PLLA"), "{p:?}");
         assert!(plan_a(145.5e6, 10e3).unwrap().spur_warning(10e3).is_none());
+    }
+
+    /// Narrow-band FM channels from short wave to VHF (UHF is beyond the
+    /// clock generators: a harmonic).
+    #[test]
+    fn plla_reaches_narrow_fm_bands() {
+        let bands: [(f64, f64, f64); _] = [
+            (26.965e6, 27.405e6, 10e3), // CB
+            (29.51e6, 29.69e6, 10e3),   // 10 m FM
+            (51.0e6, 54.0e6, 20e3),     // 6 m FM
+            (69.9e6, 70.5e6, 12.5e3),   // 4 m
+            (144.0e6, 148.0e6, 12.5e3), // 2 m
+            (148.0e6, 174.0e6, 12.5e3), // VHF land mobile, marine VHF
+            (222.0e6, 225.0e6, 20e3),   // 1.25 m
+        ];
+        for (lo, hi, step) in bands {
+            let n = ((hi - lo) / step).round() as u32;
+            for k in 0..=n {
+                let f = lo + k as f64 * step;
+                // Every division puts the fraction near a whole number.
+                let gap = [153.6e6, 166.4e6, 172.8e6].iter().any(|&g: &f64| (f - g).abs() <= 50e3);
+                let p = match plan_a(f, 10e3) {
+                    Err(_) if gap => continue,
+                    p => p.unwrap_or_else(|e| panic!("{f}: {e}")),
+                };
+                assert!((p.carrier_hz - f).abs() <= p.step_hz / 2.0 && p.max_offset_hz >= 10e3, "{f}: {p:?}");
+                assert!(p.gp_div >= MIN_DIVI, "{f}: {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_clock_generators_stop_at_400_mhz() {
+        let p = plan_a(380e6, 10e3).unwrap();
+        assert!(p.gp_div >= MIN_DIVI, "{p:?}");
+        let e = plan_a(446e6, 10e3).unwrap_err().to_string();
+        assert!(e.contains("--harmonic 3"), "{e}");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! the real-time transmit path.
 
 pub mod fir;
+pub mod iir;
 pub mod limiter;
 pub mod nco;
 pub mod optimize;
@@ -11,6 +12,7 @@ pub mod preemphasis;
 pub mod window;
 
 pub use fir::{Fir, FirDesign, LinearPhaseFir, PolyphaseInterpolator};
+pub use iir::Biquads;
 pub use limiter::{LookaheadGain, PeakLimiter, PreemphasisLimiter};
 pub use nco::{PhaseAccumulator, SineTable};
 pub use preemphasis::Preemphasis;

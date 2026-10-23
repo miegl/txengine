@@ -25,14 +25,15 @@ transmission mode or a hardware platform means implementing one side.
 | Crate | Contents |
 |---|---|
 | `txengine-core` | `Modulator` and `RfSink` traits, `SinkInfo`, `RenderContext`. No dependencies. |
-| `txengine-dsp` | Allocation-free DSP blocks: Kaiser FIR design, linear-phase block FIRs, polyphase interpolator, pre-emphasis, pre-emphasis-aware look-ahead limiter, phase accumulator and sine table, small optimiser. |
+| `txengine-dsp` | Allocation-free DSP blocks: Kaiser FIR design, linear-phase block FIRs, polyphase interpolator, an elliptic high-pass (second-order sections), pre-emphasis, pre-emphasis-aware look-ahead limiter, phase accumulator and sine table, small optimiser. |
 | `txengine-rds` | EN 50067: group coding and CRC, character set, scheduler/encoder, the physical layer (`RdsModulator`), and an independent decoder used by tests and `analyze`. |
 | `txengine-fm` | The wide-band FM mode: `MpxGenerator` (stereo multiplex) and `WfmModulator` (the `Modulator` implementation, control commands). |
+| `txengine-nfm` | The narrow-band FM mode: `BasebandGenerator` (voice and squelch signalling to frequency deviation), CTCSS tones and DCS words (`subaudio`), and `NfmModulator`. |
 | `txengine-am` | The AM broadcast mode: `EnvelopeGenerator` (programme to carrier envelope) and `AmModulator`. |
 | `txengine-audio` | Input decoding (symphonia), resampling (rubato), the lock-free ring to the transmit thread, clock-drift steering for live input; the programme the modes share (`Programme`, `AudioFeed`). |
 | `txengine-hal` | Hardware: platform detection, MMIO, DMA memory providers, the BCM283x/BCM2711 backends and the RP1 (Pi 5) backends (FM and AM each), amplitude by pulse width (`am`), the shutdown guardian; usbfs (USB without libusb) and the Pico backend (planning, `RfSink`). |
 | `txengine-pico-protocol` | The USB protocol between txengine and the Pico firmware, and the arithmetic both sides share: the sigma-delta modulator of FM, the pulse quantiser of AM (`am`). `no_std`, no dependencies. |
-| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, `devices`, the hardware backends and their selection (`hw/`), the programme input options every mode shares, and per mode its options, set-up and tools (WFM: `analyze`). |
+| `txengine` | The command-line program: engine loop, control FIFO/socket, file sinks, `probe`, `tone`, `devices`, the hardware backends and their selection (`hw/`, also transmitting on a harmonic), the programme input options every mode shares, and per mode its options, set-up and tools (WFM: `analyze`). |
 | `firmware/pico` | The RP2040/RP2350 firmware (embassy-rp), a cargo workspace of its own for the bare-metal targets. |
 
 ## The two interfaces
@@ -80,13 +81,14 @@ so that it *ends* at the minute edge of the emission time, not the render
 time, and the WFM modulator keeps its subcarriers and the programme's
 playback speed true to the actual rate.
 
-A new transmission mode (e.g. narrow-band FM, a digital mode) implements
-`Modulator`. A mode that needs a different kind of sample (I/Q, say) adds a
-`SampleFormat` variant, and sinks that can produce it advertise it.
+A new transmission mode (e.g. a digital mode) implements `Modulator`. A
+mode that needs a different kind of sample (I/Q, say) adds a `SampleFormat`
+variant, and sinks that can produce it advertise it.
 
 On the command line every mode is a command with its own subcommands
-(`txengine wfm tx | render | analyze`, `txengine am tx | render`); `probe`
-and `tone` need no mode. A mode's options are a clap `Args` struct that
+(`txengine wfm tx | render | analyze`, `txengine nfm tx | render`,
+`txengine am tx | render`); `probe` and `tone` need no mode (they plan for
+one with `--mode`). A mode's options are a clap `Args` struct that
 implements `Mode` (`txengine/src/mode.rs`): what it needs from the
 transmitter (`hw::Output`: frequency modulation over a range, or
 amplitude), a check of the options, and building its modulator for the
@@ -95,8 +97,8 @@ programme must fill at the start). The generic `Tx<M>` and `Render<M>`
 (`txengine/src/cli.rs`) add the options every mode shares (hardware,
 control, file output), the programme input options are one flattened
 struct (`txengine/src/programme.rs`), and `mode::transmit` and
-`mode::render` run any mode. The modes live in `txengine/src/wfm/` and
-`txengine/src/am/`.
+`mode::render` run any mode. The modes live in `txengine/src/wfm/`,
+`txengine/src/nfm/` and `txengine/src/am/`.
 
 ## Signal processing (wide-band FM)
 
@@ -155,6 +157,43 @@ depends on 12 symbols, which are tabulated in three groups of four (16 sign
 patterns each). Once per bit the waveform of that bit is assembled from
 three table rows, and each output sample is one interpolated look-up. The
 level is normalised to the all-zero reference sine (EN 50067 1.3).
+
+## Signal processing (narrow-band FM)
+
+Voice in a 12.5 or 25 kHz channel, with a CTCSS tone or a DCS code for
+the receivers' squelch (`txengine-nfm`), in blocks of up to 512 output
+samples like the other modes. The samples are the deviation in Hz, as in
+WFM.
+
+1. **Audio rate** `fa = fs / floor(fs / 16 kHz)` (16.7 kHz at 250 and
+   166.7 kS/s, 17.3 kHz at 190 kS/s): mono mix, gain, high-pass,
+   pre-emphasis, low-pass.
+   * The high-pass is an 8th-order elliptic filter (four second-order
+     sections in `f64`, `txengine-dsp::iir`): the voice band from 300 Hz
+     within 0.1 dB, 60 dB down from 254 Hz, the highest standard CTCSS
+     tone, to DC. Its analogue prototype is tabulated (the tests check its
+     response), made a high-pass at the pre-warped edge and digital by the
+     bilinear transform for whatever `fa` the output gives.
+   * The pre-emphasis is the WFM mode's first-order shelf (750 µs:
+     6 dB/octave from 212 Hz), normalised to 1 at 1 kHz: a full-scale
+     1 kHz tone deviates the full voice deviation.
+   * The low-pass at the audio bandwidth (3 kHz) is linear phase, 60 dB
+     from 10 % above it.
+2. **Interpolation** to `fs` (polyphase, 80 dB): the images of the audio
+   would widen the signal beyond its channel.
+3. **Limiter** (`PeakLimiter`, as in AM): the true peaks of the voice
+   within ±1; look-ahead 1.5 ms, release 80 ms. It neither clips nor
+   splatters.
+4. **Deviation**: voice × `Dv` + sub-audio × `Ds`, `Dv = D − Ds` (`Ds`
+   15 % of `D` by default), so the sum never exceeds `D`. The CTCSS tone
+   is a phase accumulator; DCS sends its 23-bit Golay word (polynomial
+   `0xC75`, data `100` and the code's 9 bits, lowest bit first) at
+   134.4 bit/s with raised-cosine transitions one bit long, 52 dB less
+   power above 300 Hz than below. Both follow `RenderContext::sample_rate`,
+   so the crystal correction keeps the tone and the bit rate true.
+
+The output's sample-and-hold and the PLL responses the sinks report do not
+matter below 3 kHz (under 0.01 dB), so nothing is equalised.
 
 ## Signal processing (AM)
 
@@ -216,12 +255,27 @@ largest offset planned (the quiet passages) plus 30 ppm (the crystal
 correction); a plan that falls short of the first part logs a warning (and
 `txengine probe` shows it).
 
+Each frequency-modulating backend makes carriers up to a limit of its
+clock outputs (`MAX_CARRIER_HZ`: 400 MHz on the BCM boards, 1 GHz on the
+RP1 and the Pico). Beyond, `--harmonic N` opens the backend at `f / N`
+with `1 / N` of the mode's largest offset, and wraps its sink in
+`hw::harmonic::HarmonicSink`, which reports the carrier, offsets and
+resolution `N` times larger and divides every sample by `N` on its way to
+the hardware: the `N`-th harmonic of the pin's square wave then carries
+the modulation as planned. The crystal correction passes through
+unchanged (it is relative). AM refuses it: a pulse's harmonics do not
+follow its width as the fundamental does.
+
 ### Raspberry Pi 5 (RP1)
 
 * The carrier is `pll_audio` (or `pll_video`) → `clk_gp0..2` → GPIO. The PLL's
   24-bit fractional feedback divider is the modulation input; post dividers
-  and the clock generator divide down to the carrier. The plan is verified
-  with RP1's frequency counter.
+  and the clock generator divide down to the carrier (up to 1 GHz the PLL
+  drives the pin undivided). The plan is verified with RP1's frequency
+  counter. The fraction only moves within its whole number, so a carrier
+  whose VCO lands near a whole multiple of the 50 MHz reference for every
+  division (near multiples of 50 MHz) cannot be modulated, and the planner
+  says so.
 * Pacing: an RP1 DMA "tick" (xosc / N, e.g. 50 MHz / 200 = 250 kS/s) drives
   the handshake of one channel of the Synopsys AXI DMAC. Samples live in
   host memory pinned through io_uring (anonymous pages, long-term pinned,
@@ -278,14 +332,19 @@ correction); a plan that falls short of the first part logs a warning (and
   HDMI; the UARTs tolerate about ±3 % of baud rate error, and the SD and
   SDIO buses run at their 50 MHz maximum. A PLL whose only users are the
   GPU's video and 3D blocks (`h264`, `isp`, `v3d` on its CORE channel:
-  normally PLLA) may move down by up to 15 % on the BCM2836/7
-  (`cprman::GPU_PLL_MAX_DECREASE`): from 2250 MHz that reaches every carrier
+  normally PLLA) may move down by up to 25 % on the BCM2836/7
+  (`cprman::GPU_PLL_MAX_DECREASE`): from 2250 MHz −12 % reach every carrier
   in 87.5–108 MHz, where ±3 % reaches 76 % of the band (PLLC at ±3 %:
-  50 %). The planner takes the least change that keeps the carrier clear of
-  the PLL's spurs (above): −12 % at most, but for 15 of 2051 FM carriers
-  (down to −14 %). Idle PLLs are preferred and powered up with the kernel's loop
-  settings; otherwise, on the BCM2836/7, PLLA, then PLLC (the BCM2711, not
-  measured, keeps PLLC first).
+  50 %), and −25 % the narrow-band FM channels (all of CB, the amateur
+  bands and marine VHF up to 225 MHz; in 148–174 MHz all but three spots
+  where every division puts the fraction at a whole number). The planner
+  takes the least change that keeps the carrier clear of the PLL's spurs
+  (above): in the FM band −12 % at most, but for 21 of 2051 carriers (down
+  to −22 %). The
+  carrier stays at or below 400 MHz, above which the generators' output
+  fades (`fm::MAX_CARRIER_HZ`). Idle PLLs are preferred and powered up with
+  the kernel's loop settings; otherwise, on the BCM2836/7, PLLA, then PLLC
+  (the BCM2711, not measured, keeps PLLC first).
 * Loop gain of PLLA and PLLC: the firmware and Linux run every PLL with the loop
   filter gains KI 2, KP 8, KA 2 (`A2W_PLLx_ANA1/3`), which give PLLA a
   loop bandwidth of about 125 kHz (natural frequency fitted to the
@@ -457,9 +516,14 @@ either method, and AM.
 * **Carrier (PLL method)**: `PLL_USB` (the system and USB clocks both run
   from `PLL_SYS` at 144 MHz, USB at 144 / 3), its post dividers and
   `clk_gpout0` onto GP21. The PLL compares at the crystal / 2 (6 MHz: a
-  divider step moves the carrier half as far as at 12 MHz). The divider from
+  divider step moves the carrier half as far as at 12 MHz); in narrow-band
+  FM at the crystal's 12 MHz where only that is clear of the PLL's spurs
+  (`plan::reference_dividers`, `plan_clearest`). The divider from
   the VCO is the largest the VCO range allows (the smallest steps) among
-  those clear of the PLL's spurs (above), 9–18 in the FM band.
+  those clear of the PLL's spurs (above), 9–18 in the FM band, 2 or 3 at
+  UHF. `clk_gpout0` divides only up to 160 MHz of input (it is specified to
+  150 MHz); passing the post dividers on undivided it puts out up to 1 GHz
+  (measured).
 * **Modulation (PLL method)**: the feedback divider is integer only, so a
   MASH 1-1 (`sigma_delta::Mash11`, input in 30-bit fixed point over 0–2
   steps) dithers it over `base … base + 4` at 3 MHz, interpolating linearly

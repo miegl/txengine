@@ -360,10 +360,17 @@ impl PllUsers {
 /// 3D blocks (normally PLLA) may be moved on the BCM2836/7: those blocks
 /// then run up to this much slower, and nothing else depends on them. From
 /// PLLA's 2250 MHz this reaches every FM carrier in 87.5–108 MHz (at most
-/// −12 % is needed; ±3 % reaches 76 % of the band). The loop's response
-/// and noise measure the same from 1927 to 2365 MHz (−14 % to +5 %).
-/// Upwards, which would overclock the blocks, the general limit applies.
-pub const GPU_PLL_MAX_DECREASE: f64 = 0.15;
+/// −12 % is needed; ±3 % reaches 76 % of the band), and with the full
+/// −25 % every narrow-band FM channel of CB, the 10, 6, 4, 2 and 1.25 m
+/// amateur bands and marine VHF, and of 148–174 MHz all but those within
+/// 50 kHz of 153.6, 166.4 and 172.8 MHz (where every division puts the
+/// fraction at a whole number); −15 % left 17 marine channels out
+/// (156.3–159.1 MHz). Planners
+/// prefer the least change, so a VCO this far down only serves carriers
+/// that need it. The loop's response and noise measure the same from 1927
+/// to 2365 MHz (−14 % to +5 %). Upwards, which would overclock the
+/// blocks, the general limit applies.
+pub const GPU_PLL_MAX_DECREASE: f64 = 0.25;
 
 /// The PLLs to try for a clock generator at `own_ctl`, best first: an idle
 /// PLL is ideal (no other user, or not running). Otherwise, on the

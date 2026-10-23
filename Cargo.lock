@@ -573,6 +573,7 @@ dependencies = [
  "txengine-dsp",
  "txengine-fm",
  "txengine-hal",
+ "txengine-nfm",
  "txengine-rds",
 ]
 
@@ -629,6 +630,16 @@ dependencies = [
  "thiserror",
  "txengine-core",
  "txengine-pico-protocol",
+]
+
+[[package]]
+name = "txengine-nfm"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "txengine-audio",
+ "txengine-core",
+ "txengine-dsp",
 ]
 
 [[package]]

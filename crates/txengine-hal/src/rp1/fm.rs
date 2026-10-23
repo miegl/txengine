@@ -146,8 +146,16 @@ impl ClockPlan {
 
 const FRAC_ONE: f64 = (1u64 << regs::clk::PLL_FRAC_BITS) as f64;
 
+/// Highest carrier planned (Hz): measured up to 1 GHz, the PLL itself
+/// divided by 1. Beyond, the frequency counter that verifies the PLL
+/// output no longer counts it (1.3 GHz read as 1.8 MHz).
+pub const MAX_CARRIER_HZ: f64 = 1e9;
+
 /// Choose dividers for `carrier_hz`, from a reference of nominally `ref_hz`.
 pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_offset_hz: f64) -> Result<ClockPlan> {
+    if carrier_hz > MAX_CARRIER_HZ {
+        return Err(crate::beyond_fundamental(carrier_hz, MAX_CARRIER_HZ, "the clock generators"));
+    }
     let (auxsrc, phase_div) = match (pll, gpclk) {
         (Rp1Pll::Audio, 0) => (7, 1), // pll_audio
         (Rp1Pll::Audio, 1) => (7, 2), // pll_audio_pri_ph
@@ -168,6 +176,9 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
     // unless only a VCO outside keeps the carrier clear of the PLL's spurs.
     const PREFERRED_VCO: f64 = 1536e6;
     let windows = [(1000e6, 1600e6), (800e6, 2400e6)];
+    // Some division reached the VCO range, but the fraction sat too close
+    // to a whole number for the modulation.
+    let mut near_whole = false;
     let mut best: Option<((f64, bool, f64), ClockPlan)> = None;
     for (window, (vmin, vmax)) in windows.into_iter().enumerate() {
         for gp_div in 1..=16u32 {
@@ -187,6 +198,7 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
                     let dev = (max_offset_hz + reserve_hz) * n as f64 / ref_hz;
                     let margin = (frac - dev).min(1.0 - (frac + dev));
                     if margin < 0.01 {
+                        near_whole |= dev < 0.49;
                         continue;
                     }
                     // Prefer: clear of the PLL's spurs, then a VCO in the
@@ -231,6 +243,16 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
     }
     if let Some((_, plan)) = best {
         return Ok(plan);
+    }
+    if near_whole {
+        // The VCO is a multiple of the carrier: near a multiple of the
+        // reference, every division puts it near a whole feedback divider.
+        return Err(HalError::Config(format!(
+            "{:.4} MHz cannot be modulated: it is too close to a multiple of {:.0} MHz, where the PLL's \
+             feedback divider would have to cross a whole number",
+            carrier_hz / 1e6,
+            ref_hz / 1e6
+        )));
     }
     Err(HalError::Config(format!("no PLL configuration can produce {:.4} MHz", carrier_hz / 1e6)))
 }
@@ -845,6 +867,39 @@ mod tests {
         // Division 10 would put the VCO at 29.5 x 50 MHz.
         let p = plan_clocks(Rp1Pll::Audio, 0, 147.5e6, 50e6, 10e3).unwrap();
         assert!(p.n != 10 && p.clearance_hz > 100e3, "{p:?}");
+    }
+
+    /// Narrow-band FM channels from short wave to UHF, except within
+    /// 300 kHz of a multiple of 50 MHz.
+    #[test]
+    fn narrow_fm_bands() {
+        let bands: [(f64, f64, f64); _] = [
+            (26.965e6, 27.405e6, 10e3),     // CB
+            (29.51e6, 29.69e6, 10e3),       // 10 m FM
+            (51.0e6, 54.0e6, 20e3),         // 6 m FM
+            (144.0e6, 148.0e6, 12.5e3),     // 2 m
+            (156.0e6, 162.05e6, 25e3),      // marine VHF
+            (430.0e6, 440.0e6, 12.5e3),     // 70 cm
+            (446.00625e6, 446.2e6, 12.5e3), // PMR446
+            (450.0e6, 470.0e6, 12.5e3),     // UHF land mobile
+            (868.0e6, 870.0e6, 25e3),       // SRD
+        ];
+        for (lo, hi, step) in bands {
+            let n = ((hi - lo) / step).round() as u32;
+            for k in 0..=n {
+                let f = lo + k as f64 * step;
+                let near_50 = (f / 50e6 - (f / 50e6).round()).abs() * 50e6 < 300e3;
+                match plan_clocks(Rp1Pll::Audio, 0, f, 50e6, 10e3) {
+                    Ok(p) => {
+                        let half_step = 0.5 / p.frac_per_hz;
+                        assert!((p.carrier_hz - f).abs() <= half_step && p.max_offset_hz >= 10e3, "{f}: {p:?}");
+                    }
+                    Err(e) if near_50 => assert!(e.to_string().contains("multiple of 50 MHz"), "{f}: {e}"),
+                    Err(e) => panic!("{f}: {e}"),
+                }
+            }
+        }
+        assert!(plan_clocks(Rp1Pll::Audio, 0, 1.2e9, 50e6, 10e3).unwrap_err().to_string().contains("--harmonic 3"));
     }
 
     #[test]

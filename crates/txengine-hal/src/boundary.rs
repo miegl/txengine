@@ -28,8 +28,8 @@
 //! full scale), but narrow-band FM deviates thirty times less. Dithering
 //! the Pico's modulator does not help: the spur comes from the PLL itself.
 //!
-//! The planners therefore prefer divisions that keep the carrier clear of
-//! these points.
+//! The planners therefore prefer divisions (and the Pico a reference
+//! divider) that keep the carrier clear of these points.
 
 /// Where a PLL makes a spur next to its carrier: the VCO, or the carrier,
 /// at a multiple of one of these spacings (Hz).

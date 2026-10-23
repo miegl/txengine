@@ -181,10 +181,8 @@ impl Backend for Pico {
                 p.post_div2
             );
             println!(
-                "Aliases:  the strongest in the FM band {:.1} dBc at {:.2} MHz for an ideal bit stream \
-                 (the pin's output measures up to about -15 dBc)",
-                p.alias_dbc,
-                p.alias_hz / 1e6
+                "Aliases:  {} for an ideal bit stream (in the FM band the pin's output measures up to about -15 dBc)",
+                p.describe_alias()
             );
             println!(
                 "Modulation: {:.3} Hz per sample unit, ±{:.0} kHz; {:.1} S/s ({} words per sample)",

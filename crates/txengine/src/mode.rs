@@ -76,7 +76,12 @@ pub fn render(out: &OutputArgs, mode: &dyn Mode) -> anyhow::Result<()> {
     let mut sink: Box<dyn RfSink> = match out.format {
         RenderFormat::Wav => {
             let p = out.output.as_ref().context("--output is required")?;
-            Box::new(sinks::FileSink::wav(p, fs, format, out.hold)?)
+            // A full-scale sample is the largest deviation the mode plans for.
+            let full_scale = match mode.output() {
+                hw::Output::Frequency { max_offset_hz } => max_offset_hz,
+                hw::Output::Amplitude => 1.0,
+            };
+            Box::new(sinks::FileSink::wav(p, fs, format, full_scale, out.hold)?)
         }
         RenderFormat::Iq => {
             let p = out.output.as_ref().context("--output is required")?;

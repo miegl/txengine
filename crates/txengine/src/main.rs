@@ -1,4 +1,4 @@
-//! txengine – FM/RDS and AM transmitter for the Raspberry Pi.
+//! txengine – FM/RDS, NFM and AM transmitter for the Raspberry Pi.
 
 mod am;
 mod cli;
@@ -8,6 +8,7 @@ mod engine;
 mod hw;
 mod logger;
 mod mode;
+mod nfm;
 mod programme;
 mod rt;
 mod sinks;
@@ -32,20 +33,24 @@ fn main() {
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let result = match &cli.command {
         Command::Wfm(c) => wfm::run(c),
+        Command::Nfm(c) => nfm::run(c),
         Command::Am(c) => am::run(c),
-        Command::Probe(a) => {
-            let output = match a.mode {
-                cli::ModeName::Wfm => hw::Output::Frequency { max_offset_hz: wfm::MAX_OFFSET_HZ },
-                cli::ModeName::Am => hw::Output::Amplitude,
-            };
-            hw::select(&a.hw).and_then(|d| d.probe(&a.hw, output))
-        }
+        Command::Probe(a) => hw::select(&a.hw).and_then(|d| d.probe(&a.hw, output(a.mode))),
         Command::Devices => hw::list_devices(),
         Command::Tone(a) => tone(a),
     };
     if let Err(e) = result {
         error!("{e:#}");
         std::process::exit(1);
+    }
+}
+
+/// What a mode needs from the transmitter, for commands that only name it.
+fn output(mode: cli::ModeName) -> hw::Output {
+    match mode {
+        cli::ModeName::Wfm => hw::Output::Frequency { max_offset_hz: wfm::MAX_OFFSET_HZ },
+        cli::ModeName::Nfm => hw::Output::Frequency { max_offset_hz: nfm::MAX_OFFSET_HZ },
+        cli::ModeName::Am => hw::Output::Amplitude,
     }
 }
 
@@ -56,8 +61,15 @@ fn tone(a: &cli::ToneArgs) -> anyhow::Result<()> {
     let device = hw::select(&a.hw)?;
     let _lock = rt::instance_lock(&device.lock_name()?)?;
     rt::install_signal_handlers();
-    // Planned as for WFM, so that the measured response applies to it.
-    let mut sink = device.open(&a.hw, hw::Output::Frequency { max_offset_hz: wfm::MAX_OFFSET_HZ })?;
+    // Planned as for the mode, so that the measurement applies to it.
+    let out = output(a.mode);
+    let hw::Output::Frequency { max_offset_hz } = out else {
+        anyhow::bail!("tone transmits frequency modulation: use --mode wfm or nfm");
+    };
+    if a.deviation * a.tones.len() as f64 > max_offset_hz {
+        anyhow::bail!("the tones together may deviate at most {max_offset_hz:.0} Hz in this mode");
+    }
+    let mut sink = device.open(&a.hw, out)?;
     let fs = sink.info().sample_rate;
     if a.tones.iter().any(|&f| f >= fs / 2.0) {
         anyhow::bail!("tones must be below half the sample rate ({:.0} Hz)", fs / 2.0);

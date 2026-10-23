@@ -1,6 +1,6 @@
 [package]
 name = "txengine"
-description = "Raspberry Pi FM/RDS transmitter"
+description = "FM/RDS, NFM and AM transmitter for the Raspberry Pi and the Pico"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,6 +18,7 @@ txengine-dsp.workspace = true
 txengine-rds.workspace = true
 txengine-fm.workspace = true
 txengine-am.workspace = true
+txengine-nfm.workspace = true
 txengine-audio.workspace = true
 txengine-hal.workspace = true
 libc.workspace = true

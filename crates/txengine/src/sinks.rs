@@ -6,14 +6,12 @@ use std::path::Path;
 
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
-/// Deviation corresponding to a full-scale sample in rendered WAV files.
-pub const WAV_FULL_SCALE: f64 = 100_000.0;
-
 enum Out {
-    /// IEEE float WAV of deviation / 100 kHz, or of the envelope.
+    /// IEEE float WAV of deviation / `full_scale`, or of the envelope.
     Wav {
         w: BufWriter<File>,
         frames: u64,
+        full_scale: f64,
     },
     /// Interleaved complex float baseband (FM modulated at unit amplitude,
     /// or the envelope).
@@ -34,16 +32,16 @@ pub struct FileSink {
 const CHUNK: usize = 16384;
 
 impl FileSink {
-    /// The samples as WAV: a frequency offset / [`WAV_FULL_SCALE`], an
+    /// The samples as WAV: a frequency offset / `full_scale` (Hz), an
     /// amplitude as it is.
-    pub fn wav(path: &Path, fs: f64, format: SampleFormat, hold: bool) -> anyhow::Result<FileSink> {
+    pub fn wav(path: &Path, fs: f64, format: SampleFormat, full_scale: f64, hold: bool) -> anyhow::Result<FileSink> {
         let mut w = BufWriter::new(File::create(path)?);
         write_wav_header(&mut w, fs as u32, 0)?;
         let what = match format {
             SampleFormat::FrequencyOffset => "deviation WAV file",
             SampleFormat::Amplitude => "envelope WAV file",
         };
-        Ok(Self::new(Out::Wav { w, frames: 0 }, fs, format, what, hold))
+        Ok(Self::new(Out::Wav { w, frames: 0, full_scale }, fs, format, what, hold))
     }
 
     pub fn iq(path: &Path, fs: f64, format: SampleFormat, hold: bool) -> anyhow::Result<FileSink> {
@@ -115,9 +113,9 @@ impl RfSink for FileSink {
         let fs = self.info.sample_rate;
         let am = self.info.format == SampleFormat::Amplitude;
         match &mut self.out {
-            Out::Wav { w, frames } => {
+            Out::Wav { w, frames, full_scale } => {
                 for &s in samples {
-                    let v = if am { s } else { (s as f64 / WAV_FULL_SCALE) as f32 };
+                    let v = if am { s } else { (s as f64 / *full_scale) as f32 };
                     w.write_all(&v.to_le_bytes())?;
                 }
                 *frames += samples.len() as u64;
@@ -145,7 +143,7 @@ impl RfSink for FileSink {
 
     fn stop(&mut self) -> Result<(), SinkError> {
         match &mut self.out {
-            Out::Wav { w, frames } => {
+            Out::Wav { w, frames, .. } => {
                 w.flush()?;
                 let f = w.get_mut();
                 f.seek(SeekFrom::Start(0))?;

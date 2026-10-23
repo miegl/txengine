@@ -16,9 +16,13 @@ use crate::{HalError, MAX_CLOCK_ERROR_PPM, Result};
 
 const VCO_MIN: f64 = 750e6;
 const VCO_MAX: f64 = 1600e6;
-/// Highest output of the post dividers we use (the clock generators are
-/// specified up to 150 MHz).
+/// Highest output of the post dividers that a clock generator divides
+/// further (the clock generators are specified up to 150 MHz).
 const POSTDIV_OUT_MAX: f64 = 160e6;
+/// Highest carrier: a clock generator that passes `PLL_USB` on undivided
+/// puts it out up to 1 GHz (measured on both chips; at 1.3 GHz nothing
+/// came out of the pin).
+pub const MAX_CARRIER_HZ: f64 = 1e9;
 const ONE: f64 = (1u64 << FRAC_BITS) as f64;
 
 /// A frequency plan.
@@ -152,9 +156,47 @@ fn spurs(xosc_hz: f64, refdiv: u8) -> boundary::Spurs<'static> {
     }
 }
 
+/// The reference dividers to plan with, preferred first: 2 (6 MHz), and
+/// for narrow-band modulation (`max_offset_hz` under 50 kHz) also 1
+/// (12 MHz), which keeps carriers on odd multiples of 1.5 MHz clear of the
+/// PLL's spurs ([`spurs`]) at the cost of steps twice as large (about 6 dB
+/// more noise next to the carrier). A spur's 10–30 Hz of deviation matter
+/// there; in wide-band FM they are about at the noise floor.
+pub fn reference_dividers(max_offset_hz: f64) -> &'static [u8] {
+    if max_offset_hz < 50e3 { &[2, 1] } else { &[2] }
+}
+
+/// [`plan`] with the reference divided by each of `refdivs` in turn
+/// (preferred first), with `timing` for each reference frequency: the plan
+/// whose carrier is the clearest of the PLL's spurs, up to
+/// [`boundary::target_hz`].
+pub fn plan_clearest(
+    carrier_hz: f64,
+    xosc_hz: f64,
+    max_offset_hz: f64,
+    refdivs: &[u8],
+    timing: impl Fn(f64) -> Result<Timing>,
+) -> Result<Plan> {
+    let target = boundary::target_hz(carrier_hz, max_offset_hz);
+    let rank = |p: &Plan| boundary::rank(p.clearance_hz, target);
+    let mut best: Option<Plan> = None;
+    let mut error = None;
+    for &refdiv in refdivs {
+        match timing(xosc_hz / refdiv as f64).and_then(|t| plan(carrier_hz, xosc_hz, max_offset_hz, t, refdiv)) {
+            Ok(p) if best.as_ref().is_none_or(|b| rank(&p) > rank(b)) => best = Some(p),
+            Ok(_) => {}
+            Err(e) => error = error.or(Some(e)),
+        }
+    }
+    best.ok_or_else(|| error.expect("a reference divider"))
+}
+
 /// Plan `carrier_hz` from a `xosc_hz` crystal, able to move by
 /// ±`max_offset_hz` and to correct ±[`MAX_CLOCK_ERROR_PPM`].
 pub fn plan(carrier_hz: f64, xosc_hz: f64, max_offset_hz: f64, timing: Timing, refdiv: u8) -> Result<Plan> {
+    if carrier_hz > MAX_CARRIER_HZ {
+        return Err(crate::beyond_fundamental(carrier_hz, MAX_CARRIER_HZ, "the clock outputs"));
+    }
     let fref = xosc_hz / refdiv as f64;
     let reserve = max_offset_hz + carrier_hz * MAX_CLOCK_ERROR_PPM * 1e-6;
     let target = boundary::target_hz(carrier_hz, max_offset_hz);
@@ -169,7 +211,7 @@ pub fn plan(carrier_hz: f64, xosc_hz: f64, max_offset_hz: f64, timing: Timing, r
             for gpout_div in 1..=64u16 {
                 let d = post_div1 as f64 * post_div2 as f64 * gpout_div as f64;
                 let vco = carrier_hz * d;
-                if vco / (post_div1 as f64 * post_div2 as f64) > POSTDIV_OUT_MAX || vco > VCO_MAX {
+                if gpout_div > 1 && vco / (post_div1 as f64 * post_div2 as f64) > POSTDIV_OUT_MAX || vco > VCO_MAX {
                     continue;
                 }
                 let n = vco / fref;
@@ -230,6 +272,14 @@ mod tests {
     /// 6 MHz / 2 = 3 MHz updates, 18 per sample.
     const T: Timing = Timing { update_div: 2, sample_updates: 18 };
 
+    /// The planner with the reference dividers for `max_offset_hz`, 3 MHz
+    /// updates.
+    fn clearest(f: f64, max_offset_hz: f64) -> Plan {
+        let timing = |fref: f64| Ok(Timing { update_div: (fref / 3e6) as u8, sample_updates: 18 });
+        plan_clearest(f, 12e6, max_offset_hz, reference_dividers(max_offset_hz), timing)
+            .unwrap_or_else(|e| panic!("{f}: {e}"))
+    }
+
     /// Whether `f` is within `d` of a multiple of `m`.
     fn near(f: f64, m: f64, d: f64) -> bool {
         (f / m - (f / m).round()).abs() * m < d
@@ -240,7 +290,7 @@ mod tests {
         let (mut worst_step, mut stuck) = (0f64, 0);
         for k in 8750..=10800 {
             let f = k as f64 * 10e3;
-            let p = plan(f, 12e6, 100e3, T, 2).unwrap_or_else(|e| panic!("{f}: {e}"));
+            let p = clearest(f, 100e3);
             assert!((p.carrier_hz - f).abs() < 1e-3, "{f}");
             let x = p.center(0.0) as f64 / ONE;
             assert!((x - (p.n - p.base as f64 - 1.0)).abs() < 1e-8);
@@ -261,20 +311,64 @@ mod tests {
         assert!(worst_step < 0.7e6, "{worst_step}");
     }
 
+    /// Narrow-band FM channels from CB to 2 m.
     #[test]
-    fn plans_clear_of_the_spurs() {
-        // 145.5 MHz is a multiple of 1.5 MHz: with the 6 MHz reference
-        // every division is next to a spur, with the 12 MHz one division 9
-        // (VCO 1309.5 MHz) is clear.
-        assert!(plan(145.5e6, 12e6, 10e3, T, 2).unwrap().spur_warning(10e3).is_some());
-        let t12 = Timing { update_div: 4, sample_updates: 18 };
-        let p = plan(145.5e6, 12e6, 10e3, t12, 1).unwrap();
-        assert!(p.division() == 9 && p.clearance_hz > 50e3, "{p:?}");
-        // One channel up is clear with the 6 MHz reference, division 10.
-        let p = plan(145.5125e6, 12e6, 10e3, T, 2).unwrap();
-        assert!(p.division() == 10 && p.spur_warning(10e3).is_none(), "{p:?}");
-        // On a multiple of 3 MHz every VCO is on a spur.
-        assert!(plan(90e6, 12e6, 100e3, T, 2).unwrap().spur_warning(100e3).unwrap().contains("--synthesis pio"));
+    fn narrow_band_plans_clear_of_the_spurs() {
+        // Division 10 puts the VCO at 1455 MHz (a multiple of 3 MHz), and
+        // the carrier is on one of 1.5 MHz: the 12 MHz reference, with
+        // the VCO at 1309.5 MHz (division 9).
+        let p = clearest(145.5e6, 10e3);
+        assert_eq!((p.refdiv, p.division()), (1, 9), "{p:?}");
+        assert!(p.clearance_hz > 50e3 && p.spur_warning(10e3).is_none());
+        // One channel up is clear with the 6 MHz reference.
+        let p = clearest(145.5125e6, 10e3);
+        assert_eq!((p.refdiv, p.division()), (2, 10), "{p:?}");
+        // Every carrier but those next to a multiple of 2 or 3 MHz.
+        let bands: [(f64, f64, f64); 2] = [(26.965e6, 27.405e6, 10e3), (144e6, 148e6, 12.5e3)];
+        for (lo, hi, step) in bands {
+            let n = ((hi - lo) / step).round() as u32;
+            for k in 0..=n {
+                let f = lo + k as f64 * step;
+                let p = clearest(f, 10e3);
+                let target = boundary::target_hz(f, 10e3);
+                let clear = p.clearance_hz >= target;
+                assert_eq!(clear, !(near(f, 2e6, target) || near(f, 3e6, target)), "{f}: {p:?}");
+            }
+        }
+        assert!(clearest(146e6, 10e3).spur_warning(10e3).is_some());
+        // Wide-band FM keeps the 6 MHz reference.
+        let p = clearest(88.5e6, 100e3);
+        assert!(p.refdiv == 2 && p.spur_warning(100e3).unwrap().contains("--synthesis pio"), "{p:?}");
+    }
+
+    /// Narrow-band FM channels from short wave to UHF.
+    #[test]
+    fn narrow_fm_bands() {
+        let bands: [(f64, f64, f64); _] = [
+            (26.965e6, 27.405e6, 10e3),     // CB
+            (29.51e6, 29.69e6, 10e3),       // 10 m FM
+            (51.0e6, 54.0e6, 20e3),         // 6 m FM
+            (69.9e6, 70.5e6, 12.5e3),       // 4 m
+            (144.0e6, 148.0e6, 12.5e3),     // 2 m
+            (156.0e6, 162.05e6, 25e3),      // marine VHF
+            (222.0e6, 225.0e6, 20e3),       // 1.25 m
+            (430.0e6, 440.0e6, 12.5e3),     // 70 cm
+            (446.00625e6, 446.2e6, 12.5e3), // PMR446
+            (450.0e6, 470.0e6, 12.5e3),     // UHF land mobile
+            (868.0e6, 870.0e6, 25e3),       // SRD
+        ];
+        for (lo, hi, step) in bands {
+            let n = ((hi - lo) / step).round() as u32;
+            for k in 0..=n {
+                let f = lo + k as f64 * step;
+                let p = plan(f, 12e6, 10e3, T, 2).unwrap_or_else(|e| panic!("{f}: {e}"));
+                assert!((p.carrier_hz - f).abs() < 1e-3 && p.max_offset_hz() >= 10e3, "{f}: {p:?}");
+                // A clock generator divides only what it is specified for.
+                let postdiv_out = f * p.gpout_div as f64;
+                assert!(p.gpout_div == 1 || postdiv_out <= POSTDIV_OUT_MAX, "{f}: {p:?}");
+            }
+        }
+        assert!(plan(1.2e9, 12e6, 10e3, T, 2).unwrap_err().to_string().contains("--harmonic 3"));
     }
 
     #[test]
@@ -321,17 +415,26 @@ pub struct PioPlan {
     /// Carrier offset per sample unit (Hz, nominal crystal).
     pub resolution_hz: f64,
     pub sample_words: u8,
-    /// The strongest alias of the square wave's harmonics that lands in the
-    /// FM band (dB relative to the carrier), and where.
+    /// The band where aliases matter ([`alias_band`]), the strongest alias
+    /// of the square wave's harmonics in it (dB relative to the carrier),
+    /// and where.
+    pub alias_band: (f64, f64),
     pub alias_dbc: f64,
     pub alias_hz: f64,
 }
 
-/// The FM broadcast band, where aliases matter.
-const BAND: (f64, f64) = (87.5e6, 108.0e6);
+/// The FM broadcast band.
+const FM_BAND: (f64, f64) = (87.5e6, 108.0e6);
 
-/// The strongest product of the bit stream inside the FM band other than
-/// the carrier itself: the square wave's odd harmonics `k·f` appear at
+/// The band whose aliases the bit rate is chosen to keep low: the FM
+/// broadcast band for a carrier in it, else ±10 % around the carrier
+/// (about what a band-pass filter at the carrier passes).
+pub fn alias_band(f: f64) -> (f64, f64) {
+    if (FM_BAND.0..=FM_BAND.1).contains(&f) { FM_BAND } else { (0.9 * f, 1.1 * f) }
+}
+
+/// The strongest product of the bit stream inside `band` other than the
+/// carrier itself: the square wave's odd harmonics `k·f` appear at
 /// `|k·f − m·B|` with `1/k` of the fundamental's amplitude, shaped by the
 /// pin's hold (`sinc`). Returns (dBc, frequency).
 ///
@@ -340,7 +443,7 @@ const BAND: (f64, f64) = (87.5e6, 108.0e6);
 /// stronger on many of these lines, up to about −15 dBc (RP2040 and
 /// RP2350 alike, at 4 and 12 mA, at 240 and 249.6 Mbit/s), for reasons not
 /// yet understood. The bit rate is still chosen by this model.
-pub fn pio_alias(f: f64, b: f64) -> (f64, f64) {
+pub fn pio_alias(f: f64, b: f64, band: (f64, f64)) -> (f64, f64) {
     let hold = |x: f64| {
         let a = std::f64::consts::PI * x / b;
         if a == 0.0 { 1.0 } else { (a.sin() / a).abs() }
@@ -349,7 +452,7 @@ pub fn pio_alias(f: f64, b: f64) -> (f64, f64) {
     for k in (1..=25).step_by(2) {
         for m in 0..=k {
             let a = (k as f64 * f - m as f64 * b).abs();
-            if a < BAND.0 || a > BAND.1 || (k == 1 && m == 0) || (a - f).abs() < 300e3 {
+            if a < band.0 || a > band.1 || (k == 1 && m == 0) || (a - f).abs() < 300e3 {
                 continue;
             }
             let db = 20.0 * (hold(a) / hold(f) / k as f64).log10();
@@ -372,6 +475,7 @@ pub fn pio_plan(
     min_rate: f64,
     (min_hz, max_hz): (f64, f64),
 ) -> Result<PioPlan> {
+    let band = alias_band(carrier_hz);
     let mut best: Option<(f64, f64, u16, u8, u8)> = None;
     for fbdiv in 16..=320u16 {
         let vco = xosc_hz * fbdiv as f64;
@@ -384,7 +488,7 @@ pub fn pio_plan(
                 if b < min_hz || b > max_hz || carrier_hz >= b / 2.0 {
                     continue;
                 }
-                let (db, at) = pio_alias(carrier_hz, b);
+                let (db, at) = pio_alias(carrier_hz, b, band);
                 if best.is_none_or(|(d, ..)| db < d - 0.01) {
                     best = Some((db, at, fbdiv, post_div1, post_div2));
                 }
@@ -414,12 +518,29 @@ pub fn pio_plan(
         scale: scale as u32,
         resolution_hz: scale * b / 32.0 / two32,
         sample_words,
+        alias_band: band,
         alias_dbc,
         alias_hz,
     })
 }
 
 impl PioPlan {
+    /// The strongest alias in its band, for messages.
+    pub fn describe_alias(&self) -> String {
+        let (lo, hi) = self.alias_band;
+        if self.alias_hz == 0.0 {
+            format!("no alias in {:.1}-{:.1} MHz", lo / 1e6, hi / 1e6)
+        } else {
+            format!(
+                "strongest alias in {:.1}-{:.1} MHz {:.1} dBc at {:.2} MHz",
+                lo / 1e6,
+                hi / 1e6,
+                self.alias_dbc,
+                self.alias_hz / 1e6
+            )
+        }
+    }
+
     pub fn sample_rate(&self) -> f64 {
         self.bit_rate / 32.0 / self.sample_words as f64
     }

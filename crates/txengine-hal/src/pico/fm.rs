@@ -39,8 +39,9 @@ pub struct PicoFmConfig {
     pub phase: Option<u8>,
     /// Sigma-delta update rate [default: the fastest the firmware sustains].
     pub update_hz: Option<f64>,
-    /// Reference divider (the PLL compares at the crystal / `refdiv`).
-    pub refdiv: u8,
+    /// Reference divider (the PLL compares at the crystal / `refdiv`)
+    /// [default: [`plan::reference_dividers`]].
+    pub refdiv: Option<u8>,
     pub synthesis: Synthesis,
 }
 
@@ -110,9 +111,12 @@ pub fn pio_plan_for(cfg: &PicoFmConfig, info: &txengine_pico_protocol::Info) -> 
 /// Plan for `cfg` on a Pico with these properties, without opening it.
 pub fn plan_for(cfg: &PicoFmConfig, xosc_hz: f64, max_update_hz: f64) -> Result<Plan, SinkError> {
     let max_update_hz = cfg.update_hz.map_or(max_update_hz, |u| u.min(max_update_hz));
-    let fref = xosc_hz / cfg.refdiv as f64;
-    let timing = Timing::choose(fref, max_update_hz, cfg.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE), MIN_SAMPLE_RATE)?;
-    Ok(plan::plan(cfg.carrier_hz, xosc_hz, cfg.max_offset_hz, timing, cfg.refdiv)?)
+    let rate = cfg.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
+    let given = cfg.refdiv.map(|r| [r]);
+    let refdivs = given.as_ref().map_or(plan::reference_dividers(cfg.max_offset_hz), |r| &r[..]);
+    Ok(plan::plan_clearest(cfg.carrier_hz, xosc_hz, cfg.max_offset_hz, refdivs, |fref| {
+        Timing::choose(fref, max_update_hz, rate, MIN_SAMPLE_RATE)
+    })?)
 }
 
 pub struct PicoFmTransmitter {
@@ -176,7 +180,7 @@ impl PicoFmTransmitter {
                     fs,
                     if cfg.interpolate { " interpolated" } else { "" }
                 );
-                let loop_db_38k = pll_loop_db_38k(pico.info.chip, cfg.refdiv);
+                let loop_db_38k = pll_loop_db_38k(pico.info.chip, plan.refdiv);
                 (Method::Pll(plan.clone()), description, plan.carrier_hz, plan.resolution_hz, fs, loop_db_38k)
             }
             Synthesis::Pio => {
@@ -184,15 +188,14 @@ impl PicoFmTransmitter {
                 pico.configure_pio(&plan.config(cfg.gpio, cfg.drive_ma, cfg.interpolate, 0.0))?;
                 let fs = plan.sample_rate();
                 let description = format!(
-                    "{}: GPIO{} from PIO, {:.3} Mbit/s (system clock from PLL_USB), {:.0} S/s{}; \
-                     strongest alias in the FM band {:.1} dBc at {:.2} MHz (ideal bit stream)",
+                    "{}: GPIO{} from PIO, {:.3} Mbit/s (system clock from PLL_USB), {:.0} S/s{}; {} \
+                     (ideal bit stream)",
                     pico.describe(),
                     cfg.gpio,
                     plan.bit_rate / 1e6,
                     fs,
                     if cfg.interpolate { " interpolated" } else { "" },
-                    plan.alias_dbc,
-                    plan.alias_hz / 1e6
+                    plan.describe_alias()
                 );
                 (Method::Pio(plan.clone()), description, plan.carrier_hz, plan.resolution_hz, fs, 0.0)
             }

@@ -9,14 +9,14 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{am, wfm};
+use crate::{am, nfm, wfm};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "txengine",
     version = crate::VERSION,
-    about = "FM/RDS and AM transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB",
-    long_about = "FM/RDS and AM transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB.\n\n\
+    about = "FM/RDS, NFM and AM transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB",
+    long_about = "FM/RDS, NFM and AM transmitter for the Raspberry Pi (2, 3, 4, 5, Zero 2 W) and the Pico on USB.\n\n\
         Transmitting without a licence is illegal in most countries. Connect the output to a \
         receiver with a shielded cable and attenuator, or use a dummy load, and always low-pass \
         filter the square-wave output before it reaches an antenna."
@@ -37,6 +37,10 @@ pub enum Command {
     /// Wide-band FM broadcast: stereo multiplex and RDS.
     #[command(subcommand)]
     Wfm(Box<wfm::Command>),
+    /// Narrow-band FM: voice with CTCSS or DCS, from short wave and CB to
+    /// UHF.
+    #[command(subcommand)]
+    Nfm(Box<nfm::Command>),
     /// AM broadcast (double sideband, full carrier) on long, medium and
     /// short wave.
     #[command(subcommand)]
@@ -103,7 +107,8 @@ pub(crate) fn parse_ppm(s: &str) -> Result<Ppm, String> {
 
 #[derive(Debug, Clone, Args)]
 pub struct HardwareArgs {
-    /// Carrier frequency: MHz, or with a unit (87.6, 999k, 6.1M).
+    /// Carrier frequency: MHz, or with a unit (87.6, 999k, 6.1M,
+    /// 446.00625).
     #[arg(short = 'f', long = "freq", value_name = "FREQ", value_parser = parse_frequency)]
     pub freq_hz: f64,
     /// Transmitter: "pi" (this Raspberry Pi's GPIOs), "pico" (a Raspberry
@@ -116,11 +121,20 @@ pub struct HardwareArgs {
     /// [default: 4; AM: 18; Pico: 21].
     #[arg(short, long = "gpio", value_name = "N", help_heading = "Hardware")]
     pub gpio: Vec<u32>,
-    /// PLL that makes the carrier: in WFM the one to modulate (Pi 1-4: a, c,
-    /// d, or "clkdiv" to modulate the clock divider instead; Pi 5: audio,
-    /// video); in AM on the Pi 1-4 the one that clocks the PWM (a, c, d).
+    /// PLL that makes the carrier: in WFM and NFM the one to modulate (Pi
+    /// 1-4: a, c, d, or "clkdiv" to modulate the clock divider instead; Pi
+    /// 5: audio, video); in AM on the Pi 1-4 the one that clocks the PWM (a,
+    /// c, d).
     #[arg(long, help_heading = "Raspberry Pi")]
     pub pll: Option<String>,
+    /// Transmit on the Nth harmonic of the carrier the hardware makes (FM
+    /// and NFM): it makes FREQ / N, and the modulation is scaled to it. For
+    /// carriers above what the board makes directly (400 MHz on the Pi 2-4
+    /// and Zero 2 W, 1 GHz on the Pi 5 and the Pico). The fundamental is
+    /// far stronger than the wanted harmonic: band-pass filter the output
+    /// at FREQ.
+    #[arg(long, default_value_t = 1, value_name = "N", help_heading = "Hardware")]
+    pub harmonic: u32,
     /// Output drive strength 0-7 (2-16 mA; the Pi 5 and the Pico have 4
     /// steps up to 12 mA).
     #[arg(long, default_value_t = 7, value_name = "0-7", help_heading = "Hardware")]
@@ -133,14 +147,14 @@ pub struct HardwareArgs {
     /// speed.
     #[arg(long, default_value = "auto", value_parser = parse_ppm, allow_hyphen_values = true, value_name = "auto|PPM|off", help_heading = "Hardware")]
     pub ppm: Ppm,
-    /// Pico, WFM: how the carrier is made. "pll": PLL_USB's feedback
-    /// divider, dithered (any of the clock-output GPIOs). "pio": a PIO bit
-    /// stream at 240-264 Mbit/s (the Pico's system clock is raised for it,
-    /// and its core voltage to 1.20 V; any GPIO): less noise next to the
-    /// carrier, but the bit stream puts lines all over the FM band, measured
-    /// up to about -15 dBc (txengine picks the bit rate that keeps them
-    /// lowest). AM is always made by the PIO, one pulse per carrier cycle at
-    /// the raised clock.
+    /// Pico, WFM and NFM: how the carrier is made. "pll": PLL_USB's
+    /// feedback divider, dithered (any of the clock-output GPIOs). "pio": a
+    /// PIO bit stream at 240-264 Mbit/s (the Pico's system clock is raised
+    /// for it, and its core voltage to 1.20 V; any GPIO; carriers below half
+    /// the bit rate): less noise next to the carrier, but the bit stream
+    /// puts lines around it, in the FM band measured up to about -15 dBc
+    /// (txengine picks the bit rate that keeps them lowest). AM is always
+    /// made by the PIO, one pulse per carrier cycle at the raised clock.
     #[arg(long, value_name = "pll|pio", help_heading = "Raspberry Pi Pico")]
     pub synthesis: Option<String>,
     /// DMA channel to use [default: a free one].
@@ -161,9 +175,11 @@ pub struct HardwareArgs {
     /// after the reference edge (for measurements).
     #[arg(long, hide = true)]
     pub pico_phase: Option<u8>,
-    /// Pico: PLL reference divider (for measurements).
-    #[arg(long, hide = true, default_value_t = 2)]
-    pub pico_refdiv: u8,
+    /// Pico: PLL reference divider (for measurements) [default: 2, in
+    /// narrow-band FM 1 where only that keeps the carrier clear of the
+    /// PLL's spurs].
+    #[arg(long, hide = true)]
+    pub pico_refdiv: Option<u8>,
     /// Pico: sigma-delta update rate in Hz (for measurements).
     #[arg(long, hide = true)]
     pub pico_update_rate: Option<f64>,
@@ -215,8 +231,8 @@ pub struct Render<M: Args> {
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum RenderFormat {
     /// The modulation as 32-bit float WAV: in WFM the frequency deviation /
-    /// 100 kHz (the multiplex), in AM the envelope (1 = the transmitter's
-    /// full output).
+    /// 100 kHz (the multiplex), in NFM / 10 kHz, in AM the envelope (1 =
+    /// the transmitter's full output).
     Wav,
     /// Complex baseband signal, interleaved 32-bit float I/Q (.cf32).
     Iq,
@@ -249,6 +265,7 @@ pub struct OutputArgs {
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum ModeName {
     Wfm,
+    Nfm,
     Am,
 }
 
@@ -265,6 +282,10 @@ pub struct ProbeArgs {
 pub struct ToneArgs {
     #[command(flatten)]
     pub hw: HardwareArgs,
+    /// The transmission mode to plan the transmitter for (wfm or nfm), so
+    /// that its plan applies to the measurement.
+    #[arg(long, value_enum, default_value = "wfm")]
+    pub mode: ModeName,
     /// Tone frequencies in Hz (comma separated), each at --deviation.
     #[arg(long, value_delimiter = ',', default_value = "1000", value_name = "HZ")]
     pub tones: Vec<f64>,

@@ -1,0 +1,17 @@
+[package]
+name = "txengine-nfm"
+description = "Narrow-band FM mode (voice, CTCSS and DCS) for txengine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+txengine-core.workspace = true
+txengine-dsp.workspace = true
+txengine-audio.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true
