@@ -27,7 +27,7 @@ use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
 use super::Rp1;
-use super::clocks::{ClockGen, ClockGenRegs, FcSource, Pll, PllId, PllRegs, measure};
+use super::clocks::{ClockGen, ClockGenRegs, FcSource, Pll, PllId, PllRegs, VCO_WINDOWS, measure};
 use super::dma::{DmaChannel, Dmac};
 use super::gpio::{Drive, Gpio, PinRegs, gpclk_for_pin};
 use super::regs::{self, dmac::*, lli};
@@ -185,15 +185,11 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
     // Room for correcting the crystal error at run time.
     let reserve_hz = carrier_hz * MAX_CLOCK_ERROR_PPM * 1e-6;
     let target = boundary::target_hz(carrier_hz, max_offset_hz);
-    // The kernel runs pll_audio_core at 1536 MHz; stay in that region
-    // unless only a VCO outside keeps the carrier clear of the PLL's spurs.
-    const PREFERRED_VCO: f64 = 1536e6;
-    let windows = [(1000e6, 1600e6), (800e6, 2400e6)];
     // Some division reached the VCO range, but the fraction sat too close
     // to a whole number for the modulation.
     let mut near_whole = false;
     let mut best: Option<((f64, bool, f64), ClockPlan)> = None;
-    for (window, (vmin, vmax)) in windows.into_iter().enumerate() {
+    for (window, (vmin, vmax)) in VCO_WINDOWS.into_iter().enumerate() {
         for gp_div in 1..=16u32 {
             for div1 in 1..=7u32 {
                 for div2 in 1..=div1 {
@@ -215,10 +211,9 @@ pub fn plan_clocks(pll: Rp1Pll, gpclk: usize, carrier_hz: f64, ref_hz: f64, max_
                         continue;
                     }
                     // Prefer: clear of the PLL's spurs, then a VCO in the
-                    // first window, no GPCLK division, a VCO near the
-                    // known-good rate, the fraction far from whole numbers.
-                    let score =
-                        (gp_div - 1) as f64 * 10.0 + ((vco - PREFERRED_VCO) / PREFERRED_VCO).abs() * 5.0 - margin;
+                    // first window, no GPCLK division, the fraction far from
+                    // whole numbers.
+                    let score = (gp_div - 1) as f64 * 10.0 - margin;
                     // Its spurs: the VCO at a half multiple of the reference.
                     let spurs = boundary::Spurs { vco: &[ref_hz / 2.0], carrier: &[] };
                     let clearance_hz = spurs.clearance_hz(carrier_hz, n as f64);

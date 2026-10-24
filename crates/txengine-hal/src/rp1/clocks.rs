@@ -12,6 +12,15 @@ use crate::sys::wait_until;
 
 const LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// The VCO frequencies the planners use, best first (Hz). On a Raspberry
+/// Pi 5, `pll_audio` locked and counted exactly from 0.8 GHz, its feedback
+/// divider's lowest setting (16), to 4.2 GHz (above 4.35 GHz it runs
+/// free). A tone at 145.5 MHz modulated it equally cleanly at 1.46 and
+/// 2.91 GHz (its harmonics, the phase noise and the adjacent channel);
+/// at 0.87 GHz the noise was 3 dB higher, at 4.07 GHz the phase noise
+/// 1 kHz out 9 dB higher.
+pub const VCO_WINDOWS: [(f64, f64); 2] = [(1.0e9, 3.0e9), (0.8e9, 3.0e9)];
+
 /// One of RP1's three fractional-N PLLs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PllId {

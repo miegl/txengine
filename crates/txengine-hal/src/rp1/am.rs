@@ -32,7 +32,7 @@ use log::{debug, info, warn};
 use txengine_core::{RfSink, SampleFormat, SinkError, SinkInfo, SinkPoll};
 
 use super::Rp1;
-use super::clocks::{ClockGen, ClockGenRegs, FcSource, Pll, PllId, PllRegs, measure};
+use super::clocks::{ClockGen, ClockGenRegs, FcSource, Pll, PllId, PllRegs, VCO_WINDOWS, measure};
 use super::dma::{DmaChannel, Dmac};
 use super::gpio::{Drive, Gpio, PinRegs, pwm0_for_pin};
 use super::regs::{self, dmac::*, lli, pwm};
@@ -57,9 +57,6 @@ pub const MIN_CARRIER: f64 = 100e3;
 /// (3.8 M words/s). One word per carrier cycle: the highest carrier.
 const MAX_WORD_RATE_8: f64 = 6.2e6;
 const MAX_WORD_RATE_4: f64 = 3.6e6;
-
-/// The kernel runs pll_audio at 1536 MHz; prefer plans near it.
-const PREFERRED_VCO: f64 = 1536e6;
 
 /// Configuration of the RP1 AM transmitter.
 #[derive(Debug, Clone)]
@@ -126,7 +123,7 @@ pub fn plan(carrier_hz: f64, ref_hz: f64, sample_rate: f64) -> Result<AmPlan> {
     for n in (n_max.saturating_sub(64).max(8)..=n_max).rev() {
         let clk = 2.0 * n as f64 * carrier_hz;
         let mut best: Option<(f64, AmPlan)> = None;
-        for (vmin, vmax) in [(1000e6, 1600e6), (800e6, 2400e6)] {
+        for (vmin, vmax) in VCO_WINDOWS {
             for clk_div in 1..=64u32 {
                 for div1 in 1..=7u32 {
                     for div2 in 1..=div1 {
@@ -142,7 +139,8 @@ pub fn plan(carrier_hz: f64, ref_hz: f64, sample_rate: f64) -> Result<AmPlan> {
                         if !(16.0..=320.0).contains(&int) || frac < reserve || frac > 1.0 - reserve {
                             continue;
                         }
-                        let score = ((vco - PREFERRED_VCO) / PREFERRED_VCO).abs();
+                        // The most room for the crystal correction.
+                        let score = -frac.min(1.0 - frac);
                         if best.as_ref().is_none_or(|(s, _)| score < *s) {
                             let frac = (frac * FRAC_ONE).round();
                             let vco = (int + frac / FRAC_ONE) * ref_hz;

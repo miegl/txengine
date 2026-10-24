@@ -741,6 +741,16 @@ txengine renders the samples on the computer; the firmware puts them out.
   added after the PLL, not phase noise of it. It is the same for every
   `pll_audio` setting (VCO 1050–1750 MHz, integer or fractional,
   dividers), for `pll_sys`, and for any pad drive or slew.
+* **The PLL's range:** retuned step by step and counted, `pll_audio` locked
+  from 0.8 GHz, its feedback divider's lowest setting, to 4.2 GHz (above
+  4.35 GHz it runs free), and a tone at 145.5 MHz modulated it equally
+  cleanly at 1.46 and 2.91 GHz; at 0.87 GHz the noise was 3 dB higher, at
+  4.07 GHz the phase noise 1 kHz out 9 dB higher. txengine plans it within
+  1.0–3.0 GHz (down to 0.8 GHz if nothing else fits), where the kernel
+  runs it at 1536 MHz; plans away from 1536 MHz measured as cleanly:
+  87.6 MHz from 1226 MHz (THD −101 dB, separation 49 dB, response ±0.03 dB),
+  145.5125 MHz from 2328 MHz (SNR 61 dB, phase noise −88 dBc/Hz 1 kHz and
+  −97 dBc/Hz 10 kHz out, adjacent channel −56 dB).
 * **Carriers near multiples of 50 MHz** cannot be modulated: the PLL's
   VCO is a whole multiple of the carrier, so at a multiple of the 50 MHz
   reference every division puts the feedback divider's fraction at a whole

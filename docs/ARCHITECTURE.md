@@ -281,7 +281,12 @@ follow its width as the fundamental does.
   counter. The fraction only moves within its whole number, so a carrier
   whose VCO lands near a whole multiple of the 50 MHz reference for every
   division (near multiples of 50 MHz) cannot be modulated, and the planner
-  says so.
+  says so. The VCO is planned within 1.0–3.0 GHz, down to 0.8 GHz if
+  needed (`clocks::VCO_WINDOWS`): `pll_audio` locked from 0.8 GHz (the
+  feedback divider's minimum) to 4.2 GHz and modulated equally cleanly
+  from 1.46 to 2.91 GHz, while at 4.07 GHz its phase noise 1 kHz out was
+  9 dB higher. Within them the planner prefers no clock generator division
+  and the fraction far from whole numbers.
 * Pacing: an RP1 DMA "tick" (xosc / N, e.g. 50 MHz / 200 = 250 kS/s) drives
   the handshake of one channel of the Synopsys AXI DMAC. Samples live in
   host memory pinned through io_uring (anonymous pages, long-term pinned,
