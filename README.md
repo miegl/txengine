@@ -660,30 +660,31 @@ frequency are milder (−50 to −60 dB) and not avoided.
 #### Raspberry Pi 2–4 and Zero 2 W (BCM283x, BCM2711)
 
 * **FM**: fractional-N modulation of PLLA, PLLC or PLLD (20-bit fraction,
-  1–3 Hz steps), or a dithered fractional clock divider (`--pll clkdiv`), at
-  190 kS/s (Pi 4: 228 kS/s). The PLL is chosen automatically: on the Pi 2/3
-  and Zero 2 W PLLA, on the Pi 4 PLLC, which only clock the GPU's video and
-  3D blocks there and may therefore move down by up to 25 % (12 % reach the
-  whole FM band on the Pi 2/3 and Zero 2 W); PLLs that clock the rest of the
-  system (VPU, SD card, WiFi, UARTs) are only retuned within ±3 %. On the
-  Pi 2/3 and Zero 2 W, PLLA and PLLC run with a wider loop than the firmware
-  gives them (loop gain KI 5 instead of 2), which removes most of their
-  phase noise from the multiplex band. Carriers up to 400 MHz, above which
-  the clock generators' output fades, from 11 MHz in wide-band FM and
-  1.1 MHz in narrow-band FM; on the Pi 4, whose clock generators take at
-  most 600 MHz, up to 300 MHz, from 9.1 and 0.8 MHz (see [Hardware
-  notes](#raspberry-pi-24-and-zero-2-w)).
+  1–4 Hz steps), or a dithered fractional clock divider (`--pll clkdiv`), at
+  190 kS/s (Pi 4: 228 kS/s). The PLL is chosen automatically: one that
+  nothing else uses, anywhere in the range the hardware takes (on the Pi 4
+  PLLC, whose outputs the firmware parks), else on the Pi 2/3 and Zero 2 W
+  PLLA, which only clocks the GPU's video and 3D blocks there and may
+  therefore move down by up to 25 % (12 % reach the whole FM band); PLLs
+  that clock the rest of the system (VPU, SD card, WiFi, UARTs) are only
+  retuned within ±3 %. On the Pi 2/3 and Zero 2 W, PLLA and PLLC run with a
+  wider loop than the firmware gives them (loop gain KI 5 instead of 2),
+  which removes most of their phase noise from the multiplex band. Carriers
+  up to 400 MHz, above which the clock generators' output fades, from 11 MHz
+  in wide-band FM and 1.1 MHz in narrow-band FM; on the Pi 4, whose clock
+  generators take at most 600 MHz, up to 300 MHz, from 9.1 and 0.8 MHz (see
+  [Hardware notes](#raspberry-pi-24-and-zero-2-w)).
 * **AM**: this PWM has no phase-correct mode. In mark-space mode it puts out
   one pulse at the start of each range period, so it runs two periods per
   carrier cycle with pulses of `P/4 − u` and `P/4 + u` clocks: their
   fundamental is `sin(2π u / P)`, the law of one centred pulse of width
   `2u`, again with a constant phase. The PWM clock is a PLL (an idle one,
-  else PLLA, on the Pi 4 PLLC) divided by an integer at up to 250 MHz,
-  retuned so that the carrier period is a whole number of clocks: 62 steps
-  up to the full output at 999 kHz, 27 at 2.3 MHz. Carriers run from 100 kHz
-  to 4.2 MHz (two words per cycle: 8.4 million words per second; on a
-  Zero 2 W the DMA engine kept up to 10), on the Pi 4, whose DMA engine is
-  slower, to 2.2 MHz.
+  such as the Pi 4's PLLC, else PLLA) divided by an integer at up to
+  250 MHz, retuned so that the carrier period is a whole number of clocks:
+  62 steps up to the full output at 999 kHz, 27 at 2.3 MHz. Carriers run
+  from 100 kHz to 4.2 MHz (two words per cycle: 8.4 million words per
+  second; on a Zero 2 W the DMA engine kept up to 10), on the Pi 4, whose
+  DMA engine is slower, to 2.2 MHz.
 
 #### Pico and Pico 2 (RP2040, RP2350) on USB
 
@@ -837,6 +838,19 @@ txengine renders the samples on the computer; the firmware puts them out.
   cannot be modulated with its fraction near a whole number, and at these
   carriers every division the PLL can make puts it there. PLLC moved by
   −3.6 % caused no SD or WiFi errors and no lost packets on either board.
+* **What the PLLs take:** a PLL that nothing else uses is planned anywhere
+  it was measured to work, not within the range Linux or the firmware use.
+  Retuned step by step and counted with the frequency counter, PLLA locked
+  from 0.4 GHz up to 2.8 GHz on a Pi 2 and to 3.0 GHz on a Zero 2 W, with or
+  without its feedback pre-divider (Linux keeps 0.6–2.4 GHz and engages it
+  above 1.75 GHz); a tone modulated the Zero 2 W's PLLA equally cleanly from
+  0.73 to 2.91 GHz. txengine uses 0.8–2.6 GHz with the pre-divider engaged,
+  which halves the fraction the modulation sweeps, and prefers the middle.
+  The clock generators were exact when fed up to 1.6–1.8 GHz; txengine feeds
+  them up to 1.5 GHz (the firmware up to 1 GHz). A PLL counts as used by a
+  clock that selects its PER channel or one of its CORE channels, and by a
+  display or camera channel unless the firmware parked it at the divider
+  256.
 * **Clock generators above 400 MHz:** a GPCLK passes 380 MHz like any
   lower carrier, but above about 400 MHz its output fades. Measured against
   the third harmonic of a carrier at a third of the frequency (a square
@@ -884,20 +898,24 @@ txengine renders the samples on the computer; the firmware puts them out.
   refused: it would divide PLLD_PER, which runs at 750 MHz. The PWM and PCM
   clocks take 1.3 GHz.
 * **Pi 4: the PLLs.** The firmware runs the VCOs at 2.6–3.25 GHz, without
-  the BCM283x's feedback pre-divider (its control bits select a VCO range
-  here, set differently on each PLL), so txengine moves a running VCO only
-  within the limits above. On the board tested the VPU, and with it the
-  UARTs, SPI and I2C, runs from PLLA, and PLLC clocks nothing: txengine uses
-  PLLC and lets it move down by 25 %. It locked and divided exactly from
-  −25 % to +3 % of its 2592 MHz, and a tone at 145.5125 MHz measured the
-  same from −21 % to +1 % (harmonics below −74 dB). That reaches every FM
-  carrier but those within 140 kHz of 108 MHz, and every narrow-band channel
-  of the bands above but those within 50 kHz of 54 and 162 MHz (multiples of
-  the 54 MHz crystal, where every division puts the fraction at a whole
-  number). Its PLLs make none of the BCM283x's spurs (below −76 dB with the
-  VCO at a half or a quarter of a multiple of 54 MHz, or 1.4 MHz from one).
-  They keep the firmware's loop gain, whose modulation response is flat
-  within 0.04 dB up to 45 kHz (stereo separation 53 dB).
+  the BCM283x's feedback pre-divider: its control bits select a VCO range
+  here, set differently on each PLL. Retuned step by step, PLLC locked and
+  counted exactly from 1.08 GHz to beyond 6.4 GHz with bit 14 (the
+  firmware's setting of PLLA, PLLB and PLLC), from 1.25 to 3.8 GHz with
+  neither bit (PLLD's), from 1.05 to 2.2 GHz with bit 13 alone; a jump from
+  2.59 to 1.16 GHz did not lock. txengine leaves the bits as they are and
+  plans within what they allow (bit 14: 1.4–4.0 GHz). On the board tested
+  the VPU, and with it the UARTs, SPI and I2C, runs from PLLA, and the
+  firmware parks PLLC's channels: PLLC is idle, and a tone at 145.5125 MHz
+  measured as cleanly from 1.46 to 4.66 GHz as at 2.62 GHz, within the
+  spread of the reception. That reaches every FM carrier but those within
+  140 kHz of 108 MHz, and every narrow-band channel of the bands above but
+  those within 50 kHz of 54 and 162 MHz (multiples of the 54 MHz crystal,
+  where every division puts the fraction at a whole number). Its PLLs make
+  none of the BCM283x's spurs (below −76 dB with the VCO at a half or a
+  quarter of a multiple of 54 MHz, or 1.4 MHz from one). They keep the
+  firmware's loop gain, whose modulation response is flat within 0.04 dB up
+  to 45 kHz (stereo separation 53 dB).
 * **Pi 4: AM.** The BCM2711's DMA engine is slower to write to the PWM: fed
   as on the BCM283x (each burst waiting for its writes' responses, requested
   from 8 words in the FIFO on), the PWM missed carrier cycles from 1.8 MHz

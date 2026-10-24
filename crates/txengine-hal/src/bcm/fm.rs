@@ -158,8 +158,10 @@ pub struct BcmPlan {
     pub method: BcmMethod,
     pub gpclk: usize,
     pub gpclk_src: u32,
-    /// PLL method: power up an idle PLL / change its PER divider.
+    /// PLL method: power up an idle PLL / engage its feedback pre-divider
+    /// / change its PER divider.
     pub power_up: bool,
+    pub engage_prediv: bool,
     pub set_per: bool,
     pub ndiv: u32,
     /// Carrier centre in units of the DMA register (2^-20 NDIV, or 2^-12 GPCLK divider).
@@ -298,11 +300,10 @@ fn plan_in_room(
             if margin < 0.005 || !(1.0..=1023.0).contains(&ndiv) {
                 continue;
             }
-            // Prefer: clear of the PLL's spurs, then the least disturbance,
-            // then a VCO near 1.5 GHz if it is idle, then the fraction far
-            // from whole numbers.
-            let score =
-                room.change(vco) * 100.0 + if room.running { 0.0 } else { (vco - 1.5e9).abs() / 1e9 } - margin * 0.01;
+            // Prefer: clear of the PLL's spurs, then the least disturbance
+            // of other users, or a VCO mid-range if there are none, then the
+            // fraction far from whole numbers.
+            let score = room.change(vco) * 100.0 + room.idle_score(vco) - margin * 0.01;
             let clearance_hz = boundary::Spurs { vco: vco_spurs, carrier: &[] }.clearance_hz(carrier, n as f64);
             let rank = (boundary::rank(clearance_hz, target), -score);
             if best.as_ref().is_none_or(|(r, _)| rank > *r) {
@@ -315,6 +316,7 @@ fn plan_in_room(
                         gpclk,
                         gpclk_src: id.gpclk_source(),
                         power_up: !room.running,
+                        engage_prediv: room.engage_prediv && room.running,
                         set_per: room.per_now != Some(per) || !room.running,
                         ndiv: ndiv as u32,
                         center,
@@ -387,6 +389,7 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
         gpclk,
         gpclk_src: pll.id.gpclk_source(),
         power_up: false,
+        engage_prediv: false,
         set_per: false,
         ndiv: 0,
         center,
@@ -1228,6 +1231,9 @@ impl BcmFmTransmitter {
                 if p.power_up {
                     pll.power_up(p.ndiv, frac)?;
                 } else {
+                    if p.engage_prediv {
+                        pll.engage_prediv()?;
+                    }
                     pll.retune(p.ndiv, frac)?;
                 }
                 if p.set_per {
@@ -1669,7 +1675,7 @@ impl Drop for BcmFmTransmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bcm::cprman::MAX_PER_HZ;
+    use crate::bcm::cprman::{BCM283X_VCO_RANGE, MAX_PER_HZ};
 
     #[test]
     fn pacer_is_exact_with_a_fast_clock() {
@@ -1703,6 +1709,7 @@ mod tests {
             gpclk: 0,
             gpclk_src: 0,
             power_up: false,
+            engage_prediv: false,
             set_per: false,
             ndiv,
             center,
@@ -1720,21 +1727,23 @@ mod tests {
         }
     }
 
-    /// A PLL that is powered down: the planner may start it anywhere from
-    /// 1 to 1.75 GHz, and prefers 1.5 GHz.
+    /// A PLL that is powered down: the planner starts it with its
+    /// pre-divider engaged anywhere in its range, and prefers the middle.
     fn idle_room() -> PllRoom {
         PllRoom {
             running: false,
             users: PllUsers::default(),
             vco_old: 0.0,
-            fb: 1.0,
+            fb: 2.0,
             per_choices: (1..=8).collect(),
             per_now: None,
-            vco_min: 1.0e9,
-            vco_max: 1.75e9,
+            vco_min: BCM283X_VCO_RANGE.0,
+            vco_max: BCM283X_VCO_RANGE.1,
             max_decrease: 0.0,
             max_increase: 0.0,
             max_per_hz: MAX_PER_HZ,
+            unusable: None,
+            engage_prediv: false,
         }
     }
 
@@ -1773,6 +1782,8 @@ mod tests {
             max_decrease: GPU_PLL_MAX_DECREASE,
             max_increase: 0.03,
             max_per_hz: MAX_PER_HZ,
+            unusable: None,
+            engage_prediv: true,
         }
     }
 
@@ -1844,23 +1855,25 @@ mod tests {
         assert!(e.contains("--harmonic 3"), "{e}");
     }
 
-    /// PLLC as the firmware leaves it on a Raspberry Pi 4: 2592 MHz, its
-    /// channels clocking nothing (the VPU runs from PLLA).
+    /// PLLC as the firmware leaves it on a Raspberry Pi 4: 2592 MHz with
+    /// the wide VCO range, its channels parked (the VPU runs from PLLA).
     fn bcm2711_pllc_room() -> PllRoom {
-        use super::super::cprman::GPU_PLL_MAX_DECREASE;
-        let vco = 2592e6;
+        use super::super::cprman::bcm2711_vco_range;
+        let (vco_min, vco_max) = bcm2711_vco_range(0x0011_c000);
         PllRoom {
             running: true,
-            users: PllUsers { per: vec![], other: vec!["PLLC_CORE0".into()], gpu_only: true },
-            vco_old: vco,
+            users: PllUsers::default(),
+            vco_old: 2592e6,
             fb: 1.0,
             per_choices: (1..=8).collect(),
             per_now: Some(4),
-            vco_min: vco * (1.0 - GPU_PLL_MAX_DECREASE),
-            vco_max: vco * 1.03,
-            max_decrease: GPU_PLL_MAX_DECREASE,
+            vco_min,
+            vco_max,
+            max_decrease: 0.03,
             max_increase: 0.03,
             max_per_hz: max_gpclk_input_hz(true),
+            unusable: None,
+            engage_prediv: false,
         }
     }
 
@@ -1921,6 +1934,15 @@ mod tests {
         assert_eq!((p.per_div, p.gp_div), (4, 2), "{p:?}");
         let e = plan_bcm2711(300.1e6, 10e3).unwrap_err().to_string();
         assert!(e.contains("at most 300 MHz") && e.contains("--harmonic 3"), "{e}");
+    }
+
+    /// The BCM2711's range bits, as measured.
+    #[test]
+    fn bcm2711_vco_ranges() {
+        use super::super::cprman::bcm2711_vco_range;
+        assert_eq!(bcm2711_vco_range(0x0011_c000), (1.4e9, 4.0e9));
+        assert_eq!(bcm2711_vco_range(0x0011_8000), (1.4e9, 3.6e9));
+        assert_eq!(bcm2711_vco_range(0x0011_a000), (1.2e9, 2.0e9));
     }
 
     /// GPCLK2 divides by whole numbers only and has no counter input.

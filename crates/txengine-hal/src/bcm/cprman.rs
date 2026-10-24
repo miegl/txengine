@@ -377,22 +377,16 @@ impl PllUsers {
 /// prefer the least change, so a VCO this far down only serves carriers
 /// that need it. The loop's response and noise measure the same from 1927
 /// to 2365 MHz (−14 % to +5 %). Upwards, which would overclock the
-/// blocks, the general limit applies. The same holds for the BCM2711,
-/// whose firmware left PLLC with nothing on it on a Raspberry Pi 4 (the
-/// VPU runs from PLLA): from its 2592 MHz, PLLC locked and fed GPCLK0
-/// exactly from −25 % to +3 %, and a tone modulated it equally cleanly
-/// from −21 % to +1 % (harmonics below −74 dB). There, with the GPCLK
-/// input limited to 600 MHz, the full −25 % reaches every FM carrier but
-/// those within 140 kHz of 108 MHz (twice the crystal), and every
-/// narrow-band channel above but those within 50 kHz of 54 and 162 MHz.
+/// blocks, the general limit applies.
 pub const GPU_PLL_MAX_DECREASE: f64 = 0.25;
 
 /// The PLLs to try for a clock generator at `own_ctl`, best first: an idle
 /// PLL is ideal (no other user, or not running). Otherwise, on the
 /// BCM2836/7, PLLA, which normally clocks only the GPU's blocks and may
 /// move furthest (see [`GPU_PLL_MAX_DECREASE`]), then PLLC, which clocks
-/// the VPU, the SD card and the WiFi. On the BCM2711 PLLC, which the
-/// firmware leaves to the GPU, then PLLA, which clocks the VPU.
+/// the VPU, the SD card and the WiFi. On the BCM2711 PLLC (on a Raspberry
+/// Pi 4 idle: the firmware parks its channels), then PLLA, which clocks the
+/// VPU.
 pub fn pll_preference(cm: &Cprman, osc_hz: f64, bcm2711: bool, own_ctl: usize) -> Vec<PllId> {
     let idle = [PllId::A, PllId::C, PllId::D].into_iter().find(|&id| {
         let p = Pll::new(cm, id, osc_hz, bcm2711);
@@ -402,9 +396,16 @@ pub fn pll_preference(cm: &Cprman, osc_hz: f64, bcm2711: bool, own_ctl: usize) -
     idle.into_iter().chain(shared).collect()
 }
 
-/// Fastest PER channel output planned: the firmware never runs one faster
-/// than ~1 GHz (PLLC_PER feeds EMMC at 1 GHz); stay in that region.
-pub const MAX_PER_HZ: f64 = 1.25e9;
+/// Fastest input planned for a BCM2835/6/7 clock generator (the firmware
+/// runs them at up to 1 GHz). Fed from a PLL undivided, GPCLK0 and the PWM
+/// clock counted exact up to 1.8 GHz on a Zero 2 W, and on a Raspberry Pi 2
+/// GPCLK0 up to 1.8 GHz, the PWM clock up to 1.6 GHz (0.2 % fast at
+/// 1.8 GHz); from 2.0 GHz both failed on both boards.
+pub const MAX_PER_HZ: f64 = 1.5e9;
+
+/// Fastest input planned for the BCM2711's PWM and PCM clocks: on a
+/// Raspberry Pi 4 they counted exact up to 1.32 GHz, the most measured.
+const BCM2711_MAX_INPUT_HZ: f64 = 1.25e9;
 
 /// Fastest input planned for a BCM2711 GPCLK. Fed faster, its output goes
 /// wrong, at even divisors first: on a Raspberry Pi 4 GPCLK0 counted exact
@@ -417,6 +418,39 @@ const BCM2711_MAX_GPCLK_INPUT_HZ: f64 = 600e6;
 /// Fastest input planned for a GPCLK.
 pub fn max_gpclk_input_hz(bcm2711: bool) -> f64 {
     if bcm2711 { BCM2711_MAX_GPCLK_INPUT_HZ } else { MAX_PER_HZ }
+}
+
+/// The VCO frequencies txengine plans a BCM2835/6/7 PLL for that nothing
+/// else uses (Hz), with its feedback pre-divider engaged. Retuned step by
+/// step and counted, PLLA locked from 0.4 GHz up to 2.8 GHz on a Raspberry
+/// Pi 2 (3.0 GHz failed) and to 3.0 GHz on a Zero 2 W (3.2 GHz failed),
+/// with or without the pre-divider. A tone modulated the Zero 2 W's PLLA
+/// equally cleanly from 0.73 to 2.91 GHz. (Linux keeps them within
+/// 0.6-2.4 GHz and engages the pre-divider above 1.75 GHz.) The
+/// pre-divider doubles the VCO per unit of the feedback divider, which
+/// halves the fraction the modulation sweeps.
+pub const BCM283X_VCO_RANGE: (f64, f64) = (0.8e9, 2.6e9);
+
+/// The same for a running BCM2711 PLL, by its ANA1 VCO-range bits 13-14,
+/// which txengine leaves as the firmware set them. On a Raspberry Pi 4's
+/// PLLC: with bit 14 (the firmware's setting of PLLA, PLLB and PLLC) it
+/// locked and counted exactly from 1.08 GHz to beyond 6.4 GHz, though a
+/// jump from 2.59 to 1.16 GHz did not lock; with neither (PLLD's) from 1.25
+/// to 3.8 GHz; with bit 13 alone from 1.05 to 2.2 GHz. A tone modulated
+/// PLLC as cleanly from 1.46 to 4.66 GHz as at 2.62 GHz, within the
+/// spread of the reception. With the GPCLK input limited to 600 MHz, PLLC
+/// reaches every FM carrier but those within 140 kHz of 108 MHz (twice
+/// the crystal), and every narrow-band channel of CB, the 10, 6, 4, 2 and
+/// 1.25 m bands and 148–174 MHz but those within 50 kHz of 54 and
+/// 162 MHz.
+pub(crate) fn bcm2711_vco_range(ana1: u32) -> (f64, f64) {
+    if ana1 & ANA1_BCM2711_RANGE_WIDE != 0 {
+        (1.4e9, 4.0e9)
+    } else if ana1 & ANA1_BCM2711_RANGE_LOW != 0 {
+        (1.2e9, 2.0e9)
+    } else {
+        (1.4e9, 3.6e9)
+    }
 }
 
 /// What a frequency planner may do with a PLL, given who else uses it: the
@@ -445,6 +479,11 @@ pub struct PllRoom {
     pub max_increase: f64,
     /// Fastest PER channel output the planned clock generator takes.
     pub max_per_hz: f64,
+    /// Why a planner cannot use the PLL at all, if it cannot.
+    pub unusable: Option<&'static str>,
+    /// The planner engages the feedback pre-divider (`fb` 2): a BCM2835/6/7
+    /// PLL that nothing else uses (see [`BCM283X_VCO_RANGE`]).
+    pub engage_prediv: bool,
 }
 
 impl PllRoom {
@@ -453,10 +492,21 @@ impl PllRoom {
     /// `max_change` (relative; see [`GPU_PLL_MAX_DECREASE`] for a PLL that
     /// only clocks the GPU).
     pub fn of(pll: &Pll, own_ctl: usize, max_change: f64) -> PllRoom {
+        let max_per_hz = if (0..3).any(|n| gp(n) == own_ctl) {
+            max_gpclk_input_hz(pll.is_bcm2711())
+        } else if pll.is_bcm2711() {
+            BCM2711_MAX_INPUT_HZ
+        } else {
+            MAX_PER_HZ
+        };
         let running = pll.is_powered() && pll.is_locked();
+        if pll.is_bcm2711() && !running {
+            return PllRoom::unusable("is not running, and txengine starts PLLs on the BCM2835/6/7 only", max_per_hz);
+        }
         let users = if running { pll.users(own_ctl) } else { PllUsers::default() };
         let max_decrease = if users.gpu_only { max_change.max(GPU_PLL_MAX_DECREASE) } else { max_change };
-        let fb = if running { pll.fb_mult() } else { 1.0 };
+        let engage_prediv = !pll.is_bcm2711() && users.is_empty();
+        let fb = if engage_prediv { 2.0 } else { pll.fb_mult() };
         let vco_old = if running { pll.vco_hz() } else { 0.0 };
         let per_now = pll.per_divider();
         // A PER channel used by another clock must keep its divider.
@@ -464,17 +514,15 @@ impl PllRoom {
             (Some(d), false) => vec![d],
             _ => (1..=8).collect(),
         };
-        // VCO limits; BCM2835/6/7 switch the feedback pre-divider above
-        // 1.75 GHz, which is never changed on a running PLL. The BCM2711 has
-        // no pre-divider, and its firmware runs the VCOs at 2.6-3.25 GHz
-        // with ANA1 bits 13-14 set for a VCO range instead (Linux), which
-        // differ between PLLs: a running VCO stays near its frequency.
-        let (vco_min, vco_max) = if running && (!users.is_empty() || pll.is_bcm2711()) {
+        // VCO limits: a PLL that others use moves only a little from the
+        // frequency it runs at, with its pre-divider left as it is; an idle
+        // one anywhere the hardware allows.
+        let (vco_min, vco_max) = if running && !users.is_empty() {
             (vco_old * (1.0 - max_decrease), vco_old * (1.0 + max_change))
-        } else if running {
-            (600e6, if fb > 1.0 { 2.4e9 } else { 1.75e9 })
+        } else if pll.is_bcm2711() {
+            bcm2711_vco_range(pll.ana1())
         } else {
-            (1.0e9, 1.75e9)
+            BCM283X_VCO_RANGE
         };
         PllRoom {
             running,
@@ -483,16 +531,39 @@ impl PllRoom {
             fb,
             per_choices,
             per_now,
-            vco_min: vco_min.max(600e6),
+            vco_min,
             vco_max,
             max_decrease,
             max_increase: max_change,
-            max_per_hz: if (0..3).any(|n| gp(n) == own_ctl) {
-                max_gpclk_input_hz(pll.is_bcm2711())
-            } else {
-                MAX_PER_HZ
-            },
+            max_per_hz,
+            unusable: None,
+            engage_prediv,
         }
+    }
+
+    /// A PLL no planner may use, for the reason `why`.
+    fn unusable(why: &'static str, max_per_hz: f64) -> PllRoom {
+        PllRoom {
+            running: false,
+            users: PllUsers::default(),
+            vco_old: 0.0,
+            fb: 1.0,
+            per_choices: Vec::new(),
+            per_now: None,
+            vco_min: 0.0,
+            vco_max: 0.0,
+            max_decrease: 0.0,
+            max_increase: 0.0,
+            max_per_hz,
+            unusable: Some(why),
+            engage_prediv: false,
+        }
+    }
+
+    /// A planner's preference for `vco` on a PLL that nothing else uses: the
+    /// middle of its range, away from the edges.
+    pub fn idle_score(&self, vco: f64) -> f64 {
+        if self.users.is_empty() { (vco - (self.vco_min + self.vco_max) / 2.0).abs() / 1e9 } else { 0.0 }
     }
 
     /// Whether the VCO may run at `vco` with the PER divider `per` (one of
@@ -501,13 +572,17 @@ impl PllRoom {
         (self.vco_min..=self.vco_max).contains(&vco) && vco / per as f64 <= self.max_per_hz
     }
 
-    /// The relative change of the VCO's frequency to `vco` (0 if it is not running).
+    /// The relative change of the VCO's frequency to `vco` for the PLL's
+    /// other users (0 if it has none).
     pub fn change(&self, vco: f64) -> f64 {
-        if self.running { (vco - self.vco_old).abs() / self.vco_old } else { 0.0 }
+        if self.users.is_empty() { 0.0 } else { (vco - self.vco_old).abs() / self.vco_old }
     }
 
     /// The error for a planner that found nothing in this room.
     pub fn exhausted(&self, id: PllId, what: &str) -> HalError {
+        if let Some(why) = self.unusable {
+            return HalError::Config(format!("{} {why}; choose another --pll", id.name()));
+        }
         if let [per] = self.per_choices[..]
             && self.vco_min / per as f64 > self.max_per_hz
         {
@@ -572,7 +647,11 @@ impl Pll {
     /// Multiplier from crystal to VCO for one unit of NDIV (2 when the
     /// feedback pre-divider is engaged).
     pub fn fb_mult(&self) -> f64 {
-        if self.has_prediv && self.cm.read(self.id.regs().ana0 + 4) & ANA1_FB_PREDIV != 0 { 2.0 } else { 1.0 }
+        if self.has_prediv && self.ana1() & ANA1_FB_PREDIV != 0 { 2.0 } else { 1.0 }
+    }
+
+    fn ana1(&self) -> u32 {
+        self.cm.read(self.id.regs().ana0 + 4)
     }
 
     /// Current VCO frequency.
@@ -598,7 +677,11 @@ impl Pll {
     }
 
     /// Other users of this PLL: enabled CM clocks selecting its PER channel
-    /// (excluding `own_gpclk_ctl`) and enabled non-PER channels.
+    /// (excluding `own_gpclk_ctl`), its CORE channels that clocks select,
+    /// and its other enabled channels, which clock a display or camera
+    /// directly (DSI, CCP2), unless the firmware parked them at the largest
+    /// divider (256): on a Raspberry Pi 4, PLLA's DSI0 and CCP2 channels at
+    /// 12.7 MHz.
     pub fn users(&self, own_gpclk_ctl: usize) -> PllUsers {
         let mut per_users = Vec::new();
         let mut other = Vec::new();
@@ -614,38 +697,44 @@ impl Pll {
             }
         }
         for &(cname, reg, vpu_src, _) in self.id.other_channels() {
-            if self.cm.read(reg) & A2W_CHANNEL_DISABLE != 0 {
+            let v = self.cm.read(reg);
+            if v & A2W_CHANNEL_DISABLE != 0 {
                 continue;
             }
-            let mut users: Vec<&str> = Vec::new();
             if let Some(s) = vpu_src {
-                for &(name, ctl) in VPU_CLOCKS {
-                    let c = self.cm.read(ctl);
-                    // The VPU clock has no ENAB bit and is always running.
-                    if (c & (ENAB | BUSY) != 0 || ctl == VPU) && c & SRC_MASK == s {
-                        users.push(name);
-                    }
+                let users: Vec<&str> = VPU_CLOCKS
+                    .iter()
+                    .filter(|&&(_, ctl)| {
+                        let c = self.cm.read(ctl);
+                        // The VPU clock has no ENAB bit and is always running.
+                        (c & (ENAB | BUSY) != 0 || ctl == VPU) && c & SRC_MASK == s
+                    })
+                    .map(|&(name, _)| name)
+                    .collect();
+                if users.is_empty() {
+                    continue;
                 }
-            } else {
-                // DSI and CCP2 channels clock a display or camera directly.
+                gpu_only &= users.iter().all(|u| GPU_CLOCKS.contains(u));
+                other.push(format!("{cname} ({})", users.join(", ")));
+            } else if v & A2W_CHANNEL_DIV_MASK != 0 {
                 gpu_only = false;
+                other.push(cname.to_string());
             }
-            gpu_only &= users.iter().all(|u| GPU_CLOCKS.contains(u));
-            other.push(if users.is_empty() { cname.to_string() } else { format!("{cname} ({})", users.join(", ")) });
         }
         gpu_only &= per_users.is_empty();
         PllUsers { per: per_users, other, gpu_only }
     }
 
-    /// Bring a powered-down PLL up (Linux `bcm2835_pll_on`).
+    /// Bring a powered-down PLL up (Linux `bcm2835_pll_on`), with its
+    /// feedback pre-divider engaged (see [`BCM283X_VCO_RANGE`]).
     pub fn power_up(&self, ndiv: u32, frac: u32) -> Result<()> {
         let r = self.id.regs();
         self.cm.write(A2W_XOSC_CTRL, self.cm.read(A2W_XOSC_CTRL) | r.xosc_enable);
-        // Loop filter defaults (KI=2, KP=8, KA=2), pre-divider off.
+        // Linux's loop filter settings (KI 2, KP 8, KA 2).
         let mut ana = [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i));
         ana[1] = (ana[1] & !(ANA1_KI_MASK | ANA1_KP_MASK)) | (2 << ANA1_KI_SHIFT) | (8 << ANA1_KP_SHIFT);
         if self.has_prediv {
-            ana[1] &= !ANA1_FB_PREDIV;
+            ana[1] |= ANA1_FB_PREDIV;
         }
         ana[3] = (ana[3] & !ANA3_KA_MASK) | (2 << ANA3_KA_SHIFT);
         for i in (0..4).rev() {
@@ -660,6 +749,21 @@ impl Pll {
         self.wait_lock()?;
         self.cm.write(r.ctrl, self.cm.read(r.ctrl) | A2W_CTRL_PRST_DISABLE);
         Ok(())
+    }
+
+    /// Engage the feedback pre-divider of a running BCM2835/6/7 PLL (which
+    /// doubles its VCO until it is retuned) and wait for lock.
+    pub fn engage_prediv(&self) -> Result<()> {
+        let r = self.id.regs();
+        if !self.has_prediv || self.ana1() & ANA1_FB_PREDIV != 0 {
+            return Ok(());
+        }
+        let mut ana = [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i));
+        ana[1] |= ANA1_FB_PREDIV;
+        for i in (0..4).rev() {
+            self.cm.write(r.ana0 + 4 * i, ana[i]);
+        }
+        self.wait_lock()
     }
 
     /// Retune a running PLL (NDIV + 20-bit fraction), keeping PDIV and the

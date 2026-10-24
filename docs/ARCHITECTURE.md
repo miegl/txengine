@@ -338,8 +338,10 @@ follow its width as the fundamental does.
   by 4096, from any source (measured). GPCLK2 has no MASH control and no
   frequency counter input (`cm::has_mash`, `cm::tcnt_gp`): it divides by
   whole numbers only (no `clkdiv`), and its carrier is neither verified at
-  start nor watched. The planner scans every clock
-  generator to find out who else uses each PLL (`Pll::users`) and refuses
+  start nor watched. The planner scans every clock generator to find out
+  who else uses each PLL (`Pll::users`: clocks that select its PER
+  channel, CORE channels that a clock selects, and display or camera
+  channels the firmware has not parked at the divider 256) and refuses
   changes of more than 3 % (or any change of a PER divider that others
   use): PLLC clocks the VPU (and through it the SD card host, SPI, I2C and
   the mini UART) and EMMC (the WiFi's SDIO host), PLLD the PL011 UART and
@@ -347,31 +349,40 @@ follow its width as the fundamental does.
   SDIO buses run at their 50 MHz maximum. A PLL whose only users are the
   GPU's video and 3D blocks (`h264`, `isp`, `v3d` on its CORE channel:
   normally PLLA) may move down by up to 25 %
-  (`cprman::GPU_PLL_MAX_DECREASE`): from 2250 MHz −12 % reach every carrier
-  in 87.5–108 MHz, where ±3 % reaches 76 % of the band (PLLC at ±3 %:
-  50 %), and −25 % the narrow-band FM channels (all of CB, the amateur
-  bands and marine VHF up to 225 MHz; in 148–174 MHz all but three spots
-  where every division puts the fraction at a whole number). The planner
-  takes the least change that keeps the carrier clear of the PLL's spurs
-  (above): in the FM band −12 % at most, but for 21 of 2051 carriers (down
-  to −22 %). The
-  carrier stays at or below 400 MHz, above which the generators' output
-  fades (`fm::MAX_CARRIER_HZ`). Idle PLLs are preferred and powered up with
-  the kernel's loop settings; otherwise, on the BCM2836/7, PLLA, then PLLC.
+  (`cprman::GPU_PLL_MAX_DECREASE`): from 2250 MHz −12 % reach every
+  carrier in 87.5–108 MHz, where ±3 % reaches 76 % of the band (PLLC at
+  ±3 %: 50 %), and −25 % the narrow-band FM channels (all of CB, the
+  amateur bands and marine VHF up to 225 MHz; in 148–174 MHz all but three
+  spots where every division puts the fraction at a whole number). The
+  planner takes the least change that keeps the carrier clear of the PLL's
+  spurs (above): in the FM band −12 % at most, but for 21 of 2051 carriers
+  (down to −22 %). The carrier stays at or below 400 MHz, above which the
+  generators' output fades (`fm::MAX_CARRIER_HZ`). A PLL nothing else uses
+  is preferred, and planned anywhere the hardware takes it, mid-range: on
+  the BCM2835/6/7 0.8–2.6 GHz with the feedback pre-divider engaged
+  (`cprman::BCM283X_VCO_RANGE`; PLLA locked from 0.4 to 2.8–3.0 GHz with
+  or without it, where Linux keeps 0.6–2.4 GHz and engages it above
+  1.75 GHz), which halves the fraction the modulation sweeps. A PLL
+  that is started gets Linux's loop settings. The clock generators take at
+  most 1.5 GHz (`cprman::MAX_PER_HZ`; they were exact up to 1.6–1.8 GHz).
+  Otherwise, on the BCM2836/7, PLLA, then PLLC (`cprman::pll_preference`).
 * The BCM2711 (Pi 4) differs. Its firmware runs the VCOs at 2.6–3.25 GHz
-  without a feedback pre-divider (ANA1 bits 13–14 select a VCO range
-  instead, and differ between the PLLs), so a running VCO only moves
-  within the limits above. On a Pi 4 the VPU runs from PLLA and PLLC
-  clocks nothing: PLLC comes first and may move down by 25 % (it locked,
-  divided exactly and modulated equally cleanly from −21 % to +1 %), which
-  reaches every FM carrier but those within 140 kHz of 108 MHz (twice the
-  54 MHz crystal). Its GPCLKs take at most 600 MHz
-  (`cprman::max_gpclk_input_hz`): fed faster, from 675 MHz, they divide
-  wrongly, even divisors first (from 864 MHz most give 0.22 MHz), so the
-  carrier stays at or below 300 MHz, and `clkdiv` from PLLD_PER (750 MHz)
-  is refused; the PWM and PCM clocks take 1.3 GHz. Its PLLs made no
-  integer-boundary spurs. It keeps the firmware's loop (KI 2, KP 3),
-  whose modulation response is flat within 0.04 dB to 45 kHz.
+  without a feedback pre-divider: ANA1 bits 13–14 select a VCO range
+  instead, set differently on each PLL. txengine leaves them and plans
+  within what they allow (`cprman::bcm2711_vco_range`: PLLC locked from
+  1.08 GHz to beyond 6.4 GHz with bit 14, from 1.25 to 3.8 GHz with
+  neither, from 1.05 to 2.2 GHz with bit 13 alone), and does not start a
+  PLL. On a Pi 4 the VPU runs from PLLA and PLLC's channels are parked:
+  PLLC is idle and planned within 1.4–4.0 GHz (it modulated as cleanly
+  from 1.46 to 4.66 GHz as at 2.62 GHz), which reaches every FM carrier
+  but those within 140 kHz of 108 MHz (twice the 54 MHz crystal). Its
+  GPCLKs take at most 600 MHz (`cprman::max_gpclk_input_hz`): fed faster,
+  from 675 MHz, they divide wrongly, even divisors first (from 864 MHz
+  most give 0.22 MHz), so the carrier stays at or below 300 MHz, and
+  `clkdiv` from PLLD_PER (750 MHz) is refused; the PWM and PCM clocks take
+  1.3 GHz. Its PLLs made no integer-boundary spurs. It keeps the
+  firmware's loop (KI 2, KP 3), whose modulation response is flat within
+  0.04 dB to 45 kHz.
 * Loop gain of PLLA and PLLC: the firmware and Linux run every PLL with the loop
   filter gains KI 2, KP 8, KA 2 (`A2W_PLLx_ANA1/3`), which give PLLA a
   loop bandwidth of about 125 kHz (natural frequency fitted to the

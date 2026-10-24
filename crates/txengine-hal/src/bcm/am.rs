@@ -141,6 +141,8 @@ pub struct BcmAmPlan {
     pub pll: PllId,
     /// Power up an idle PLL; change its PER divider.
     pub power_up: bool,
+    /// Engage the feedback pre-divider of a running PLL nothing else uses.
+    pub engage_prediv: bool,
     pub set_per: bool,
     pub ndiv: u32,
     /// The whole feedback divider NDIV.FRAC in units of 2^-20.
@@ -226,7 +228,7 @@ fn plan_in(room: &PllRoom, id: PllId, carrier_hz: f64, osc: f64, sample_rate: f6
                 if frac < reserve || frac > 1.0 - reserve || !(1.0..=1023.0).contains(&ndiv) {
                     continue;
                 }
-                let score = room.change(vco) + if room.running { 0.0 } else { (vco - 1.5e9).abs() / 1e9 };
+                let score = room.change(vco) + room.idle_score(vco);
                 if best.as_ref().is_none_or(|(s, _)| score < *s) {
                     let center = (fb * FRAC_ONE).round();
                     let vco = center * unit_hz;
@@ -237,6 +239,7 @@ fn plan_in(room: &PllRoom, id: PllId, carrier_hz: f64, osc: f64, sample_rate: f6
                         BcmAmPlan {
                             pll: id,
                             power_up: !room.running,
+                            engage_prediv: room.engage_prediv && room.running,
                             set_per: room.per_now != Some(per) || !room.running,
                             ndiv: ndiv as u32,
                             center,
@@ -719,6 +722,9 @@ impl BcmAmTransmitter {
         if p.power_up {
             self.pll.power_up(p.ndiv, frac)?;
         } else {
+            if p.engage_prediv {
+                self.pll.engage_prediv()?;
+            }
             self.pll.retune(p.ndiv, frac)?;
         }
         if p.set_per {
@@ -1116,7 +1122,7 @@ impl Drop for BcmAmTransmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bcm::cprman::MAX_PER_HZ;
+    use crate::bcm::cprman::{BCM283X_VCO_RANGE, MAX_PER_HZ};
 
     /// The PLLs of a Zero 2 W as found: PLLA clocks only the GPU's 3D
     /// block, PLLC_PER the EMMC (WiFi), and an idle PLL.
@@ -1133,6 +1139,8 @@ mod tests {
             max_decrease: down,
             max_increase: 0.03,
             max_per_hz: MAX_PER_HZ,
+            unusable: None,
+            engage_prediv: false,
         };
         let gpu = PllUsers { per: vec![], other: vec!["PLLA_CORE (v3d)".into()], gpu_only: true };
         let emmc = PllUsers { per: vec!["emmc".into()], other: vec!["PLLC_CORE0 (vpu)".into()], gpu_only: false };
@@ -1140,14 +1148,16 @@ mod tests {
             running: false,
             users: PllUsers::default(),
             vco_old: 0.0,
-            fb: 1.0,
+            fb: 2.0,
             per_choices: (1..=8).collect(),
             per_now: None,
-            vco_min: 1.0e9,
-            vco_max: 1.75e9,
+            vco_min: BCM283X_VCO_RANGE.0,
+            vco_max: BCM283X_VCO_RANGE.1,
             max_decrease: 0.03,
             max_increase: 0.03,
             max_per_hz: MAX_PER_HZ,
+            unusable: None,
+            engage_prediv: true,
         };
         [
             (running(2250e6, gpu, (1..=8).collect(), 0.15), "PLLA"),

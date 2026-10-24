@@ -139,6 +139,9 @@ pub mod cm {
     pub const A2W_CHANNEL_DIV_MASK: u32 = 0xff;
     /// ANA1 bit 14: feedback pre-divider (BCM2835/6/7 only).
     pub const ANA1_FB_PREDIV: u32 = 1 << 14;
+    /// ANA1 bits 13-14 of the BCM2711 select the VCO's range.
+    pub const ANA1_BCM2711_RANGE_LOW: u32 = 1 << 13;
+    pub const ANA1_BCM2711_RANGE_WIDE: u32 = 1 << 14;
     /// Loop filter gains (field names as in Linux): KI and KP in ANA1, KA
     /// in ANA3. Linux and the firmware use KI 2, KP 8, KA 2.
     pub const ANA1_KI_SHIFT: u32 = 19;
