@@ -514,11 +514,11 @@ impl BcmAmTransmitter {
             format!("VCO {:.3} MHz (was idle)", plan.vco_new / 1e6)
         };
         let description = format!(
-            "BCM{} {}_PER /{} -> PWM clock /{} = {:.3} MHz -> PWM{chan} on GPIO{}: carrier {:.4} kHz ({change}, \
+            "BCM{} {} /{} -> PWM clock /{} = {:.3} MHz -> PWM{chan} on GPIO{}: carrier {:.4} kHz ({change}, \
              {} width steps to full output), {:.3} kS/s ({} cycles per sample), DMA ch{}, {} x {} cycles \
              ({:.1} ms), drive {} mA",
             if bcm.bcm2711 { "2711" } else { "283x" },
-            plan.pll.name(),
+            plan.pll.per_name(),
             plan.per_div,
             plan.clk_div,
             plan.clk_hz / 1e6,

@@ -196,12 +196,15 @@ impl ClockWatch {
     }
 }
 
-/// One of the PLLs a GPCLK can be fed from.
+/// One of the PLLs a GPCLK can be fed from: PLLA, PLLC and PLLD through
+/// their PER channel, PLLH (the HDMI PLL of the BCM2835/6/7, which the
+/// BCM2711 does not have) through its AUX channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PllId {
     A,
     C,
     D,
+    H,
 }
 
 struct PllRegs {
@@ -209,10 +212,16 @@ struct PllRegs {
     ctrl: usize,
     frac: usize,
     ana0: usize,
+    /// The channel that feeds the clock generators: PER, or PLLH's AUX.
     per: usize,
     lock_bit: u32,
     xosc_enable: u32,
     gpclk_src: u32,
+    /// The CM_PLLx bits that load and hold `per` (PLLH's have no hold).
+    load_per: u32,
+    hold_per: u32,
+    /// ANA1's feedback pre-divider bit (BCM2835/6/7).
+    prediv: u32,
 }
 
 impl PllId {
@@ -227,6 +236,9 @@ impl PllId {
                 lock_bit: 1 << 8,
                 xosc_enable: 1 << 6,
                 gpclk_src: SRC_PLLA_PER,
+                load_per: PLL_LOADPER,
+                hold_per: PLL_HOLDPER,
+                prediv: ANA1_FB_PREDIV,
             },
             PllId::C => PllRegs {
                 cm: PLLC,
@@ -237,6 +249,9 @@ impl PllId {
                 lock_bit: 1 << 10,
                 xosc_enable: 1 << 0,
                 gpclk_src: SRC_PLLC_PER,
+                load_per: PLL_LOADPER,
+                hold_per: PLL_HOLDPER,
+                prediv: ANA1_FB_PREDIV,
             },
             PllId::D => PllRegs {
                 cm: PLLD,
@@ -247,6 +262,23 @@ impl PllId {
                 lock_bit: 1 << 11,
                 xosc_enable: 1 << 4,
                 gpclk_src: SRC_PLLD_PER,
+                load_per: PLL_LOADPER,
+                hold_per: PLL_HOLDPER,
+                prediv: ANA1_FB_PREDIV,
+            },
+            // Its reference is enabled with PLLC's.
+            PllId::H => PllRegs {
+                cm: PLLH,
+                ctrl: A2W_PLLH_CTRL,
+                frac: A2W_PLLH_FRAC,
+                ana0: A2W_PLLH_ANA0,
+                per: A2W_PLLH_AUX,
+                lock_bit: 1 << 12,
+                xosc_enable: 1 << 0,
+                gpclk_src: SRC_PLLH_AUX,
+                load_per: PLLH_LOADAUX,
+                hold_per: 0,
+                prediv: ANA1_PLLH_FB_PREDIV,
             },
         }
     }
@@ -256,7 +288,23 @@ impl PllId {
             PllId::A => "PLLA",
             PllId::C => "PLLC",
             PllId::D => "PLLD",
+            PllId::H => "PLLH",
         }
+    }
+
+    /// The name of the channel that feeds the clock generators.
+    pub fn per_name(self) -> &'static str {
+        match self {
+            PllId::A => "PLLA_PER",
+            PllId::C => "PLLC_PER",
+            PllId::D => "PLLD_PER",
+            PllId::H => "PLLH_AUX",
+        }
+    }
+
+    /// The PLLs of the SoC.
+    pub fn all(bcm2711: bool) -> &'static [PllId] {
+        if bcm2711 { &[PllId::A, PllId::C, PllId::D] } else { &[PllId::A, PllId::C, PllId::D, PllId::H] }
     }
 
     /// GPCLK source number of the PLL's PER channel.
@@ -284,6 +332,9 @@ impl PllId {
                 ("PLLD_DSI0", A2W_PLLD_DSI0, None, 1 << 0),
                 ("PLLD_DSI1", A2W_PLLD_DSI1, None, 1 << 2),
             ],
+            PllId::H => {
+                &[("PLLH_RCAL", A2W_PLLH_RCAL, None, PLLH_LOADRCAL), ("PLLH_PIX", A2W_PLLH_PIX, None, PLLH_LOADPIX)]
+            }
         }
     }
 }
@@ -296,7 +347,8 @@ pub struct PllState {
     pub frac: u32,
     pub ana: [u32; 4],
     pub per: u32,
-    /// The other channels' dividers, as listed by `other_channels`.
+    /// The other channels' dividers, as listed by `other_channels` (0
+    /// where a PLL has fewer).
     pub channels: [u32; 3],
     pub xosc: u32,
 }
@@ -313,7 +365,7 @@ pub struct PllConfig {
     pub channels: [u32; 3],
 }
 
-/// Peripheral-mux clocks (sources 4/5/6 are PLLA/C/D PER).
+/// Peripheral-mux clocks (sources 4/5/6 are PLLA/C/D PER, 7 PLLH AUX).
 const PER_CLOCKS: &[(&str, usize)] = &[
     ("cam0", CAM0),
     ("cam1", CAM1),
@@ -386,14 +438,17 @@ pub const GPU_PLL_MAX_DECREASE: f64 = 0.25;
 /// move furthest (see [`GPU_PLL_MAX_DECREASE`]), then PLLC, which clocks
 /// the VPU, the SD card and the WiFi. On the BCM2711 PLLC (on a Raspberry
 /// Pi 4 idle: the firmware parks its channels), then PLLA, which clocks the
-/// VPU.
+/// VPU. PLLH comes last, for the carriers the others cannot make: the DMA
+/// engine writes its fraction more slowly (179-186 k writes/s on a Pi 2 and
+/// a Zero 2 W, PLLA 228-231 k), which lowers FM's sample rate to 152 kS/s.
 pub fn pll_preference(cm: &Cprman, osc_hz: f64, bcm2711: bool, own_ctl: usize) -> Vec<PllId> {
     let idle = [PllId::A, PllId::C, PllId::D].into_iter().find(|&id| {
         let p = Pll::new(cm, id, osc_hz, bcm2711);
         !(p.is_powered() && p.is_locked()) || p.users(own_ctl).is_empty()
     });
     let shared = if bcm2711 { [PllId::C, PllId::A] } else { [PllId::A, PllId::C] };
-    idle.into_iter().chain(shared).collect()
+    let h = (!bcm2711).then_some(PllId::H);
+    idle.into_iter().chain(shared).chain(h).collect()
 }
 
 /// Fastest input planned for a BCM2835/6/7 clock generator (the firmware
@@ -424,11 +479,14 @@ pub fn max_gpclk_input_hz(bcm2711: bool) -> f64 {
 /// else uses (Hz), with its feedback pre-divider engaged. Retuned step by
 /// step and counted, PLLA locked from 0.4 GHz up to 2.8 GHz on a Raspberry
 /// Pi 2 (3.0 GHz failed) and to 3.0 GHz on a Zero 2 W (3.2 GHz failed),
-/// with or without the pre-divider. A tone modulated the Zero 2 W's PLLA
-/// equally cleanly from 0.73 to 2.91 GHz. (Linux keeps them within
-/// 0.6-2.4 GHz and engages the pre-divider above 1.75 GHz.) The
-/// pre-divider doubles the VCO per unit of the feedback divider, which
-/// halves the fraction the modulation sweeps.
+/// PLLH from 0.4 to 3.0 GHz on both without the pre-divider and from 0.8
+/// to 3.0 GHz with it; the pre-divider made no difference to PLLA. A tone
+/// modulated the Zero 2 W's PLLA equally cleanly from 0.73 to 2.91 GHz.
+/// (Linux keeps them within 0.6-2.4 GHz and engages the pre-divider above
+/// 1.75 GHz.) The pre-divider doubles the VCO per unit of the feedback
+/// divider, which halves the fraction the modulation sweeps: without it,
+/// from PLLH 25 FM carriers could not be modulated at ±100 kHz, with it
+/// every one PLLA reaches.
 pub const BCM283X_VCO_RANGE: (f64, f64) = (0.8e9, 2.6e9);
 
 /// The same for a running BCM2711 PLL, by its ANA1 VCO-range bits 13-14,
@@ -499,11 +557,17 @@ impl PllRoom {
         } else {
             MAX_PER_HZ
         };
+        if pll.is_bcm2711() && pll.id == PllId::H {
+            return PllRoom::unusable("does not exist on the BCM2711", max_per_hz);
+        }
         let running = pll.is_powered() && pll.is_locked();
         if pll.is_bcm2711() && !running {
             return PllRoom::unusable("is not running, and txengine starts PLLs on the BCM2835/6/7 only", max_per_hz);
         }
         let users = if running { pll.users(own_ctl) } else { PllUsers::default() };
+        if pll.id == PllId::H && !users.other.is_empty() {
+            return PllRoom::unusable("clocks the HDMI output", max_per_hz);
+        }
         let max_decrease = if users.gpu_only { max_change.max(GPU_PLL_MAX_DECREASE) } else { max_change };
         let engage_prediv = !pll.is_bcm2711() && users.is_empty();
         let fb = if engage_prediv { 2.0 } else { pll.fb_mult() };
@@ -561,7 +625,10 @@ impl PllRoom {
     }
 
     /// A planner's preference for `vco` on a PLL that nothing else uses: the
-    /// middle of its range, away from the edges.
+    /// middle of its range, away from the edges. (Near the bottom it would
+    /// divide little: PLLH kept near its 864 MHz, divided by 10 for
+    /// 87.6 MHz, put the phase noise 1 MHz out 10 dB above PLLA's, divided
+    /// by 26, on a Zero 2 W.)
     pub fn idle_score(&self, vco: f64) -> f64 {
         if self.users.is_empty() { (vco - (self.vco_min + self.vco_max) / 2.0).abs() / 1e9 } else { 0.0 }
     }
@@ -587,9 +654,9 @@ impl PllRoom {
             && self.vco_min / per as f64 > self.max_per_hz
         {
             return HalError::Config(format!(
-                "{}_PER, which also drives {}, runs at {:.0} MHz (/{per}), faster than the clock generator takes \
+                "{}, which also drives {}, runs at {:.0} MHz (/{per}), faster than the clock generator takes \
                  ({:.0} MHz); choose another --pll",
-                id.name(),
+                id.per_name(),
                 self.users.per.join(", "),
                 self.vco_old / per as f64 / 1e6,
                 self.max_per_hz / 1e6
@@ -647,7 +714,7 @@ impl Pll {
     /// Multiplier from crystal to VCO for one unit of NDIV (2 when the
     /// feedback pre-divider is engaged).
     pub fn fb_mult(&self) -> f64 {
-        if self.has_prediv && self.ana1() & ANA1_FB_PREDIV != 0 { 2.0 } else { 1.0 }
+        if self.has_prediv && self.ana1() & self.id.regs().prediv != 0 { 2.0 } else { 1.0 }
     }
 
     fn ana1(&self) -> u32 {
@@ -679,9 +746,10 @@ impl Pll {
     /// Other users of this PLL: enabled CM clocks selecting its PER channel
     /// (excluding `own_gpclk_ctl`), its CORE channels that clocks select,
     /// and its other enabled channels, which clock a display or camera
-    /// directly (DSI, CCP2), unless the firmware parked them at the largest
-    /// divider (256): on a Raspberry Pi 4, PLLA's DSI0 and CCP2 channels at
-    /// 12.7 MHz.
+    /// directly (DSI, CCP2, HDMI), unless the firmware parked them at the
+    /// largest divider (256): on a Raspberry Pi 4, PLLA's DSI0 and CCP2
+    /// channels at 12.7 MHz, on the Pi 2 and Zero 2 W without a display
+    /// PLLH's HDMI channels at 3.4 MHz.
     pub fn users(&self, own_gpclk_ctl: usize) -> PllUsers {
         let mut per_users = Vec::new();
         let mut other = Vec::new();
@@ -730,13 +798,21 @@ impl Pll {
     pub fn power_up(&self, ndiv: u32, frac: u32) -> Result<()> {
         let r = self.id.regs();
         self.cm.write(A2W_XOSC_CTRL, self.cm.read(A2W_XOSC_CTRL) | r.xosc_enable);
-        // Linux's loop filter settings (KI 2, KP 8, KA 2).
+        // Linux's loop filter settings (KI 2, KP 8, KA 2; PLLH: KI 2, KP 6,
+        // KA 2).
         let mut ana = [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i));
-        ana[1] = (ana[1] & !(ANA1_KI_MASK | ANA1_KP_MASK)) | (2 << ANA1_KI_SHIFT) | (8 << ANA1_KP_SHIFT);
-        if self.has_prediv {
-            ana[1] |= ANA1_FB_PREDIV;
+        if self.id == PllId::H {
+            ana[0] = (ana[0] & !(PLLH_ANA0_KA_MASK | PLLH_ANA0_KI_LOW_MASK))
+                | (2 << PLLH_ANA0_KA_SHIFT)
+                | (2 << PLLH_ANA0_KI_LOW_SHIFT);
+            ana[1] = (ana[1] & !(PLLH_ANA1_KI_HIGH_MASK | PLLH_ANA1_KP_MASK)) | (6 << PLLH_ANA1_KP_SHIFT);
+        } else {
+            ana[1] = (ana[1] & !(ANA1_KI_MASK | ANA1_KP_MASK)) | (2 << ANA1_KI_SHIFT) | (8 << ANA1_KP_SHIFT);
+            ana[3] = (ana[3] & !ANA3_KA_MASK) | (2 << ANA3_KA_SHIFT);
         }
-        ana[3] = (ana[3] & !ANA3_KA_MASK) | (2 << ANA3_KA_SHIFT);
+        if self.has_prediv {
+            ana[1] |= r.prediv;
+        }
         for i in (0..4).rev() {
             self.cm.write(r.ana0 + 4 * i, ana[i]);
         }
@@ -755,11 +831,11 @@ impl Pll {
     /// doubles its VCO until it is retuned) and wait for lock.
     pub fn engage_prediv(&self) -> Result<()> {
         let r = self.id.regs();
-        if !self.has_prediv || self.ana1() & ANA1_FB_PREDIV != 0 {
+        if !self.has_prediv || self.ana1() & r.prediv != 0 {
             return Ok(());
         }
         let mut ana = [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i));
-        ana[1] |= ANA1_FB_PREDIV;
+        ana[1] |= r.prediv;
         for i in (0..4).rev() {
             self.cm.write(r.ana0 + 4 * i, ana[i]);
         }
@@ -790,9 +866,16 @@ impl Pll {
         wait_until(TIMEOUT, &format!("{} lock", self.id.name()), || self.is_locked()).map(|_| ())
     }
 
-    /// Integral gain of the loop filter (ANA1 KI, 0-7).
+    /// Integral gain of the loop filter (0-7: ANA1 KI; PLLH's low two bits
+    /// in ANA0, its high bit in ANA1).
     pub fn loop_ki(&self) -> u32 {
-        (self.cm.read(self.id.regs().ana0 + 4) & ANA1_KI_MASK) >> ANA1_KI_SHIFT
+        let ana0 = self.id.regs().ana0;
+        if self.id == PllId::H {
+            ((self.cm.read(ana0) & PLLH_ANA0_KI_LOW_MASK) >> PLLH_ANA0_KI_LOW_SHIFT)
+                | ((self.cm.read(ana0 + 4) & PLLH_ANA1_KI_HIGH_MASK) << 2)
+        } else {
+            (self.cm.read(ana0 + 4) & ANA1_KI_MASK) >> ANA1_KI_SHIFT
+        }
     }
 
     /// Set the integral gain of the loop filter of a running PLL and wait
@@ -805,7 +888,12 @@ impl Pll {
         }
         let r = self.id.regs();
         let mut ana = [0, 1, 2, 3].map(|i| self.cm.read(r.ana0 + 4 * i));
-        ana[1] = (ana[1] & !ANA1_KI_MASK) | (ki << ANA1_KI_SHIFT);
+        if self.id == PllId::H {
+            ana[0] = (ana[0] & !PLLH_ANA0_KI_LOW_MASK) | ((ki & 3) << PLLH_ANA0_KI_LOW_SHIFT);
+            ana[1] = (ana[1] & !PLLH_ANA1_KI_HIGH_MASK) | (ki >> 2);
+        } else {
+            ana[1] = (ana[1] & !ANA1_KI_MASK) | (ki << ANA1_KI_SHIFT);
+        }
         for i in (0..4).rev() {
             self.cm.write(r.ana0 + 4 * i, ana[i]);
         }
@@ -834,10 +922,10 @@ impl Pll {
         let r = self.id.regs();
         self.cm.write(r.per, div & A2W_CHANNEL_DIV_MASK);
         let c = self.cm.read(r.cm);
-        self.cm.write(r.cm, c | PLL_LOADPER);
-        self.cm.write(r.cm, (c & !PLL_LOADPER) & !PLL_HOLDPER);
+        self.cm.write(r.cm, c | r.load_per);
+        self.cm.write(r.cm, (c & !r.load_per) & !r.hold_per);
         if self.per_divider() != Some(div) {
-            return Err(HalError::Hardware(format!("{}_PER divider read-back mismatch", self.id.name())));
+            return Err(HalError::Hardware(format!("{} divider read-back mismatch", self.id.per_name())));
         }
         Ok(())
     }
@@ -861,7 +949,7 @@ impl Pll {
     }
 
     fn channel_dividers(&self) -> [u32; 3] {
-        [0, 1, 2].map(|i| self.cm.read(self.id.other_channels()[i].1))
+        [0, 1, 2].map(|i| self.id.other_channels().get(i).map_or(0, |c| self.cm.read(c.1)))
     }
 
     /// Put the other channels' dividers back where they differ from
@@ -886,7 +974,7 @@ impl Pll {
         let now = self.config();
         let ctrl_mask = A2W_CTRL_NDIV_MASK | A2W_CTRL_PDIV_MASK | A2W_CTRL_PWRDN;
         let per_mask = A2W_CHANNEL_DIV_MASK | A2W_CHANNEL_DISABLE;
-        let cm_mask = PLL_ANARST | PLL_HOLDPER;
+        let cm_mask = PLL_ANARST | self.id.regs().hold_per;
         self.is_locked()
             && now.ctrl & ctrl_mask == good.ctrl & ctrl_mask
             && now.per & per_mask == good.per & per_mask
@@ -905,7 +993,7 @@ impl Pll {
             }
         }
         self.cm.write(r.ctrl, good.ctrl);
-        self.cm.write(r.cm, good.cm & !(PLL_ANARST | PLL_LOADPER));
+        self.cm.write(r.cm, good.cm & !(PLL_ANARST | r.load_per));
         if wait_until(Duration::from_millis(5), "PLL relock", || self.is_locked()).is_err() {
             // As Linux bcm2835_pll_on: reset, release, lock, then stop the
             // post-divider from being reset again.
@@ -918,8 +1006,8 @@ impl Pll {
         }
         self.cm.write(r.per, good.per);
         let c = self.cm.read(r.cm);
-        self.cm.write(r.cm, c | PLL_LOADPER);
-        self.cm.write(r.cm, c & !PLL_LOADPER);
+        self.cm.write(r.cm, c | r.load_per);
+        self.cm.write(r.cm, c & !r.load_per);
         self.restore_channels(&good.channels);
         if !self.matches(good) {
             return Err(HalError::Hardware(format!("{}: could not restore its configuration", self.id.name())));
@@ -932,8 +1020,8 @@ impl Pll {
         let r = self.id.regs();
         self.cm.write(r.per, s.per);
         let c = self.cm.read(r.cm);
-        self.cm.write(r.cm, c | PLL_LOADPER);
-        self.cm.write(r.cm, c & !PLL_LOADPER);
+        self.cm.write(r.cm, c | r.load_per);
+        self.cm.write(r.cm, c & !r.load_per);
         for i in (0..4).rev() {
             self.cm.write(r.ana0 + 4 * i, s.ana[i]);
         }

@@ -153,7 +153,8 @@ fn bcm_am_config(hw: &HardwareArgs) -> anyhow::Result<bcm::am::BcmAmConfig> {
         Some("a") => Some(PllId::A),
         Some("c") => Some(PllId::C),
         Some("d") => Some(PllId::D),
-        Some(other) => bail!("--pll {other}: AM uses a, c or d"),
+        Some("h") => Some(PllId::H),
+        Some(other) => bail!("--pll {other}: AM uses a, c, d or h"),
     };
     Ok(bcm::am::BcmAmConfig {
         carrier_hz: hw.freq_hz,
@@ -175,8 +176,9 @@ fn bcm_config(hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::Result<bcm::fm::
         Some("a") => Some(BcmMethod::Pll(PllId::A)),
         Some("c") => Some(BcmMethod::Pll(PllId::C)),
         Some("d") => Some(BcmMethod::Pll(PllId::D)),
+        Some("h") => Some(BcmMethod::Pll(PllId::H)),
         Some("clkdiv") => Some(BcmMethod::ClkDiv),
-        Some(other) => bail!("--pll {other}: use a, c, d or clkdiv"),
+        Some(other) => bail!("--pll {other}: use a, c, d, h or clkdiv"),
     };
     let pacer = match hw.pacer.as_deref() {
         Some("pcm") => Pacer::Pcm,
@@ -330,7 +332,7 @@ fn bcm_am_probe(plat: &Platform, hw: &HardwareArgs) -> anyhow::Result<()> {
         "Output:   GPIO{} via PWM{chan} (two pulses per carrier period, their widths' difference sets the amplitude)",
         cfg.gpio
     );
-    for id in [PllId::A, PllId::C, PllId::D] {
+    for &id in PllId::all(b.bcm2711) {
         let p = Pll::new(&cm, id, plat.osc_hz, b.bcm2711);
         print_pll(&p, bcm::regs::cm::PWM);
         match bcm::am::plan(&p, cfg.carrier_hz, plat.osc_hz, cfg.sample_rate, cfg.max_vco_change) {
@@ -397,7 +399,7 @@ fn bcm_probe(plat: &Platform, hw: &HardwareArgs, max_offset_hz: f64) -> anyhow::
             bcm::fm::describe_in_use(gpclk, hz)
         );
     }
-    for id in [PllId::A, PllId::C, PllId::D] {
+    for &id in PllId::all(b.bcm2711) {
         let p = Pll::new(&cm, id, osc, b.bcm2711);
         print_pll(&p, gp_ctl);
         match bcm::fm::plan_pll(&p, gpclk, cfg.carrier_hz, osc, cfg.max_offset_hz, cfg.max_vco_change) {

@@ -116,6 +116,7 @@ pub fn gpclk_in_use(cpr: &Cprman, gpclk: usize, osc_hz: f64, bcm2711: bool) -> O
         cm::SRC_PLLA_PER => per(PllId::A),
         cm::SRC_PLLC_PER => per(PllId::C),
         cm::SRC_PLLD_PER => per(PllId::D),
+        cm::SRC_PLLH_AUX if !bcm2711 => per(PllId::H),
         _ => None,
     };
     let div = cpr.read(cm::div(cm::gp(gpclk)));
@@ -212,8 +213,9 @@ impl BcmPlan {
     }
 }
 
-/// Loop filter integral gain (ANA1 KI) txengine sets on PLLA and PLLC of
-/// the BCM2836/7 while modulating them, instead of the firmware's KI 2.
+/// Loop filter integral gain (ANA1 KI) txengine sets on PLLA, PLLC and
+/// PLLH of the BCM2836/7 while modulating them, instead of the firmware's
+/// KI 2.
 ///
 /// The gain sets the loop bandwidth: about 125 kHz at KI 2, 600 kHz at KI 5
 /// (measured from the modulation response, each step ×1.5–1.9). At KI 2
@@ -228,16 +230,22 @@ impl BcmPlan {
 /// (its supply), the gain changes neither the noise nor anything else.
 /// PLLA and PLLC are the same design: at the same VCO frequency their
 /// responses agree within 0.01 dB at KI 2 and at KI 5, on both boards.
+/// PLLH, whose loop filter is laid out differently, behaves alike: on a
+/// Zero 2 W at 1752 MHz (with the pre-divider) the stereo subcarrier came
+/// out 0.38, 0.19 and 0.07 dB stronger at KI 2, 3 and 4 than at KI 5
+/// (uncompensated, the separation was 32 dB at KI 2); KI 6 raised the
+/// phase noise 600 kHz out by 5 dB, and KI 7 did not settle. KI 5 also
+/// lowered its noise 100 kHz out from -91 to -96 dBc/Hz.
 pub const MODULATION_KI: u32 = 5;
 
 /// The loop filter integral gain for modulating `pll`, if it differs from
-/// the PLL's current setting: PLLA and PLLC of the BCM2836/7. (PLLD, which
-/// clocks the UART and HDMI, has not been measured. The BCM2711's PLLC
-/// keeps the firmware's KI 2: on a Raspberry Pi 4 its response was flat
-/// within 0.04 dB up to 45 kHz, and single tones at 53 and 67 kHz within
-/// 0.15 dB.)
+/// the PLL's current setting: PLLA, PLLC and PLLH of the BCM2836/7. (PLLD,
+/// which clocks the UART and HDMI, has not been measured. The BCM2711's
+/// PLLC keeps the firmware's KI 2: on a Raspberry Pi 4 its response was
+/// flat within 0.04 dB up to 45 kHz, and single tones at 53 and 67 kHz
+/// within 0.15 dB.)
 pub fn modulation_ki(pll: &Pll) -> Option<u32> {
-    (matches!(pll.id, PllId::A | PllId::C) && !pll.is_bcm2711()).then_some(MODULATION_KI)
+    (matches!(pll.id, PllId::A | PllId::C | PllId::H) && !pll.is_bcm2711()).then_some(MODULATION_KI)
 }
 
 /// Highest carrier planned (Hz). Above about 400 MHz the clock generators'
@@ -366,8 +374,8 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
     let src = pll.vco_hz() / per as f64;
     if src > max_input {
         return Err(HalError::Config(format!(
-            "--pll clkdiv: {}_PER runs at {:.1} MHz, faster than the clock generators take ({:.0} MHz)",
-            pll.id.name(),
+            "--pll clkdiv: {} runs at {:.1} MHz, faster than the clock generators take ({:.0} MHz)",
+            pll.id.per_name(),
             src / 1e6,
             max_input / 1e6
         )));
@@ -376,9 +384,9 @@ pub fn plan_clkdiv(pll: &Pll, gpclk: usize, carrier: f64, max_offset: f64) -> Re
     // MASH 1 needs an integer part of at least 2.
     if !(2.0..4095.0).contains(&d) {
         return Err(HalError::Config(format!(
-            "{:.1} MHz from {}_PER ({:.1} MHz) needs divider {d:.3}, outside 2-4095",
+            "{:.1} MHz from {} ({:.1} MHz) needs divider {d:.3}, outside 2-4095",
             carrier / 1e6,
-            pll.id.name(),
+            pll.id.per_name(),
             src / 1e6
         )));
     }
@@ -447,6 +455,91 @@ const BCM2837_PLL_RESPONSE_DB: &[(f64, f64)] = &[
     (61e3, 0.06),
     (67e3, 0.075),
 ];
+
+/// The same for PLLH, `[BCM2836, BCM2837]`, planned idle (mid-range, with
+/// the pre-divider): measured at 1752 MHz on a Raspberry Pi 2 and a
+/// Zero 2 W against PLLA, two runs each alternating in one session, and
+/// taken as PLLA's table plus the difference, which the runs agree on
+/// within ±0.01 dB (the receiver's own response changed by up to 0.3 dB at
+/// 67 kHz between sessions, alike for both PLLs). Its loop lifts a little
+/// less than PLLA's: 0.04 dB less at 67 kHz on both. Compensated, the
+/// stereo subcarrier came out within 0.012 dB of PLLA's on both boards
+/// (1 kHz left only: separation 49.2 and 48.0 dB, from PLLA 50.4 and
+/// 49.5 dB).
+const PLLH_RESPONSE_DB: [&[(f64, f64)]; 2] = [
+    &[
+        (0.0, 0.0),
+        (15e3, 0.0),
+        (19e3, 0.005),
+        (23e3, 0.015),
+        (30e3, 0.015),
+        (38e3, 0.02),
+        (45e3, 0.035),
+        (53e3, 0.045),
+        (57e3, 0.05),
+        (61e3, 0.065),
+        (67e3, 0.08),
+    ],
+    &[(0.0, 0.0), (38e3, 0.0), (45e3, 0.015), (53e3, 0.015), (57e3, 0.01), (61e3, 0.02), (67e3, 0.03)],
+];
+
+/// The same for PLLH beside the composite video encoder, kept near its
+/// 864 MHz without the pre-divider, which halves the feedback division:
+/// the response droops slightly. Measured alike at 857.6 MHz for
+/// 107.2 MHz. (At 107.0 MHz PLLA's VCO lies 0.6 MHz from a
+/// multiple of 9.6 MHz, 29 kHz at the carrier, and PLLA read up to 0.03 dB
+/// high at 38 kHz with probe tones of ±5 kHz, not with ±20 kHz.)
+/// Compensated, the stereo subcarrier came out within 0.012 dB of PLLA's on
+/// both boards (separation 49.6-49.9 and 47.7 dB, from PLLA 51.5-51.9 and
+/// 48.8-48.9 dB).
+const PLLH_LOW_VCO_RESPONSE_DB: [&[(f64, f64)]; 2] = [
+    &[
+        (0.0, 0.0),
+        (10e3, 0.0),
+        (15e3, -0.005),
+        (30e3, -0.005),
+        (38e3, -0.02),
+        (45e3, -0.04),
+        (53e3, -0.04),
+        (57e3, -0.07),
+        (61e3, -0.085),
+        (67e3, -0.12),
+    ],
+    &[
+        (0.0, 0.0),
+        (10e3, -0.005),
+        (15e3, -0.01),
+        (19e3, -0.015),
+        (23e3, -0.02),
+        (30e3, -0.03),
+        (38e3, -0.045),
+        (45e3, -0.05),
+        (53e3, -0.065),
+        (57e3, -0.08),
+        (61e3, -0.08),
+        (67e3, -0.075),
+    ],
+];
+
+/// PLLH's VCO below which [`PLLH_LOW_VCO_RESPONSE_DB`] applies.
+const PLLH_LOW_VCO_HZ: f64 = 1.2e9;
+
+/// The measured modulation response of `id` on `soc` at `vco_hz`, with
+/// txengine's loop gain, retuned while running; empty where none was
+/// measured.
+fn pll_response_db(soc: Soc, id: PllId, vco_hz: f64) -> &'static [(f64, f64)] {
+    let chip = match soc {
+        Soc::Bcm2836 => 0,
+        Soc::Bcm2837 => 1,
+        _ => return &[],
+    };
+    match id {
+        PllId::A | PllId::C => [BCM2836_PLL_RESPONSE_DB, BCM2837_PLL_RESPONSE_DB][chip],
+        PllId::H if vco_hz < PLLH_LOW_VCO_HZ => PLLH_LOW_VCO_RESPONSE_DB[chip],
+        PllId::H => PLLH_RESPONSE_DB[chip],
+        PllId::D => &[],
+    }
+}
 
 /// The default sample rate is a multiple of this: an even multiple of the
 /// 19 kHz stereo pilot (190 kS/s on the Pi 2, 3 and Zero 2 W).
@@ -888,14 +981,26 @@ impl BcmFmTransmitter {
             }
             Some(fs) => fs,
             None => {
+                // The highest rate within 85 % of the capacity, but at
+                // least the lowest a multiplex takes (152 kS/s) while that
+                // is within 90 %: PLLH's fraction takes 179-182 k writes/s
+                // on a Zero 2 W, the edge for 152 kS/s by 85 %, and it ran
+                // as cleanly at 161.5 and 171 kS/s (90 and 95 %) as at 152.
+                let lowest = (150_000.0 / RATE_STEP).ceil() * RATE_STEP;
                 let fs = ((0.85 * capacity).min(250_000.0) / RATE_STEP).floor() * RATE_STEP;
-                if fs < 150_000.0 {
+                if fs >= lowest {
+                    fs
+                } else if lowest <= 0.9 * capacity {
+                    lowest
+                } else {
                     return Err(HalError::Hardware(format!(
-                        "the DMA engine sustains only {:.1} kS/s on this board; an FM multiplex needs at least 150 kS/s",
-                        capacity / 1e3
+                        "the DMA engine sustains only {:.1} kS/s on this board; an FM multiplex needs {:.1} \
+                         ({:.0} kS/s with 10 % to spare)",
+                        capacity / 1e3,
+                        lowest / 0.9 / 1e3,
+                        lowest / 1e3
                     )));
                 }
-                fs
             }
         };
         let pclock = plan_pacer(pclk_hz, target, min_rng, max_rng, max_clk)
@@ -963,7 +1068,7 @@ impl BcmFmTransmitter {
                 let ki = plan
                     .loop_ki
                     .map_or(String::new(), |k| format!(", loop KI {} -> {k}", pll.as_ref().map_or(0, |p| p.loop_ki())));
-                format!("{}_PER /{} -> GPCLK{gpclk} /{}{change}{ki}", id.name(), plan.per_div, plan.gp_div)
+                format!("{} /{} -> GPCLK{gpclk} /{}{change}{ki}", id.per_name(), plan.per_div, plan.gp_div)
             }
             BcmMethod::ClkDiv => format!(
                 "GPCLK{gpclk} fractional divider (MASH 1) from PLLD_PER {:.1} MHz",
@@ -1008,14 +1113,9 @@ impl BcmFmTransmitter {
             realtime: true,
             zero_order_hold: true,
             response_db: match plan.method {
-                // Only the configurations that were measured: PLLA or PLLC
-                // retuned while running, with txengine's loop gain.
-                BcmMethod::Pll(PllId::A | PllId::C) if !plan.power_up && plan.loop_ki == Some(MODULATION_KI) => {
-                    match bcm.soc {
-                        Soc::Bcm2836 => BCM2836_PLL_RESPONSE_DB.to_vec(),
-                        Soc::Bcm2837 => BCM2837_PLL_RESPONSE_DB.to_vec(),
-                        _ => Vec::new(),
-                    }
+                // Only the configurations that were measured.
+                BcmMethod::Pll(id) if !plan.power_up && plan.loop_ki == Some(MODULATION_KI) => {
+                    pll_response_db(bcm.soc, id, plan.vco_new).to_vec()
                 }
                 _ => Vec::new(),
             },
@@ -1743,7 +1843,7 @@ mod tests {
             max_increase: 0.0,
             max_per_hz: MAX_PER_HZ,
             unusable: None,
-            engage_prediv: false,
+            engage_prediv: true,
         }
     }
 
@@ -1783,7 +1883,7 @@ mod tests {
             max_increase: 0.03,
             max_per_hz: MAX_PER_HZ,
             unusable: None,
-            engage_prediv: true,
+            engage_prediv: false,
         }
     }
 
@@ -1934,6 +2034,75 @@ mod tests {
         assert_eq!((p.per_div, p.gp_div), (4, 2), "{p:?}");
         let e = plan_bcm2711(300.1e6, 10e3).unwrap_err().to_string();
         assert!(e.contains("at most 300 MHz") && e.contains("--harmonic 3"), "{e}");
+    }
+
+    /// PLLH as the firmware leaves it on a Raspberry Pi 2 or Zero 2 W
+    /// without a display: 864 MHz, its HDMI channels parked.
+    fn pllh_room() -> PllRoom {
+        PllRoom {
+            running: true,
+            users: PllUsers::default(),
+            vco_old: 864e6,
+            fb: 2.0,
+            per_choices: (1..=8).collect(),
+            per_now: Some(4),
+            vco_min: BCM283X_VCO_RANGE.0,
+            vco_max: BCM283X_VCO_RANGE.1,
+            max_decrease: 0.03,
+            max_increase: 0.03,
+            max_per_hz: MAX_PER_HZ,
+            unusable: None,
+            engage_prediv: true,
+        }
+    }
+
+    fn plan_h(carrier: f64, max_offset: f64) -> Result<BcmPlan> {
+        plan_in_room(&pllh_room(), PllId::H, None, 0, carrier, 19.2e6, max_offset, &[9.6e6])
+    }
+
+    /// From PLLH every FM carrier, clear of the spurs as far as PLLA is.
+    #[test]
+    fn pllh_reaches_the_fm_band() {
+        let mut stuck = 0;
+        for k in 8750..=10800 {
+            let f = k as f64 * 10e3;
+            let p = plan_h(f, 100e3).unwrap_or_else(|e| panic!("{f}: {e}"));
+            assert!((p.carrier_hz - f).abs() <= p.step_hz / 2.0 && p.max_offset_hz >= 100e3, "{f}: {p:?}");
+            assert!(p.engage_prediv && p.vco_new / p.per_div as f64 <= MAX_PER_HZ, "{f}: {p:?}");
+            stuck += (p.clearance_hz.unwrap() < 12.5e3) as u32;
+        }
+        assert!(stuck <= 6, "{stuck}");
+    }
+
+    /// Narrow-band FM channels up to 400 MHz: PLLH is not held to a room
+    /// around its frequency, as PLLA is.
+    #[test]
+    fn pllh_reaches_narrow_fm_bands_to_400_mhz() {
+        let bands: [(f64, f64, f64); _] = [
+            (26.965e6, 27.405e6, 10e3),
+            (29.51e6, 29.69e6, 10e3),
+            (51.0e6, 54.0e6, 20e3),
+            (69.9e6, 70.5e6, 12.5e3),
+            (144.0e6, 148.0e6, 12.5e3),
+            (148.0e6, 174.0e6, 12.5e3),
+            (222.0e6, 225.0e6, 20e3),
+            (225.0e6, 400.0e6, 100e3),
+        ];
+        let mut missed = Vec::new();
+        for (lo, hi, step) in bands {
+            let n = ((hi - lo) / step).round() as u32;
+            for k in 0..=n {
+                let f = lo + k as f64 * step;
+                match plan_h(f, 10e3) {
+                    Ok(p) => assert!((p.carrier_hz - f).abs() <= p.step_hz / 2.0 && p.gp_div >= MIN_DIVI, "{f}"),
+                    Err(_) => missed.push(f),
+                }
+            }
+        }
+        // Next to multiples of 38.4 MHz (the crystal, pre-divided) every
+        // division puts the fraction at a whole number.
+        assert!(missed.iter().all(|&f| ((f / 38.4e6).round() * 38.4e6 - f).abs() <= 100e3), "{missed:?}");
+        assert!(missed.len() <= 18, "{missed:?}");
     }
 
     /// The BCM2711's range bits, as measured.

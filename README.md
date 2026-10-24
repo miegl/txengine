@@ -659,21 +659,23 @@ frequency are milder (−50 to −60 dB) and not avoided.
 
 #### Raspberry Pi 2–4 and Zero 2 W (BCM283x, BCM2711)
 
-* **FM**: fractional-N modulation of PLLA, PLLC or PLLD (20-bit fraction,
-  1–4 Hz steps), or a dithered fractional clock divider (`--pll clkdiv`), at
-  190 kS/s (Pi 4: 228 kS/s). The PLL is chosen automatically: one that
-  nothing else uses, anywhere in the range the hardware takes (on the Pi 4
-  PLLC, whose outputs the firmware parks), else on the Pi 2/3 and Zero 2 W
-  PLLA, which only clocks the GPU's video and 3D blocks there and may
-  therefore move down by up to 25 % (12 % reach the whole FM band); PLLs
-  that clock the rest of the system (VPU, SD card, WiFi, UARTs) are only
-  retuned within ±3 %. On the Pi 2/3 and Zero 2 W, PLLA and PLLC run with a
-  wider loop than the firmware gives them (loop gain KI 5 instead of 2),
-  which removes most of their phase noise from the multiplex band. Carriers
-  up to 400 MHz, above which the clock generators' output fades, from 11 MHz
-  in wide-band FM and 1.1 MHz in narrow-band FM; on the Pi 4, whose clock
-  generators take at most 600 MHz, up to 300 MHz, from 9.1 and 0.8 MHz (see
-  [Hardware notes](#raspberry-pi-24-and-zero-2-w)).
+* **FM**: fractional-N modulation of PLLA, PLLC, PLLD or, on the Pi 2/3 and
+  Zero 2 W, PLLH, the HDMI PLL (20-bit fraction, 1–4 Hz steps), or a
+  dithered fractional clock divider (`--pll clkdiv`), at 190 kS/s (Pi 4:
+  228 kS/s). The PLL is chosen automatically: one that nothing else uses,
+  anywhere in the range the hardware takes (on the Pi 4 PLLC, whose outputs
+  the firmware parks), else on the Pi 2/3 and Zero 2 W PLLA, which only
+  clocks the GPU's video and 3D blocks there and may therefore move down by
+  up to 25 % (12 % reach the whole FM band); PLLs that clock the rest of the
+  system (VPU, SD card, WiFi, UARTs, composite video) are only retuned
+  within ±3 %. PLLH comes last, for the carriers the others cannot make
+  (most of 225–400 MHz). On the Pi 2/3 and Zero 2 W, PLLA, PLLC and PLLH run
+  with a wider loop than the firmware gives them (loop gain KI 5 instead of
+  2), which removes most of their phase noise from the multiplex band.
+  Carriers up to 400 MHz, above which the clock generators' output fades,
+  from 11 MHz in wide-band FM and 1.1 MHz in narrow-band FM; on the Pi 4,
+  whose clock generators take at most 600 MHz, up to 300 MHz, from 9.1 and
+  0.8 MHz (see [Hardware notes](#raspberry-pi-24-and-zero-2-w)).
 * **AM**: this PWM has no phase-correct mode. In mark-space mode it puts out
   one pulse at the start of each range period, so it runs two periods per
   carrier cycle with pulses of `P/4 − u` and `P/4 + u` clocks: their
@@ -766,9 +768,12 @@ txengine renders the samples on the computer; the firmware puts them out.
 
 * **DMA write rate:** a DMA write to a PLL's fractional register takes about
   4.3 µs (Pi 2, Zero 2 W, probably other BCM283x boards), which caps the
-  sample rate at about 231 kS/s. txengine measures the capacity at start-up
-  and picks the highest even multiple of 19 kHz within 85 % of it, 190 kS/s
-  (`--sample-rate` above the capacity is refused), and it watches the
+  sample rate at about 231 kS/s; to PLLH's it takes 5.4–5.6 µs (179–186 k
+  writes/s). txengine measures the capacity at start-up and picks the
+  highest even multiple of 19 kHz within 85 % of it, 190 kS/s, but no less
+  than 152 kS/s, the lowest a multiplex takes, while that is within 90 %
+  (PLLH: on a Zero 2 W it ran as cleanly at 161.5 and 171 kS/s, 90 and
+  95 %); `--sample-rate` above the capacity is refused, and it watches the
   achieved rate while running. The Pi 4's engine writes in about 1.5 µs
   (646 kS/s), so it runs at 228 kS/s, the highest such rate up to the
   250 kS/s txengine plans by default.
@@ -843,14 +848,41 @@ txengine renders the samples on the computer; the firmware puts them out.
   Retuned step by step and counted with the frequency counter, PLLA locked
   from 0.4 GHz up to 2.8 GHz on a Pi 2 and to 3.0 GHz on a Zero 2 W, with or
   without its feedback pre-divider (Linux keeps 0.6–2.4 GHz and engages it
-  above 1.75 GHz); a tone modulated the Zero 2 W's PLLA equally cleanly from
-  0.73 to 2.91 GHz. txengine uses 0.8–2.6 GHz with the pre-divider engaged,
-  which halves the fraction the modulation sweeps, and prefers the middle.
-  The clock generators were exact when fed up to 1.6–1.8 GHz; txengine feeds
-  them up to 1.5 GHz (the firmware up to 1 GHz). A PLL counts as used by a
-  clock that selects its PER channel or one of its CORE channels, and by a
-  display or camera channel unless the firmware parked it at the divider
-  256.
+  above 1.75 GHz), PLLH from 0.4 to 3.0 GHz; a tone modulated the Zero 2 W's
+  PLLA equally cleanly from 0.73 to 2.91 GHz. txengine uses 0.8–2.6 GHz with
+  the pre-divider engaged, which halves the fraction the modulation sweeps
+  (without it 25 FM carriers could not be modulated from PLLH), and prefers
+  the middle: kept near its 864 MHz, PLLH divided by 10 for 87.6 MHz, and
+  its phase noise 1 MHz out was 10 dB above PLLA's. The clock generators
+  were exact when fed up to 1.6–1.8 GHz; txengine feeds them up to 1.5 GHz
+  (the firmware up to 1 GHz). A PLL counts as used by a clock that selects
+  its PER channel or one of its CORE channels, and by a display or camera
+  channel unless the firmware parked it at the divider 256.
+* **PLLH, the HDMI PLL** (`--pll h`): the clock generators take its AUX
+  channel as a source. Without an HDMI display the firmware drives the
+  composite video output from it (`vec`, 108 MHz), on the Pi 2 and Zero 2 W
+  even with nothing connected, and txengine then keeps its divider and moves
+  it by 3 % at most: that leaves carriers within 3 % of 216 MHz divided by
+  2, 3, 4, … (104.8–111.2 MHz in the FM band). Freed of the composite output
+  (the encoder's clock stopped by hand for the test; the firmware's
+  `enable_tvout=0` should do the same, not tested), PLLH reaches every FM
+  carrier PLLA does and many more above 148 MHz: of 225–400 MHz on a 100 kHz
+  raster all but 9 of 1751 carriers (PLLA's room misses 190). The DMA engine
+  writes its fraction more slowly (above), so FM runs at 152 kS/s. With the
+  firmware's loop gain its loop lifts the multiplex band (at 1.75 GHz the
+  pilot read 1.3 % and RDS 6 % high, the stereo separation 32 dB); txengine
+  gives it PLLA's KI 5, which also lowered its phase noise 100 kHz out by
+  5 dB on a Zero 2 W to PLLA's (within 1 dB from 1 kHz to 1 MHz out on both
+  boards), and compensates its response, measured against PLLA's: idle
+  within +0.08 dB up to 67 kHz, beside the composite encoder (without the
+  pre-divider) down to −0.12 dB. Compensated, its stereo subcarrier came out
+  within 0.012 dB of PLLA's on both boards, idle and shared (separation
+  47.7–49.9 dB, from PLLA 48.8–51.9 dB in the same sessions). (Measured at
+  107.2 MHz: at 107.0 MHz PLLA's carrier lies 29 kHz from a point where it
+  makes a spur, and probe tones of ±5 kHz read its response at 38 kHz
+  0.03 dB high, those of ±20 kHz not.) txengine tries PLLH last. Narrow-band
+  FM at 145.5125 MHz measured as from PLLA: the tone's THD (−74.5 dB, PLLA
+  −76.2 dB), the SNR (58.4 dB) and the adjacent channel (−43 dB).
 * **Clock generators above 400 MHz:** a GPCLK passes 380 MHz like any
   lower carrier, but above about 400 MHz its output fades. Measured against
   the third harmonic of a carrier at a third of the frequency (a square

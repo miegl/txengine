@@ -74,6 +74,8 @@ pub mod cm {
     pub const SRC_PLLA_PER: u32 = 4;
     pub const SRC_PLLC_PER: u32 = 5;
     pub const SRC_PLLD_PER: u32 = 6;
+    /// PLLH's AUX channel (BCM2835/6/7: the HDMI PLL).
+    pub const SRC_PLLH_AUX: u32 = 7;
     // Additional sources of the VPU-type mux.
     pub const SRC_PLLC_CORE1: u32 = 8;
     pub const SRC_PLLC_CORE2: u32 = 9;
@@ -99,24 +101,33 @@ pub mod cm {
     pub const PLLA: usize = 0x104;
     pub const PLLC: usize = 0x108;
     pub const PLLD: usize = 0x10c;
+    pub const PLLH: usize = 0x110;
     pub const LOCK: usize = 0x114;
     pub const PLL_ANARST: u32 = 1 << 8;
     pub const PLL_HOLDPER: u32 = 1 << 7;
     pub const PLL_LOADPER: u32 = 1 << 6;
+    /// PLLH's channels load with these bits of CM_PLLH, and have no hold.
+    pub const PLLH_LOADRCAL: u32 = 1 << 2;
+    pub const PLLH_LOADAUX: u32 = 1 << 1;
+    pub const PLLH_LOADPIX: u32 = 1 << 0;
 
     pub const A2W_PLLA_ANA0: usize = 0x1010;
     pub const A2W_PLLC_ANA0: usize = 0x1030;
     pub const A2W_PLLD_ANA0: usize = 0x1050;
+    pub const A2W_PLLH_ANA0: usize = 0x1070;
     pub const A2W_XOSC_CTRL: usize = 0x1190;
     pub const A2W_PLLA_CTRL: usize = 0x1100;
     pub const A2W_PLLC_CTRL: usize = 0x1120;
     pub const A2W_PLLD_CTRL: usize = 0x1140;
+    pub const A2W_PLLH_CTRL: usize = 0x1160;
     pub const A2W_PLLA_FRAC: usize = 0x1200;
     pub const A2W_PLLC_FRAC: usize = 0x1220;
     pub const A2W_PLLD_FRAC: usize = 0x1240;
+    pub const A2W_PLLH_FRAC: usize = 0x1260;
     pub const A2W_PLLA_PER: usize = 0x1500;
     pub const A2W_PLLC_PER: usize = 0x1520;
     pub const A2W_PLLD_PER: usize = 0x1540;
+    pub const A2W_PLLH_AUX: usize = 0x1360;
     // Other PLL channels (for consumer detection).
     pub const A2W_PLLA_DSI0: usize = 0x1300;
     pub const A2W_PLLA_CORE: usize = 0x1400;
@@ -127,6 +138,8 @@ pub mod cm {
     pub const A2W_PLLD_DSI0: usize = 0x1340;
     pub const A2W_PLLD_CORE: usize = 0x1440;
     pub const A2W_PLLD_DSI1: usize = 0x1640;
+    pub const A2W_PLLH_RCAL: usize = 0x1460;
+    pub const A2W_PLLH_PIX: usize = 0x1560;
 
     pub const A2W_CTRL_NDIV_MASK: u32 = 0x3ff;
     pub const A2W_CTRL_PDIV_SHIFT: u32 = 12;
@@ -137,8 +150,9 @@ pub mod cm {
     pub const A2W_FRAC_MASK: u32 = (1 << 20) - 1;
     pub const A2W_CHANNEL_DISABLE: u32 = 1 << 8;
     pub const A2W_CHANNEL_DIV_MASK: u32 = 0xff;
-    /// ANA1 bit 14: feedback pre-divider (BCM2835/6/7 only).
+    /// ANA1 bit 14: feedback pre-divider (BCM2835/6/7 only; PLLH: bit 11).
     pub const ANA1_FB_PREDIV: u32 = 1 << 14;
+    pub const ANA1_PLLH_FB_PREDIV: u32 = 1 << 11;
     /// ANA1 bits 13-14 of the BCM2711 select the VCO's range.
     pub const ANA1_BCM2711_RANGE_LOW: u32 = 1 << 13;
     pub const ANA1_BCM2711_RANGE_WIDE: u32 = 1 << 14;
@@ -150,6 +164,16 @@ pub mod cm {
     pub const ANA1_KP_MASK: u32 = 0xf << 15;
     pub const ANA3_KA_SHIFT: u32 = 7;
     pub const ANA3_KA_MASK: u32 = 0x7 << 7;
+    /// PLLH's loop filter gains: KA and the low bits of KI in ANA0, the
+    /// high bit of KI and KP in ANA1. Linux and the firmware use KA 2,
+    /// KI 2, KP 6.
+    pub const PLLH_ANA0_KA_SHIFT: u32 = 19;
+    pub const PLLH_ANA0_KA_MASK: u32 = 0x7 << 19;
+    pub const PLLH_ANA0_KI_LOW_SHIFT: u32 = 22;
+    pub const PLLH_ANA0_KI_LOW_MASK: u32 = 0x3 << 22;
+    pub const PLLH_ANA1_KI_HIGH_MASK: u32 = 1;
+    pub const PLLH_ANA1_KP_SHIFT: u32 = 1;
+    pub const PLLH_ANA1_KP_MASK: u32 = 0xf << 1;
 }
 
 /// Pad control (drive strength) of the GPIO banks.

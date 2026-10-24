@@ -124,9 +124,10 @@ pub struct HardwareArgs {
     #[arg(long, help_heading = "Raspberry Pi")]
     pub force_gpclk: bool,
     /// PLL that makes the carrier: in WFM and NFM the one to modulate (Pi
-    /// 1-4: a, c, d, or "clkdiv" to modulate the clock divider instead; Pi
-    /// 5: audio, video); in AM on the Pi 1-4 the one that clocks the PWM (a,
-    /// c, d).
+    /// 1-4: a, c, d, on the Pi 2, 3 and Zero 2 W also h, the HDMI PLL, or
+    /// "clkdiv" to modulate the clock divider instead; Pi 5: audio, video);
+    /// in AM on the Pi 1-4 the one that clocks the PWM (a, c, d, and h but
+    /// on the Pi 4).
     #[arg(long, help_heading = "Raspberry Pi")]
     pub pll: Option<String>,
     /// Transmit on the Nth harmonic of the carrier the hardware makes (FM

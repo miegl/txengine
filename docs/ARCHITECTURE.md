@@ -332,7 +332,8 @@ follow its width as the fundamental does.
 
 ### Raspberry Pi 1-4 (BCM283x, BCM2711)
 
-* The carrier is a PLL (A, C or D) → PER divider → GPCLK → GPIO, or a GPCLK
+* The carrier is a PLL (A, C or D, or on the BCM2835/6/7 H, the HDMI PLL,
+  through its AUX channel) → PER divider → GPCLK → GPIO, or a GPCLK
   fractional divider from PLLD (`clkdiv`). Clock generators divide by at
   least 2 (`cprman::MIN_DIVI`): set to 1, GPCLK0 and the PWM clock divide
   by 4096, from any source (measured). GPCLK2 has no MASH control and no
@@ -362,10 +363,25 @@ follow its width as the fundamental does.
   the BCM2835/6/7 0.8–2.6 GHz with the feedback pre-divider engaged
   (`cprman::BCM283X_VCO_RANGE`; PLLA locked from 0.4 to 2.8–3.0 GHz with
   or without it, where Linux keeps 0.6–2.4 GHz and engages it above
-  1.75 GHz), which halves the fraction the modulation sweeps. A PLL
+  1.75 GHz), which halves the fraction the modulation sweeps (from PLLH
+  without it 25 FM carriers could not be modulated at ±100 kHz). A PLL
   that is started gets Linux's loop settings. The clock generators take at
   most 1.5 GHz (`cprman::MAX_PER_HZ`; they were exact up to 1.6–1.8 GHz).
-  Otherwise, on the BCM2836/7, PLLA, then PLLC (`cprman::pll_preference`).
+  Otherwise, on the BCM2836/7, PLLA, then PLLC, then PLLH
+  (`cprman::pll_preference`).
+* PLLH is shared too where the firmware runs the composite video encoder
+  from its AUX channel (`vec`, at 108 MHz: the Pi 2 and Zero 2 W without a
+  display); txengine then keeps its divider and moves it by 3 % at most. Its
+  fraction takes the DMA engine's writes more slowly (179–181 k/s on a
+  Zero 2 W, 183–186 k/s on a Pi 2, PLLA 228–231 k/s: 152 kS/s for FM). It
+  gets PLLA's loop gain (KI 5; at the firmware's KI 2 it lifted the stereo
+  subcarrier by 0.4 dB) and its own measured response
+  (`fm::PLLH_RESPONSE_DB`, and `PLLH_LOW_VCO_RESPONSE_DB` near 864 MHz
+  without the pre-divider, where it droops slightly; measured against
+  PLLA's, with which its stereo subcarrier then agrees within 0.012 dB). It
+  comes last in the preference, for the carriers the others cannot make, and
+  reaches more of them: of 225–400 MHz all but 9 of 1751 carriers, where
+  PLLA's room misses 190.
 * The BCM2711 (Pi 4) differs. Its firmware runs the VCOs at 2.6–3.25 GHz
   without a feedback pre-divider: ANA1 bits 13–14 select a VCO range
   instead, set differently on each PLL. txengine leaves them and plans
@@ -419,9 +435,11 @@ follow its width as the fundamental does.
   writes/s on the Pi 2 and the Zero 2 W, 646 k on the Pi 4), so the sample
   rate is chosen from a measurement at start-up: the highest even multiple
   of 19 kHz within 85 % of it and at most 250 kS/s (`fm::RATE_STEP`; the
-  Pi 4: 228 kS/s), which puts the images of the hold onto
-  harmonics of 19 kHz, where a switching stereo decoder makes no tones of
-  them. The achieved rate is checked continuously.
+  Pi 4: 228 kS/s), but no less than the lowest a multiplex takes, 152 kS/s,
+  while that is within 90 % (PLLH, whose fraction takes 179–186 k writes/s,
+  ran as cleanly at 90 and 95 % as at 84 %), which puts the images of the
+  hold onto harmonics of 19 kHz, where a switching stereo decoder makes no
+  tones of them. The achieved rate is checked continuously.
 * The PLL registers sit behind the slow A2W bus, which the firmware also
   uses to change the ARM clock (PLLB). If a firmware write meets one of the
   DMA engine's, it lands in the modulated PLL's registers instead (PLLB's
